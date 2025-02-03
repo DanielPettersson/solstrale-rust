@@ -98,7 +98,7 @@ pub fn scene_benchmark(c: &mut Criterion) {
 }
 
 #[derive(Constructor, Display)]
-#[display(fmt = "{} {}", num_triangles, use_bvh)]
+#[display("{} {}", num_triangles, use_bvh)]
 struct BvhInput {
     num_triangles: u32,
     use_bvh: bool,

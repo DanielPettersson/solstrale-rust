@@ -80,12 +80,12 @@ pub struct ContainerPdf<'a> {
 impl<'a> ContainerPdf<'a> {
     #![allow(clippy::new_ret_no_self)]
     /// Creates a new instance of ContainerPdf
-    pub fn new(objects: &'a [Hittables], origin: Vec3) -> Pdfs {
+    pub fn new(objects: &'a [Hittables], origin: Vec3) -> Pdfs<'a> {
         Pdfs::from(ContainerPdf { objects, origin })
     }
 }
 
-impl<'a> Pdf for ContainerPdf<'a> {
+impl Pdf for ContainerPdf<'_> {
     fn value(&self, direction: Vec3) -> f64 {
         let sum: f64 = self
             .objects

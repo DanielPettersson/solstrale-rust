@@ -1,5 +1,5 @@
 use std::fmt;
-
+use std::fmt::Display;
 use derive_more::Display;
 
 use crate::geo::Aabb;

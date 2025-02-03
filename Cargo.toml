@@ -20,13 +20,13 @@ codegen-units = 1
 debug = 1
 
 [dependencies]
-fastrand = "2.1.1"
-image = "0.25.2"
+fastrand = "2.3.0"
+image = "0.25.5"
 simple-error = "0.3.1"
 enum_dispatch = "0.3.13"
-tobj = "4.0.2"
-oidn = { git = "https://github.com/Twinklebear/oidn-rs.git", branch = "master", optional = true }
-derive_more = { version = "1.0.0", features = ["constructor", "display"] }
+tobj = "4.0.3"
+oidn = { version = "2.2.4", optional = true }
+derive_more = { version = "2.0.0", features = ["constructor", "display"] }
 rayon = "1.10.0"
 
 [dev-dependencies]
