@@ -35,7 +35,7 @@ pub trait Hittable {
     }
 
     /// Check if the given ray hits the hittable within the interval
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit>;
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>>;
 
     /// Create a bounding box that contains the hittable
     fn bounding_box(&self) -> &Aabb;

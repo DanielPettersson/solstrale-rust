@@ -147,7 +147,7 @@ impl Hittable for Quad {
         p - origin
     }
 
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit> {
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
         let denom = self.normal.dot(r.direction);
 
         // No hit if the ray is parallel to the plane

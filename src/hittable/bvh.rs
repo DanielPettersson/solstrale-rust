@@ -35,7 +35,7 @@ impl Display for BvhItem {
 }
 
 impl BvhItem {
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit> {
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
         match self {
             BvhItem::Node(i) => i.hit(r, ray_length),
             BvhItem::Leaf(i) => i.hit(r, ray_length),
@@ -162,7 +162,7 @@ fn sort_hittables_by_center(list: &mut [Hittables], center: f64, axis: u8) -> us
 }
 
 impl Hittable for Bvh {
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit> {
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
         if !self.b_box.hit(r) {
             return None;
         }

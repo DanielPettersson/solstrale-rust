@@ -61,7 +61,7 @@ impl Hittable for Sphere {
         uvw.local(random_to_sphere(self.radius, direction.length_squared()))
     }
 
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit> {
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
         let oc = r.origin - self.center;
         let a = r.direction.length_squared();
         let half_b = oc.dot(r.direction);

@@ -32,7 +32,7 @@ impl ConstantMedium {
 }
 
 impl Hittable for ConstantMedium {
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit> {
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
         match self.boundary.hit(r, &UNIVERSE_INTERVAL) {
             None => None,
             Some(rec1) => {

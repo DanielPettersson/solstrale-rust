@@ -116,7 +116,7 @@ impl Hittable for Triangle {
         p - origin
     }
 
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit> {
+    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
         let p_vec = r.direction.cross(self.v0v2);
         let det = self.v0v1.dot(p_vec);
 
