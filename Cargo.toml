@@ -28,6 +28,9 @@ tobj = "4.0.3"
 oidn = { version = "2.3.3", optional = true }
 derive_more = { version = "2.0.1", features = ["constructor", "display"] }
 rayon = "1.11.0"
+bytemuck = "1.24.0"
+pollster = "0.4.0"
+wgpu = "27.0.1"
 
 [dev-dependencies]
 image-compare = "0.5.0"

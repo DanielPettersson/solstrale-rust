@@ -4,12 +4,12 @@ use image::RgbImage;
 use std::error::Error;
 
 #[derive(Clone)]
-/// A post processor that does nothing
+/// A post-processor that does nothing
 pub struct NopPostProcessor();
 
 impl NopPostProcessor {
     #![allow(clippy::new_ret_no_self)]
-    /// Create a new nop post processor
+    /// Create a new nop post-processor
     pub fn new() -> PostProcessors {
         PostProcessors::from(NopPostProcessor())
     }
