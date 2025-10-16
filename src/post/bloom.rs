@@ -18,10 +18,15 @@ pub struct BloomPostProcessor {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct Bloom {
-    width: u32,
+struct BloomFilterBrightConfig {
     threshold: f32,
     max_intensity: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct BloomApplyConfig {
+    width: u32,
     x_dir: i32,
     y_dir: i32,
 }
@@ -96,25 +101,12 @@ impl PostProcessor for BloomPostProcessor {
         let kernel_size = (self.kernel_size_fraction * width as f64) as usize * 2 + 1;
         let weights = create_gaussian_blur_weights(kernel_size, kernel_size as f32 / 5.);
 
-        // We first initialize a wgpu `Instance`, which contains any "global" state wgpu needs.
-        //
-        // This is what loads the vulkan/dx12/metal/opengl libraries.
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
 
-        // We then create an `Adapter` which represents a physical gpu in the system. It allows
-        // us to query information about it and create a `Device` from it.
-        //
-        // This function is asynchronous in WebGPU, so request_adapter returns a future. On native/webgl
-        // the future resolves immediately, so we can block on it without harm.
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .expect("Failed to create adapter");
 
-        // Print out some basic information about the adapter.
-        println!("Running on Adapter: {:#?}", adapter.get_info());
-
-        // Check to see if the adapter supports compute shaders. While WebGPU guarantees support for
-        // compute shaders, wgpu supports a wider range of devices through the use of "downlevel" devices.
         let downlevel_capabilities = adapter.get_downlevel_capabilities();
         if !downlevel_capabilities
             .flags
@@ -123,10 +115,6 @@ impl PostProcessor for BloomPostProcessor {
             panic!("Adapter does not support compute shaders");
         }
 
-        // We then create a `Device` and a `Queue` from the `Adapter`.
-        //
-        // The `Device` is used to create and manage GPU resources.
-        // The `Queue` is a queue used to submit work for the GPU to process.
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
@@ -137,19 +125,9 @@ impl PostProcessor for BloomPostProcessor {
         }))
         .expect("Failed to create device");
 
-        let module = device.create_shader_module(wgpu::include_wgsl!("bloom.wgsl"));
-
-        let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::bytes_of(&Bloom {
-                width,
-                threshold: threshold as f32,
-                max_intensity: max_intensity as f32,
-                x_dir: 0,
-                y_dir: 1,
-            }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let bloom_apply_module = device.create_shader_module(wgpu::include_wgsl!("bloom_apply.wgsl"));
+        let bloom_filter_bright_module = device.create_shader_module(wgpu::include_wgsl!("bloom_filter_bright.wgsl"));
+        let bloom_add_module = device.create_shader_module(wgpu::include_wgsl!("bloom_add.wgsl"));
 
         let weights_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
@@ -162,6 +140,20 @@ impl PostProcessor for BloomPostProcessor {
             label: None,
             contents: bytemuck::cast_slice(&input_pixels),
             usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let intermediate_buffer1 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: input_pixels_buffer.size(),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let intermediate_buffer2 = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: input_pixels_buffer.size(),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
         });
 
         let output_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -178,16 +170,16 @@ impl PostProcessor for BloomPostProcessor {
             mapped_at_creation: false,
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bloom_apply_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
-                // Input buffer
+                // Config buffer
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        min_binding_size: Some(NonZeroU64::new(size_of::<Bloom>() as u64).unwrap()),
+                        min_binding_size: Some(NonZeroU64::new(size_of::<BloomApplyConfig>() as u64).unwrap()),
                         has_dynamic_offset: false,
                     },
                     count: None,
@@ -228,13 +220,131 @@ impl PostProcessor for BloomPostProcessor {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bloom_filter_bright_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            layout: &bind_group_layout,
+            entries: &[
+                // Config buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        min_binding_size: Some(NonZeroU64::new(size_of::<BloomFilterBrightConfig>() as u64).unwrap()),
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                },
+                // Input pixels buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        min_binding_size: Some(NonZeroU64::new(16).unwrap()),
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                },
+                // Output pixels buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        min_binding_size: Some(NonZeroU64::new(16).unwrap()),
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bloom_add_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                // Input pixels buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        min_binding_size: Some(NonZeroU64::new(16).unwrap()),
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                },
+                // Bloom pixels buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        min_binding_size: Some(NonZeroU64::new(16).unwrap()),
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                },
+
+                // Output pixels buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        min_binding_size: Some(NonZeroU64::new(16).unwrap()),
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bloom_filter_bright_config_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&BloomFilterBrightConfig {
+                threshold: threshold as f32,
+                max_intensity: max_intensity as f32,
+            }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let bloom_filter_bright_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bloom_filter_bright_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: input_buffer.as_entire_binding(),
+                    resource: bloom_filter_bright_config_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: input_pixels_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: intermediate_buffer1.as_entire_binding(),
+                },
+            ],
+        });
+
+        // First pass: horizontal (x_dir = 1, y_dir = 0)
+        let bloom_apply_config_buffer_x = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&BloomApplyConfig {
+                width,
+                x_dir: 1,
+                y_dir: 0,
+            }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let bloom_apply_bind_group_x = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bloom_apply_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bloom_apply_config_buffer_x.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -242,25 +352,108 @@ impl PostProcessor for BloomPostProcessor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: input_pixels_buffer.as_entire_binding(),
+                    resource: intermediate_buffer1.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: intermediate_buffer2.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Second pass: vertical (x_dir = 0, y_dir = 1)
+        let bloom_apply_config_buffer_y = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&BloomApplyConfig {
+                width,
+                x_dir: 0,
+                y_dir: 1,
+            }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let bloom_apply_bind_group_y = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bloom_apply_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bloom_apply_config_buffer_y.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: weights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: intermediate_buffer2.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: intermediate_buffer1.as_entire_binding(),
+                },
+            ],
+        });
+
+        let bloom_add_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bloom_add_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_pixels_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: intermediate_buffer1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
                     resource: output_pixels_buffer.as_entire_binding(),
                 },
             ],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let bloom_apply_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&bloom_apply_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let bloom_filter_bright_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            layout: Some(&pipeline_layout),
-            module: &module,
+            bind_group_layouts: &[&bloom_filter_bright_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let bloom_add_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bloom_add_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let bloom_apply_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: Some(&bloom_apply_pipeline_layout),
+            module: &bloom_apply_module,
+            entry_point: Some("bloom"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let bloom_filter_bright_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: Some(&bloom_filter_bright_pipeline_layout),
+            module: &bloom_filter_bright_module,
+            entry_point: Some("bloom"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let bloom_add_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: Some(&bloom_add_pipeline_layout),
+            module: &bloom_add_module,
             entry_point: Some("bloom"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
@@ -269,17 +462,51 @@ impl PostProcessor for BloomPostProcessor {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-
         let workgroup_count = pixel_colors.len().div_ceil(64);
-        compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
 
-        drop(compute_pass);
+        // Filter bright-pass
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&bloom_filter_bright_pipeline);
+            compute_pass.set_bind_group(0, &bloom_filter_bright_bind_group, &[]);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
+
+        // First apply-pass (horizontal)
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&bloom_apply_pipeline);
+            compute_pass.set_bind_group(0, &bloom_apply_bind_group_x, &[]);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
+
+        // Second apply-pass (vertical)
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&bloom_apply_pipeline);
+            compute_pass.set_bind_group(0, &bloom_apply_bind_group_y, &[]);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
+
+        // Add-pass
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&bloom_add_pipeline);
+            compute_pass.set_bind_group(0, &bloom_add_bind_group, &[]);
+            compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+        }
 
         encoder.copy_buffer_to_buffer(
             &output_pixels_buffer,

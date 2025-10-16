@@ -1,13 +1,11 @@
-struct Bloom {
+struct Config {
     width: u32,
-    threshold: f32,
-    max_intensity: f32,
     x_dir: i32,
     y_dir: i32
 }
 
 @group(0) @binding(0)
-var<storage, read> input: Bloom;
+var<storage, read> config: Config;
 
 @group(0) @binding(1)
 var<storage, read> weights: array<f32>;
@@ -33,25 +31,14 @@ fn bloom(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var i: u32 = 0; i < num_weights; i++) {
         let index = get_index(
                         curr_index,
-                        (i32(i) - half_num_weights) * input.x_dir,
-                        (i32(i) - half_num_weights) * input.y_dir,
-                        input.width,
+                        (i32(i) - half_num_weights) * config.x_dir,
+                        (i32(i) - half_num_weights) * config.y_dir,
+                        config.width,
                         num_pixels);
-        ret += get_bloom_color(input_pixels[index], input.threshold, input.max_intensity) * weights[i];
+        ret += input_pixels[index] * weights[i];
     }
 
-    output_pixels[curr_index] = ret + input_pixels[curr_index];
-}
-
-fn get_bloom_color(col: vec3<f32>, threshold: f32, max_intensity: f32) -> vec3<f32> {
-    let len = length(col);
-    if (len >= threshold) {
-        if (len > max_intensity) {
-            return col * (max_intensity / len);
-        }
-        return col;
-    }
-    return vec3(0.0);
+    output_pixels[curr_index] = ret;
 }
 
 fn get_index(curr_index: u32, dx: i32, dy: i32, width: u32, num_pixels: u32) -> u32 {
