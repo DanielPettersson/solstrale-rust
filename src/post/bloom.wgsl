@@ -30,11 +30,11 @@ fn bloom(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var ret = vec3(0.0);
     for (var i: u32 = 0; i < num_weights; i++) {
         let index = get_index(curr_index, i32(i) - half_num_weights, 0, input.width, num_pixels);
-        ret += input_pixels[index] * weights[i];
+        ret += get_bloom_color(input_pixels[index], input.threshold, input.max_intensity) * weights[i];
     }
     for (var i: u32 = 0; i < num_weights; i++) {
         let index = get_index(curr_index, 0, i32(i) - half_num_weights, input.width, num_pixels);
-        ret += input_pixels[index] * weights[i];
+        ret += get_bloom_color(input_pixels[index], input.threshold, input.max_intensity) * weights[i];
     }
 
     output_pixels[curr_index] = ret + input_pixels[curr_index];
@@ -42,7 +42,7 @@ fn bloom(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 fn get_bloom_color(col: vec3<f32>, threshold: f32, max_intensity: f32) -> vec3<f32> {
     let len = length(col);
-    if (len > threshold) {
+    if (len >= threshold) {
         if (len > max_intensity) {
             return col * (max_intensity / len);
         }
