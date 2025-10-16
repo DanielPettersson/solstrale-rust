@@ -22,6 +22,8 @@ struct Bloom {
     width: u32,
     threshold: f32,
     max_intensity: f32,
+    x_dir: i32,
+    y_dir: i32,
 }
 
 impl BloomPostProcessor {
@@ -143,6 +145,8 @@ impl PostProcessor for BloomPostProcessor {
                 width,
                 threshold: threshold as f32,
                 max_intensity: max_intensity as f32,
+                x_dir: 0,
+                y_dir: 1,
             }),
             usage: wgpu::BufferUsages::STORAGE,
         });
@@ -153,7 +157,7 @@ impl PostProcessor for BloomPostProcessor {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        let input_pixels: Vec<[f32; 3]> = pixel_colors.iter().map(|p| p.into()).collect();
+        let input_pixels: Vec<[f32; 4]> = pixel_colors.iter().map(|p| p.into()).collect();
         let input_pixels_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&input_pixels),
@@ -291,7 +295,7 @@ impl PostProcessor for BloomPostProcessor {
         buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let data = buffer_slice.get_mapped_range();
-        let result: &[[f32; 3]] = bytemuck::cast_slice(&data);
+        let result: &[[f32; 4]] = bytemuck::cast_slice(&data);
 
         Ok(result.par_iter().map(|d| d.into()).collect())
     }

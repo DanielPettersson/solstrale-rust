@@ -233,21 +233,20 @@ impl Div<f64> for Vec3 {
     }
 }
 
-impl From<Vec3> for [f32; 3] {
+impl From<Vec3> for [f32; 4] {
     fn from(value: Vec3) -> Self {
-        [value.x as f32, value.y as f32, value.z as f32]
+        [value.x as f32, value.y as f32, value.z as f32, 0.0]
     }
 }
 
-
-impl From<&Vec3> for [f32; 3] {
+impl From<&Vec3> for [f32; 4] {
     fn from(value: &Vec3) -> Self {
-        [value.x as f32, value.y as f32, value.z as f32]
+        [value.x as f32, value.y as f32, value.z as f32, 0.0]
     }
 }
 
-impl From<&[f32; 3]> for Vec3 {
-    fn from(value: &[f32; 3]) -> Self {
+impl From<&[f32; 4]> for Vec3 {
+    fn from(value: &[f32; 4]) -> Self {
         Vec3::new(value[0] as f64, value[1] as f64, value[2] as f64)
     }
 }
@@ -502,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_from() {
-        let array: [f32; 3] = Vec3::new(1., 2., 3.).into();
-        assert_eq!(array, [1., 2., 3.]);
+        let array: [f32; 4] = Vec3::new(1., 2., 3.).into();
+        assert_eq!(array, [1., 2., 3., 0.]);
     }
 }

@@ -1,7 +1,9 @@
 struct Bloom {
     width: u32,
     threshold: f32,
-    max_intensity: f32
+    max_intensity: f32,
+    x_dir: i32,
+    y_dir: i32
 }
 
 @group(0) @binding(0)
@@ -29,11 +31,12 @@ fn bloom(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var ret = vec3(0.0);
     for (var i: u32 = 0; i < num_weights; i++) {
-        let index = get_index(curr_index, i32(i) - half_num_weights, 0, input.width, num_pixels);
-        ret += get_bloom_color(input_pixels[index], input.threshold, input.max_intensity) * weights[i];
-    }
-    for (var i: u32 = 0; i < num_weights; i++) {
-        let index = get_index(curr_index, 0, i32(i) - half_num_weights, input.width, num_pixels);
+        let index = get_index(
+                        curr_index,
+                        (i32(i) - half_num_weights) * input.x_dir,
+                        (i32(i) - half_num_weights) * input.y_dir,
+                        input.width,
+                        num_pixels);
         ret += get_bloom_color(input_pixels[index], input.threshold, input.max_intensity) * weights[i];
     }
 
