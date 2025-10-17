@@ -84,46 +84,16 @@ impl PostProcessor for OidnPostProcessor {
 
 #[cfg(not(feature = "oidn-postprocessor"))]
 impl PostProcessor for OidnPostProcessor {
-    fn post_process(
-        &self,
-        pixel_colors: &[Vec3],
-        albedo_colors: &[Vec3],
-        normal_colors: &[Vec3],
-        width: u32,
-        height: u32,
-        num_samples: u32,
-    ) -> Result<image::RgbImage, Box<dyn Error>> {
-        crate::post::nop::NopPostProcessor::new().post_process(
-            pixel_colors,
-            albedo_colors,
-            normal_colors,
-            width,
-            height,
-            num_samples,
-        )
-    }
-
     fn intermediate_post_process(
         &self,
         pixel_colors: &[Vec3],
-        albedo_colors: &[Vec3],
-        normal_colors: &[Vec3],
-        width: u32,
-        height: u32,
-        num_samples: u32,
+        _albedo_colors: &[Vec3],
+        _normal_colors: &[Vec3],
+        _width: u32,
+        _height: u32,
+        _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        crate::post::nop::NopPostProcessor::new().intermediate_post_process(
-            pixel_colors,
-            albedo_colors,
-            normal_colors,
-            width,
-            height,
-            num_samples,
-        )
-    }
-
-    fn needs_albedo_and_normal_colors(&self) -> bool {
-        false
+        Ok(Vec::from(pixel_colors))
     }
 }
 

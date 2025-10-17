@@ -26,8 +26,4 @@ impl PostProcessor for NopPostProcessor {
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
         Ok(Vec::from(pixel_colors))
     }
-
-    fn needs_albedo_and_normal_colors(&self) -> bool {
-        false
-    }
 }

@@ -1,11 +1,17 @@
-use rayon::iter::ParallelIterator;
 use crate::geo::vec3::Vec3;
 use crate::post::{PostProcessor, PostProcessors};
-use std::error::Error;
+#[cfg(feature = "gpu")]
+use crate::util::wgpu_util::{
+    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
+    compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
+};
 use rayon::iter::IntoParallelRefIterator;
-use wgpu::BufferUsages;
+use rayon::iter::ParallelIterator;
+use std::error::Error;
+#[cfg(feature = "gpu")]
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use crate::util::wgpu_util::{add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry, compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue};
+#[cfg(feature = "gpu")]
+use wgpu::BufferUsages;
 
 #[derive(Clone)]
 /// Applies a saturation effect on the pixel colors
@@ -31,6 +37,7 @@ impl SaturationPostProcessor {
     }
 }
 
+#[cfg(feature = "gpu")]
 impl PostProcessor for SaturationPostProcessor {
     #[allow(clippy::needless_range_loop)]
     fn intermediate_post_process(
@@ -42,13 +49,11 @@ impl PostProcessor for SaturationPostProcessor {
         _height: u32,
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
         let (device, queue) = get_wgpu_device_and_queue();
 
-        let module =
-            device.create_shader_module(wgpu::include_wgsl!("saturation.wgsl"));
+        let module = device.create_shader_module(wgpu::include_wgsl!("saturation.wgsl"));
 
         let input_pixels_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
@@ -95,12 +100,7 @@ impl PostProcessor for SaturationPostProcessor {
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         let workgroup_count = pixel_colors.len().div_ceil(64) as u32;
-        add_compute_pass(
-            &mut encoder,
-            &pipeline,
-            &bind_group,
-            workgroup_count,
-        );
+        add_compute_pass(&mut encoder, &pipeline, &bind_group, workgroup_count);
         add_buffer_copy(&mut encoder, &output_pixels_buffer, &download_buffer);
 
         let command_buffer = encoder.finish();
@@ -108,10 +108,30 @@ impl PostProcessor for SaturationPostProcessor {
 
         let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
         Ok(result.par_iter().map(|d| d.into()).collect())
-
     }
+}
 
-    fn needs_albedo_and_normal_colors(&self) -> bool {
-        false
+#[cfg(not(feature = "gpu"))]
+impl PostProcessor for SaturationPostProcessor {
+    fn intermediate_post_process(
+        &self,
+        pixel_colors: &[Vec3],
+        _albedo_colors: &[Vec3],
+        _normal_colors: &[Vec3],
+        _width: u32,
+        _height: u32,
+        _num_samples: u32,
+    ) -> Result<Vec<Vec3>, Box<dyn Error>> {
+
+        Ok(pixel_colors.par_iter().map(|p| {
+            let gray = 0.2989 * p.x + 0.587 * p.y + 0.114 * p.z;
+            let g = -gray * self.saturation_factor;
+            let gg = 1. + self.saturation_factor;
+            Vec3::new(
+                g + p.x * gg,
+                g + p.y * gg,
+                g + p.z * gg
+            )
+        }).collect())
     }
 }
