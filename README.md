@@ -16,7 +16,8 @@ Additionally, the library has:
 * Multithreaded Bvh creation to greatly speed up rendering
 * Post-processing of rendered images by:
   * [Open Image Denoise](https://www.openimagedenoise.org/)
-  * Bloom filter
+  * Bloom filter, GPU compute implementation using [WGPU](https://wgpu.rs/)
+  * Saturation filter, GPU compute implementation using [WGPU](https://wgpu.rs/)
 * Bump mapping
 * Light attenuation
 
