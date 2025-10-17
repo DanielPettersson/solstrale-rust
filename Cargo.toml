@@ -31,6 +31,7 @@ rayon = "1.11.0"
 bytemuck = "1.24.0"
 pollster = "0.4.0"
 wgpu = "27.0.1"
+once_cell = "1.21.3"
 
 [dev-dependencies]
 image-compare = "0.5.0"

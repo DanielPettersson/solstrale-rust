@@ -1,5 +1,5 @@
 use crate::geo::vec3::Vec3;
-use crate::post::{pixel_colors_to_rgb_image, PostProcessor, PostProcessors};
+use crate::post::{PostProcessor, PostProcessors};
 use crate::util::gaussian::create_gaussian_blur_weights;
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
@@ -21,7 +21,7 @@ pub struct BloomPostProcessor {
 
 impl BloomPostProcessor {
     #![allow(clippy::new_ret_no_self)]
-    /// Create a new bloom post processor
+    /// Create a new bloom post-processor
     /// # Arguments
     /// * `kernel_size_fraction` Radius of the blur effect, as a fraction of the rendered image's width
     /// * `threshold` Color intensity threshold for applying bloom effect. If not specified, defaults to "white"
@@ -49,30 +49,6 @@ impl BloomPostProcessor {
 }
 
 impl PostProcessor for BloomPostProcessor {
-    fn post_process(
-        &self,
-        pixel_colors: &[Vec3],
-        albedo_colors: &[Vec3],
-        normal_colors: &[Vec3],
-        width: u32,
-        height: u32,
-        num_samples: u32,
-    ) -> Result<image::RgbImage, Box<dyn Error>> {
-        let pixel_colors = self.intermediate_post_process(
-            pixel_colors,
-            albedo_colors,
-            normal_colors,
-            width,
-            height,
-            num_samples,
-        )?;
-        Ok(pixel_colors_to_rgb_image(
-            &pixel_colors,
-            width,
-            height,
-            num_samples,
-        ))
-    }
 
     #[allow(clippy::needless_range_loop)]
     fn intermediate_post_process(
@@ -91,7 +67,7 @@ impl PostProcessor for BloomPostProcessor {
 
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
-        let (device, queue) = get_wgpu_device_and_queue()?;
+        let (device, queue) = get_wgpu_device_and_queue();
 
         let filter_bright_module =
             device.create_shader_module(wgpu::include_wgsl!("bloom_filter_bright.wgsl"));
@@ -139,7 +115,7 @@ impl PostProcessor for BloomPostProcessor {
         });
 
         let filter_bright_bind_group_layout = bind_group_layout(
-            &device,
+            device,
             &[
                 bind_group_layout_entry(true, 16),
                 bind_group_layout_entry(false, 16),
@@ -147,7 +123,7 @@ impl PostProcessor for BloomPostProcessor {
         );
 
         let apply_bind_group_layout = bind_group_layout(
-            &device,
+            device,
             &[
                 bind_group_layout_entry(true, 4),
                 bind_group_layout_entry(true, 16),
@@ -156,7 +132,7 @@ impl PostProcessor for BloomPostProcessor {
         );
 
         let add_bind_group_layout = bind_group_layout(
-            &device,
+            device,
             &[
                 bind_group_layout_entry(true, 16),
                 bind_group_layout_entry(true, 16),
@@ -165,13 +141,13 @@ impl PostProcessor for BloomPostProcessor {
         );
 
         let filter_bright_bind_group = bind_group(
-            &device,
+            device,
             &filter_bright_bind_group_layout,
             &[&input_pixels_buffer, &intermediate_buffer1],
         );
 
         let apply_bind_group_x = bind_group(
-            &device,
+            device,
             &apply_bind_group_layout,
             &[
                 &weights_buffer,
@@ -181,7 +157,7 @@ impl PostProcessor for BloomPostProcessor {
         );
 
         let apply_bind_group_y = bind_group(
-            &device,
+            device,
             &apply_bind_group_layout,
             &[
                 &weights_buffer,
@@ -191,7 +167,7 @@ impl PostProcessor for BloomPostProcessor {
         );
 
         let add_bind_group = bind_group(
-            &device,
+            device,
             &add_bind_group_layout,
             &[
                 &input_pixels_buffer,
@@ -201,24 +177,24 @@ impl PostProcessor for BloomPostProcessor {
         );
 
         let filter_bright_pipeline = compute_pipeline(
-            &device,
+            device,
             &filter_bright_bind_group_layout,
             &filter_bright_module,
             &[("threshold", threshold), ("max_intensity", max_intensity)],
         );
         let apply_pipeline_x = compute_pipeline(
-            &device,
+            device,
             &apply_bind_group_layout,
             &apply_module,
             &[("width", width as f64), ("x_dir", 1.), ("y_dir", 0.)],
         );
         let apply_pipeline_y = compute_pipeline(
-            &device,
+            device,
             &apply_bind_group_layout,
             &apply_module,
             &[("width", width as f64), ("x_dir", 0.), ("y_dir", 1.)],
         );
-        let add_pipeline = compute_pipeline(&device, &add_bind_group_layout, &add_module, &[]);
+        let add_pipeline = compute_pipeline(device, &add_bind_group_layout, &add_module, &[]);
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -253,7 +229,7 @@ impl PostProcessor for BloomPostProcessor {
         let command_buffer = encoder.finish();
         queue.submit([command_buffer]);
 
-        let result = get_result_from_buffer::<[f32; 4]>(&device, &download_buffer);
+        let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
         Ok(result.par_iter().map(|d| d.into()).collect())
     }
 

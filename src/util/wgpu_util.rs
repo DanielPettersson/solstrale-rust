@@ -1,5 +1,6 @@
 //! Utility functions for working with wgpu
 use bytemuck::AnyBitPattern;
+use once_cell::sync::Lazy;
 use simple_error::SimpleError;
 use std::error::Error;
 use std::num::NonZeroU64;
@@ -9,11 +10,20 @@ pub(crate) struct BindGroupLayoutEntryInfo {
     pub min_binding_size: u64,
 }
 
-pub(crate) fn get_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn Error>> {
+static DEVICE_AND_QUEUE: Lazy<(wgpu::Device, wgpu::Queue)> =
+    Lazy::new(|| create_wgpu_device_and_queue().expect("Failed to create device and queue"));
+
+pub(crate) fn get_wgpu_device_and_queue() -> &'static (wgpu::Device, wgpu::Queue) {
+    &DEVICE_AND_QUEUE
+}
+
+fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn Error>> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
 
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
+
+    println!("Got Compute Adapter: {:#?}", adapter.get_info());
 
     let downlevel_capabilities = adapter.get_downlevel_capabilities();
     if !downlevel_capabilities
