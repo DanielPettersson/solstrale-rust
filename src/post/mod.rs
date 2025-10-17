@@ -3,6 +3,7 @@
 mod bloom;
 mod nop;
 mod oidn;
+mod saturation;
 
 use std::error::Error;
 
@@ -12,6 +13,7 @@ use crate::geo::vec3::Vec3;
 pub use crate::post::bloom::BloomPostProcessor;
 pub use crate::post::nop::NopPostProcessor;
 pub use crate::post::oidn::OidnPostProcessor;
+pub use crate::post::saturation::SaturationPostProcessor;
 
 /// Responsible for taking the rendered image and transforming it
 #[enum_dispatch]
@@ -25,7 +27,22 @@ pub trait PostProcessor {
         width: u32,
         height: u32,
         num_samples: u32,
-    ) -> Result<image::RgbImage, Box<dyn Error>>;
+    ) -> Result<image::RgbImage, Box<dyn Error>> {
+        let pixel_colors = self.intermediate_post_process(
+            pixel_colors,
+            albedo_colors,
+            normal_colors,
+            width,
+            height,
+            num_samples,
+        )?;
+        Ok(pixel_colors_to_rgb_image(
+            &pixel_colors,
+            width,
+            height,
+            num_samples,
+        ))
+    }
 
     /// Execute intermediate postprocessing of the rendered image
     fn intermediate_post_process(
@@ -38,18 +55,20 @@ pub trait PostProcessor {
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>>;
 
-    /// Does this post-processor need albedo or normal colors
+    /// Does this post-processor need albedo or normal colors?
     fn needs_albedo_and_normal_colors(&self) -> bool;
 }
 
 #[enum_dispatch(PostProcessor)]
 #[derive(Clone)]
-/// An enum of available post processors
+/// An enum of available post-processors
 pub enum PostProcessors {
     /// [`PostProcessor`] of type [`OidnPostProcessor`]
     OidnPostProcessorType(OidnPostProcessor),
     /// [`PostProcessor`] of type [`BloomPostProcessor`]
     BloomPostProcessorType(BloomPostProcessor),
+    /// [`PostProcessor`] of type [`BloomPostProcessor`]
+    SaturationPostProcessorType(SaturationPostProcessor),
     /// [`PostProcessor`] of type [`NopPostProcessor`]
     NopPostProcessorType(NopPostProcessor),
 }

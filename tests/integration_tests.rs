@@ -11,13 +11,20 @@ use image_compare::Algorithm::RootMeanSquared;
 
 use solstrale::geo::transformation::{RotationX, RotationY, RotationZ, Transformer};
 use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
-use solstrale::post::{BloomPostProcessor, OidnPostProcessor, PostProcessor};
+use solstrale::post::{
+    BloomPostProcessor, OidnPostProcessor, PostProcessor, SaturationPostProcessor,
+};
 use solstrale::ray_trace;
-use solstrale::renderer::{RenderConfig, Scene};
 use solstrale::renderer::shader::{PathTracingShader, Shaders, SimpleShader};
+use solstrale::renderer::{RenderConfig, Scene};
 use solstrale::util::rgb_color::rgb_to_vec3;
 
-use crate::scenes::{create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene, create_simple_test_scene, create_test_scene, create_uv_scene};
+use crate::scenes::{
+    create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
+    create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
+    create_obj_with_triangle, create_quad_rotation_scene, create_simple_test_scene,
+    create_test_scene, create_uv_scene,
+};
 
 mod scenes;
 
@@ -231,7 +238,7 @@ fn test_render_light_attenuation() {
             &format!(
                 "light_attenuation_{}",
                 attenuation_half_length.map_or(-1., |a| a)
-            )
+            ),
         );
     }
 }
@@ -249,6 +256,26 @@ fn test_bloom() -> Result<(), Box<dyn Error>> {
     let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], w, h, 1)?;
 
     compare_output("bloom", &res);
+
+    Ok(())
+}
+
+#[test]
+fn test_saturation() -> Result<(), Box<dyn Error>> {
+    for saturation_factor in [-1., 0., 1.] {
+        let post = SaturationPostProcessor::new(saturation_factor)?;
+        let saturation_image = image::open("resources/textures/bloom.png")
+            .unwrap()
+            .into_rgb8();
+        let w = saturation_image.width();
+        let h = saturation_image.height();
+        let pixel_colors = image_to_vec3(saturation_image);
+
+        let res =
+            post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], w, h, 1)?;
+
+        compare_output(&format!("saturation_{}", saturation_factor), &res);
+    }
 
     Ok(())
 }
@@ -285,7 +312,7 @@ fn test_blended_materials() {
                 height: 300,
                 ..RenderConfig::default()
             },
-            blend_factor
+            blend_factor,
         );
 
         render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor));

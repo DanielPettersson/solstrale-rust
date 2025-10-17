@@ -20,6 +20,9 @@ pub struct Vec3 {
 /// A value that is so small as to be almost zero
 pub const ALMOST_ZERO: f64 = 1e-8;
 
+/// A value that is so small as to be almost zero
+pub const ALMOST_ZERO_F32: f32 = 1e-6;
+
 /// Vector at exactly zero in all axis
 pub const ZERO_VECTOR: Vec3 = Vec3 {
     x: 0.,
@@ -227,6 +230,24 @@ impl Div<f64> for Vec3 {
             y: self.y / t,
             z: self.z / t,
         }
+    }
+}
+
+impl From<Vec3> for [f32; 4] {
+    fn from(value: Vec3) -> Self {
+        [value.x as f32, value.y as f32, value.z as f32, 0.0]
+    }
+}
+
+impl From<&Vec3> for [f32; 4] {
+    fn from(value: &Vec3) -> Self {
+        [value.x as f32, value.y as f32, value.z as f32, 0.0]
+    }
+}
+
+impl From<&[f32; 4]> for Vec3 {
+    fn from(value: &[f32; 4]) -> Self {
+        Vec3::new(value[0] as f64, value[1] as f64, value[2] as f64)
     }
 }
 
@@ -476,5 +497,11 @@ mod tests {
             assert!(vec.length() <= 1.);
             assert_eq!(0., vec.z)
         }
+    }
+
+    #[test]
+    fn test_from() {
+        let array: [f32; 4] = Vec3::new(1., 2., 3.).into();
+        assert_eq!(array, [1., 2., 3., 0.]);
     }
 }

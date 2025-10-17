@@ -3,7 +3,7 @@ use crate::post::{PostProcessor, PostProcessors};
 use std::error::Error;
 
 #[derive(Clone)]
-/// A post processor that uses Intel Open Image DeNoise on the image
+/// A post-processor that uses Intel Open Image DeNoise on the image
 pub struct OidnPostProcessor();
 
 impl OidnPostProcessor {

@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! A multithreaded Monte Carlo path tracing library, that as such has features like:
+//! A multithreaded Monte Carlo path tracing library that as such has features like:
 //! * Global illumination
 //! * Caustics
 //! * Reflection
