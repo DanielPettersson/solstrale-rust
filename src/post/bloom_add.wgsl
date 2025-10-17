@@ -8,7 +8,7 @@ var<storage, read> bloom_pixels: array<vec3<f32>>;
 var<storage, read_write> output_pixels: array<vec3<f32>>;
 
 @compute @workgroup_size(64)
-fn bloom(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let curr_index = global_id.x;
     let num_pixels = arrayLength(&input_pixels);
 
