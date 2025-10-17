@@ -3,9 +3,8 @@ use crate::post::{pixel_colors_to_rgb_image, PostProcessor, PostProcessors};
 use crate::util::gaussian::create_gaussian_blur_weights;
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
-    compute_pipeline, get_wgpu_device_and_queue, typed_bind_group_layout_entry,
+    compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
 };
-use bytemuck::{Pod, Zeroable};
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
@@ -18,21 +17,6 @@ pub struct BloomPostProcessor {
     kernel_size_fraction: f64,
     threshold: f64,
     max_intensity: f64,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct BloomFilterBrightConfig {
-    threshold: f32,
-    max_intensity: f32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct BloomApplyConfig {
-    width: u32,
-    x_dir: i32,
-    y_dir: i32,
 }
 
 impl BloomPostProcessor {
@@ -114,35 +98,6 @@ impl PostProcessor for BloomPostProcessor {
         let apply_module = device.create_shader_module(wgpu::include_wgsl!("bloom_apply.wgsl"));
         let add_module = device.create_shader_module(wgpu::include_wgsl!("bloom_add.wgsl"));
 
-        let filter_bright_config_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::bytes_of(&BloomFilterBrightConfig {
-                threshold: threshold as f32,
-                max_intensity: max_intensity as f32,
-            }),
-            usage: BufferUsages::STORAGE,
-        });
-
-        let apply_config_buffer_x = device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::bytes_of(&BloomApplyConfig {
-                width,
-                x_dir: 1,
-                y_dir: 0,
-            }),
-            usage: BufferUsages::STORAGE,
-        });
-
-        let apply_config_buffer_y = device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::bytes_of(&BloomApplyConfig {
-                width,
-                x_dir: 0,
-                y_dir: 1,
-            }),
-            usage: BufferUsages::STORAGE,
-        });
-
         let weights_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&weights),
@@ -186,7 +141,6 @@ impl PostProcessor for BloomPostProcessor {
         let filter_bright_bind_group_layout = bind_group_layout(
             &device,
             &[
-                typed_bind_group_layout_entry::<BloomFilterBrightConfig>(true),
                 bind_group_layout_entry(true, 16),
                 bind_group_layout_entry(false, 16),
             ],
@@ -195,7 +149,6 @@ impl PostProcessor for BloomPostProcessor {
         let apply_bind_group_layout = bind_group_layout(
             &device,
             &[
-                typed_bind_group_layout_entry::<BloomApplyConfig>(true),
                 bind_group_layout_entry(true, 4),
                 bind_group_layout_entry(true, 16),
                 bind_group_layout_entry(false, 16),
@@ -214,18 +167,13 @@ impl PostProcessor for BloomPostProcessor {
         let filter_bright_bind_group = bind_group(
             &device,
             &filter_bright_bind_group_layout,
-            &[
-                &filter_bright_config_buffer,
-                &input_pixels_buffer,
-                &intermediate_buffer1,
-            ],
+            &[&input_pixels_buffer, &intermediate_buffer1],
         );
 
         let apply_bind_group_x = bind_group(
             &device,
             &apply_bind_group_layout,
             &[
-                &apply_config_buffer_x,
                 &weights_buffer,
                 &intermediate_buffer1,
                 &intermediate_buffer2,
@@ -236,7 +184,6 @@ impl PostProcessor for BloomPostProcessor {
             &device,
             &apply_bind_group_layout,
             &[
-                &apply_config_buffer_y,
                 &weights_buffer,
                 &intermediate_buffer2,
                 &intermediate_buffer1,
@@ -257,9 +204,21 @@ impl PostProcessor for BloomPostProcessor {
             &device,
             &filter_bright_bind_group_layout,
             &filter_bright_module,
+            &[("threshold", threshold), ("max_intensity", max_intensity)],
         );
-        let apply_pipeline = compute_pipeline(&device, &apply_bind_group_layout, &apply_module);
-        let add_pipeline = compute_pipeline(&device, &add_bind_group_layout, &add_module);
+        let apply_pipeline_x = compute_pipeline(
+            &device,
+            &apply_bind_group_layout,
+            &apply_module,
+            &[("width", width as f64), ("x_dir", 1.), ("y_dir", 0.)],
+        );
+        let apply_pipeline_y = compute_pipeline(
+            &device,
+            &apply_bind_group_layout,
+            &apply_module,
+            &[("width", width as f64), ("x_dir", 0.), ("y_dir", 1.)],
+        );
+        let add_pipeline = compute_pipeline(&device, &add_bind_group_layout, &add_module, &[]);
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -273,13 +232,13 @@ impl PostProcessor for BloomPostProcessor {
         );
         add_compute_pass(
             &mut encoder,
-            &apply_pipeline,
+            &apply_pipeline_x,
             &apply_bind_group_x,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
-            &apply_pipeline,
+            &apply_pipeline_y,
             &apply_bind_group_y,
             workgroup_count,
         );
@@ -294,12 +253,7 @@ impl PostProcessor for BloomPostProcessor {
         let command_buffer = encoder.finish();
         queue.submit([command_buffer]);
 
-        let buffer_slice = download_buffer.slice(..);
-        buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let data = buffer_slice.get_mapped_range();
-        let result: &[[f32; 4]] = bytemuck::cast_slice(&data);
-
+        let result = get_result_from_buffer::<[f32; 4]>(&device, &download_buffer);
         Ok(result.par_iter().map(|d| d.into()).collect())
     }
 

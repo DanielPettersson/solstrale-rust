@@ -1,4 +1,5 @@
 //! Utility functions for working with wgpu
+use bytemuck::AnyBitPattern;
 use simple_error::SimpleError;
 use std::error::Error;
 use std::num::NonZeroU64;
@@ -33,6 +34,17 @@ pub(crate) fn get_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue),
     .map_err(|e| SimpleError::new(format!("Failed to create device: {}", e)).into())
 }
 
+pub(crate) fn get_result_from_buffer<T: AnyBitPattern>(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Vec<T> {
+    let buffer_slice = buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = buffer_slice.get_mapped_range();
+    bytemuck::cast_slice(&data).to_vec()
+}
+
 pub(crate) fn add_compute_pass(
     encoder: &mut wgpu::CommandEncoder,
     pipeline: &wgpu::ComputePipeline,
@@ -56,17 +68,21 @@ pub(crate) fn add_buffer_copy(
     encoder.copy_buffer_to_buffer(source, 0, destination, 0, destination.size());
 }
 
-pub(crate) fn compute_pipeline(
+pub(crate) fn compute_pipeline<'a>(
     device: &wgpu::Device,
     bind_group_layout: &wgpu::BindGroupLayout,
     module: &wgpu::ShaderModule,
+    constants: &'a [(&'a str, f64)],
 ) -> wgpu::ComputePipeline {
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
         layout: Some(&pipeline_layout(device, bind_group_layout)),
         module,
         entry_point: Some("compute"),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants,
+            ..Default::default()
+        },
         cache: None,
     })
 }
@@ -106,13 +122,6 @@ pub(crate) fn bind_group_layout(
         label: None,
         entries: &entries,
     })
-}
-
-pub fn typed_bind_group_layout_entry<T>(read_only: bool) -> BindGroupLayoutEntryInfo {
-    BindGroupLayoutEntryInfo {
-        read_only,
-        min_binding_size: size_of::<T>() as u64,
-    }
 }
 
 pub fn bind_group_layout_entry(read_only: bool, min_binding_size: u64) -> BindGroupLayoutEntryInfo {
