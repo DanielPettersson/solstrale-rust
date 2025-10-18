@@ -152,6 +152,12 @@ impl Renderer {
                 .post_processors
                 .push(NopPostProcessor::new());
         }
+        scene.render_config.post_processors.iter_mut().for_each(|p| {
+            p.initialize(
+                scene.render_config.width as u32,
+                scene.render_config.height as u32,
+            )
+        });
 
         Ok(Renderer {
             scene,
@@ -318,8 +324,6 @@ impl Renderer {
                                 &intermediate_pixel_colors,
                                 albedo_colors.lock().unwrap().deref(),
                                 normal_colors.lock().unwrap().deref(),
-                                image_width as u32,
-                                image_height as u32,
                                 sample,
                             )?;
 
@@ -330,8 +334,6 @@ impl Renderer {
                             &intermediate_pixel_colors,
                             albedo_colors.lock().unwrap().deref(),
                             normal_colors.lock().unwrap().deref(),
-                            image_width as u32,
-                            image_height as u32,
                             sample,
                         )?)
                     } else {

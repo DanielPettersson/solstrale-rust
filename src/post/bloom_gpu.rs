@@ -1,20 +1,17 @@
-#[cfg(not(feature = "gpu"))]
-use rayon::iter::IndexedParallelIterator;
+//! Post-processor for applying bloom effect
+#![cfg(feature = "gpu")]
+
 use crate::geo::vec3::Vec3;
-#[cfg(not(feature = "gpu"))]
-use crate::geo::vec3::ZERO_VECTOR;
 use crate::post::{PostProcessor, PostProcessors};
 use crate::util::gaussian::create_gaussian_blur_weights;
-#[cfg(feature = "gpu")]
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
     compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
 };
-#[cfg(not(feature = "gpu"))]
-use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
+use std::time::Instant;
 #[cfg(feature = "gpu")]
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 #[cfg(feature = "gpu")]
@@ -23,9 +20,23 @@ use wgpu::BufferUsages;
 #[derive(Clone)]
 /// Applies a bloom effect on the pixel colors
 pub struct BloomPostProcessor {
+    width: u32,
+    height: u32,
+
     kernel_size_fraction: f64,
     threshold: f64,
     max_intensity: f64,
+
+    filter_bright_module: wgpu::ShaderModule,
+    apply_module: wgpu::ShaderModule,
+
+    filter_bright_bind_group_layout: wgpu::BindGroupLayout,
+    apply_bind_group_layout: wgpu::BindGroupLayout,
+    add_bind_group_layout: wgpu::BindGroupLayout,
+
+    apply_pipeline_x: Option<wgpu::ComputePipeline>,
+    apply_pipeline_y: Option<wgpu::ComputePipeline>,
+    add_pipeline: wgpu::ComputePipeline,
 }
 
 impl BloomPostProcessor {
@@ -49,39 +60,97 @@ impl BloomPostProcessor {
         let threshold = threshold.unwrap_or(Vec3::new(1., 1., 1.).length());
         let max_intensity = max_intensity.unwrap_or(1000.);
 
+        let (device, _) = get_wgpu_device_and_queue();
+
+        let filter_bright_module =
+            device.create_shader_module(wgpu::include_wgsl!("bloom_filter_bright.wgsl"));
+        let apply_module = device.create_shader_module(wgpu::include_wgsl!("bloom_apply.wgsl"));
+        let add_module = device.create_shader_module(wgpu::include_wgsl!("bloom_add.wgsl"));
+
+        let filter_bright_bind_group_layout = bind_group_layout(
+            device,
+            &[
+                bind_group_layout_entry(true, 16),
+                bind_group_layout_entry(false, 16),
+            ],
+        );
+
+        let apply_bind_group_layout = bind_group_layout(
+            device,
+            &[
+                bind_group_layout_entry(true, 4),
+                bind_group_layout_entry(true, 16),
+                bind_group_layout_entry(false, 16),
+            ],
+        );
+
+        let add_bind_group_layout = bind_group_layout(
+            device,
+            &[
+                bind_group_layout_entry(true, 16),
+                bind_group_layout_entry(true, 16),
+                bind_group_layout_entry(false, 16),
+            ],
+        );
+
+        let add_pipeline = compute_pipeline(device, &add_bind_group_layout, &add_module, &[]);
+
         Ok(PostProcessors::from(BloomPostProcessor {
+            width: 0,
+            height: 0,
             kernel_size_fraction,
             threshold,
             max_intensity,
+            filter_bright_module,
+            apply_module,
+            filter_bright_bind_group_layout,
+            apply_bind_group_layout,
+            add_bind_group_layout,
+            apply_pipeline_x: None,
+            apply_pipeline_y: None,
+            add_pipeline,
         }))
     }
 }
 
-#[cfg(feature = "gpu")]
 impl PostProcessor for BloomPostProcessor {
+    fn initialize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+
+        let (device, _) = get_wgpu_device_and_queue();
+
+        self.apply_pipeline_x = Some(compute_pipeline(
+            device,
+            &self.apply_bind_group_layout,
+            &self.apply_module,
+            &[("width", width as f64), ("x_dir", 1.), ("y_dir", 0.)],
+        ));
+        self.apply_pipeline_y = Some(compute_pipeline(
+            device,
+            &self.apply_bind_group_layout,
+            &self.apply_module,
+            &[("width", width as f64), ("x_dir", 0.), ("y_dir", 1.)],
+        ));
+    }
+
     #[allow(clippy::needless_range_loop)]
     fn intermediate_post_process(
         &self,
         pixel_colors: &[Vec3],
         _albedo_colors: &[Vec3],
         _normal_colors: &[Vec3],
-        width: u32,
-        _height: u32,
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
+        let now = Instant::now();
+
         let threshold = self.threshold * num_samples as f64;
         let max_intensity = self.max_intensity * num_samples as f64;
-        let kernel_size = (self.kernel_size_fraction * width as f64) as usize * 2 + 1;
+        let kernel_size = (self.kernel_size_fraction * self.width as f64) as usize * 2 + 1;
         let weights = create_gaussian_blur_weights(kernel_size, kernel_size as f32 / 5.);
-
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
         let (device, queue) = get_wgpu_device_and_queue();
-
-        let filter_bright_module =
-            device.create_shader_module(wgpu::include_wgsl!("bloom_filter_bright.wgsl"));
-        let apply_module = device.create_shader_module(wgpu::include_wgsl!("bloom_apply.wgsl"));
-        let add_module = device.create_shader_module(wgpu::include_wgsl!("bloom_add.wgsl"));
 
         let weights_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
@@ -123,41 +192,15 @@ impl PostProcessor for BloomPostProcessor {
             mapped_at_creation: false,
         });
 
-        let filter_bright_bind_group_layout = bind_group_layout(
-            device,
-            &[
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(false, 16),
-            ],
-        );
-
-        let apply_bind_group_layout = bind_group_layout(
-            device,
-            &[
-                bind_group_layout_entry(true, 4),
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(false, 16),
-            ],
-        );
-
-        let add_bind_group_layout = bind_group_layout(
-            device,
-            &[
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(false, 16),
-            ],
-        );
-
         let filter_bright_bind_group = bind_group(
             device,
-            &filter_bright_bind_group_layout,
+            &self.filter_bright_bind_group_layout,
             &[&input_pixels_buffer, &intermediate_buffer1],
         );
 
         let apply_bind_group_x = bind_group(
             device,
-            &apply_bind_group_layout,
+            &self.apply_bind_group_layout,
             &[
                 &weights_buffer,
                 &intermediate_buffer1,
@@ -167,7 +210,7 @@ impl PostProcessor for BloomPostProcessor {
 
         let apply_bind_group_y = bind_group(
             device,
-            &apply_bind_group_layout,
+            &self.apply_bind_group_layout,
             &[
                 &weights_buffer,
                 &intermediate_buffer2,
@@ -177,7 +220,7 @@ impl PostProcessor for BloomPostProcessor {
 
         let add_bind_group = bind_group(
             device,
-            &add_bind_group_layout,
+            &self.add_bind_group_layout,
             &[
                 &input_pixels_buffer,
                 &intermediate_buffer1,
@@ -187,23 +230,11 @@ impl PostProcessor for BloomPostProcessor {
 
         let filter_bright_pipeline = compute_pipeline(
             device,
-            &filter_bright_bind_group_layout,
-            &filter_bright_module,
+            &self.filter_bright_bind_group_layout,
+            &self.filter_bright_module,
             &[("threshold", threshold), ("max_intensity", max_intensity)],
         );
-        let apply_pipeline_x = compute_pipeline(
-            device,
-            &apply_bind_group_layout,
-            &apply_module,
-            &[("width", width as f64), ("x_dir", 1.), ("y_dir", 0.)],
-        );
-        let apply_pipeline_y = compute_pipeline(
-            device,
-            &apply_bind_group_layout,
-            &apply_module,
-            &[("width", width as f64), ("x_dir", 0.), ("y_dir", 1.)],
-        );
-        let add_pipeline = compute_pipeline(device, &add_bind_group_layout, &add_module, &[]);
+
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -217,19 +248,19 @@ impl PostProcessor for BloomPostProcessor {
         );
         add_compute_pass(
             &mut encoder,
-            &apply_pipeline_x,
+            &self.apply_pipeline_x.as_ref().unwrap(),
             &apply_bind_group_x,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
-            &apply_pipeline_y,
+            &self.apply_pipeline_y.as_ref().unwrap(),
             &apply_bind_group_y,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
-            &add_pipeline,
+            &self.add_pipeline,
             &add_bind_group,
             workgroup_count,
         );
@@ -239,93 +270,17 @@ impl PostProcessor for BloomPostProcessor {
         queue.submit([command_buffer]);
 
         let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
+
+        println!("Bloom done after {}ms", now.elapsed().as_millis());
+
         Ok(result.par_iter().map(|d| d.into()).collect())
     }
-}
 
-#[cfg(not(feature = "gpu"))]
-impl PostProcessor for BloomPostProcessor {
-    fn intermediate_post_process(
-        &self,
-        pixel_colors: &[Vec3],
-        _albedo_colors: &[Vec3],
-        _normal_colors: &[Vec3],
-        width: u32,
-        height: u32,
-        num_samples: u32,
-    ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        let threshold = self.threshold * num_samples as f64;
-        let max_intensity = self.max_intensity * num_samples as f64;
-        let kernel_size = (self.kernel_size_fraction * width as f64) as usize * 2 + 1;
-        let half_kernel_size = (kernel_size / 2) as i32;
-
-        let weights = create_gaussian_blur_weights(kernel_size, kernel_size as f32 / 5.);
-
-        let bright_colors: Vec<Vec3> = Vec::from(pixel_colors)
-            .par_iter()
-            .map(|p| {
-                if p.length() >= threshold {
-                    if p.length() > max_intensity {
-                        p.unit() * max_intensity
-                    } else {
-                        *p
-                    }
-                } else {
-                    ZERO_VECTOR
-                }
-            })
-            .collect();
-
-        let blurred_colors: Vec<Vec3> = (0..(height * width))
-            .into_par_iter()
-            .map(|xy| {
-                let x = (xy % width) as i32;
-                let y = (xy / width) as i32;
-                let mut col = ZERO_VECTOR;
-                for i in 0..kernel_size {
-                    col += get_pixel_safe(
-                        &bright_colors,
-                        x + i as i32 - half_kernel_size,
-                        y,
-                        width,
-                        height,
-                    ) * weights[i];
-                }
-                col
-            })
-            .collect();
-
-        let blurred_colors: Vec<Vec3> = (0..(height * width))
-            .into_par_iter()
-            .map(|xy| {
-                let x = (xy % width) as i32;
-                let y = (xy / width) as i32;
-                let mut col = ZERO_VECTOR;
-                for i in 0..kernel_size {
-                    col += get_pixel_safe(
-                        &blurred_colors,
-                        x,
-                        y + i as i32 - half_kernel_size,
-                        width,
-                        height,
-                    ) * weights[i];
-                }
-                col
-            })
-            .collect();
-
-        Ok(pixel_colors
-            .into_par_iter()
-            .zip(blurred_colors)
-            .map(|pp| *pp.0 + pp.1)
-            .collect())
+    fn width(&self) -> u32 {
+        self.width
     }
-}
 
-#[cfg(not(feature = "gpu"))]
-fn get_pixel_safe(pixel_colors: &[Vec3], x: i32, y: i32, width: u32, height: u32) -> Vec3 {
-    let x = x.clamp(0, width as i32 - 1);
-    let y = y.clamp(0, height as i32 - 1);
-    let i = (y * width as i32 + x) as usize;
-    pixel_colors[i]
+    fn height(&self) -> u32 {
+        self.height
+    }
 }

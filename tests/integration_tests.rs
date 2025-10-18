@@ -245,7 +245,7 @@ fn test_render_light_attenuation() {
 
 #[test]
 fn test_bloom() -> Result<(), Box<dyn Error>> {
-    let post = BloomPostProcessor::new(0.2, None, None)?;
+    let mut post = BloomPostProcessor::new(0.2, None, None)?;
     let bloom_image = image::open("resources/textures/bloom.png")
         .unwrap()
         .into_rgb8();
@@ -253,7 +253,13 @@ fn test_bloom() -> Result<(), Box<dyn Error>> {
     let h = bloom_image.height();
     let pixel_colors = image_to_vec3(bloom_image);
 
-    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], w, h, 1)?;
+    post.initialize(w, h);
+
+    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+
+    compare_output("bloom", &res);
+
+    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
     compare_output("bloom", &res);
 
@@ -263,7 +269,7 @@ fn test_bloom() -> Result<(), Box<dyn Error>> {
 #[test]
 fn test_saturation() -> Result<(), Box<dyn Error>> {
     for saturation_factor in [-1., 0., 1.] {
-        let post = SaturationPostProcessor::new(saturation_factor)?;
+        let mut post = SaturationPostProcessor::new(saturation_factor)?;
         let saturation_image = image::open("resources/textures/bloom.png")
             .unwrap()
             .into_rgb8();
@@ -271,8 +277,14 @@ fn test_saturation() -> Result<(), Box<dyn Error>> {
         let h = saturation_image.height();
         let pixel_colors = image_to_vec3(saturation_image);
 
+        post.initialize(w, h);
+
         let res =
-            post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], w, h, 1)?;
+            post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+
+        compare_output(&format!("saturation_{}", saturation_factor), &res);
+
+        let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
         compare_output(&format!("saturation_{}", saturation_factor), &res);
     }

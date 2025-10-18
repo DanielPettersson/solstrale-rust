@@ -2,27 +2,33 @@ use crate::geo::vec3::Vec3;
 use crate::post::{PostProcessor, PostProcessors};
 use std::error::Error;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 /// A post-processor that uses Intel Open Image DeNoise on the image
-pub struct OidnPostProcessor();
+pub struct OidnPostProcessor {
+    width: u32,
+    height: u32,
+}
 
 impl OidnPostProcessor {
     #![allow(clippy::new_ret_no_self)]
     /// Create a new oidn post processor
     pub fn new() -> PostProcessors {
-        PostProcessors::from(OidnPostProcessor())
+        PostProcessors::from(OidnPostProcessor::default())
     }
 }
 
 #[cfg(feature = "oidn-postprocessor")]
 impl PostProcessor for OidnPostProcessor {
+    fn initialize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
+
     fn post_process(
         &self,
         pixel_colors: &[Vec3],
         albedo_colors: &[Vec3],
         normal_colors: &[Vec3],
-        width: u32,
-        height: u32,
         num_samples: u32,
     ) -> Result<image::RgbImage, Box<dyn Error>> {
         let pixel_rgb = to_rgb_vec(pixel_colors, num_samples);
@@ -32,7 +38,7 @@ impl PostProcessor for OidnPostProcessor {
 
         let device = oidn::Device::new();
         oidn::RayTracing::new(&device)
-            .image_dimensions(width as usize, height as usize)
+            .image_dimensions(self.width as usize, self.height as usize)
             .albedo_normal(&albedo_rgb, &normal_rgb)
             .srgb(true)
             .hdr(false)
@@ -44,10 +50,10 @@ impl PostProcessor for OidnPostProcessor {
             return Err(Box::new(simple_error::SimpleError::new(e.1)));
         }
 
-        let mut img: image::RgbImage = image::ImageBuffer::new(width, height);
-        for y in 0..height {
-            for x in 0..width {
-                let i = ((y * width + x) * 3) as usize;
+        let mut img: image::RgbImage = image::ImageBuffer::new(self.width, self.height);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let i = ((y * self.width + x) * 3) as usize;
                 img.put_pixel(
                     x,
                     y,
@@ -68,8 +74,6 @@ impl PostProcessor for OidnPostProcessor {
         _pixel_colors: &[Vec3],
         _albedo_colors: &[Vec3],
         _normal_colors: &[Vec3],
-        _width: u32,
-        _height: u32,
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
         Err(Box::new(simple_error::SimpleError::new(
@@ -80,20 +84,38 @@ impl PostProcessor for OidnPostProcessor {
     fn needs_albedo_and_normal_colors(&self) -> bool {
         true
     }
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
 }
 
 #[cfg(not(feature = "oidn-postprocessor"))]
 impl PostProcessor for OidnPostProcessor {
+    fn initialize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
     fn intermediate_post_process(
         &self,
         pixel_colors: &[Vec3],
         _albedo_colors: &[Vec3],
         _normal_colors: &[Vec3],
-        _width: u32,
-        _height: u32,
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
         Ok(Vec::from(pixel_colors))
+    }
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
     }
 }
 
