@@ -10,7 +10,6 @@ use crate::util::wgpu_util::{
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
-use std::time::Instant;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::BufferUsages;
 
@@ -78,7 +77,6 @@ impl PostProcessor for SaturationPostProcessor {
         _normal_colors: &[Vec3],
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        let now = Instant::now();
 
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
@@ -121,8 +119,6 @@ impl PostProcessor for SaturationPostProcessor {
         queue.submit([command_buffer]);
 
         let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
-
-        println!("Saturation done after {}ms", now.elapsed().as_millis());
 
         Ok(result.par_iter().map(|d| d.into()).collect())
     }

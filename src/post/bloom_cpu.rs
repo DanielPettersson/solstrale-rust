@@ -10,7 +10,6 @@ use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
-use std::time::Instant;
 
 #[derive(Clone)]
 /// Applies a bloom effect on the pixel colors
@@ -66,7 +65,6 @@ impl PostProcessor for BloomPostProcessor {
         _normal_colors: &[Vec3],
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        let now = Instant::now();
 
         let threshold = self.threshold * num_samples as f64;
         let max_intensity = self.max_intensity * num_samples as f64;
@@ -126,8 +124,6 @@ impl PostProcessor for BloomPostProcessor {
                 col
             })
             .collect();
-
-        println!("Bloom done after {}ms", now.elapsed().as_millis());
 
         Ok(pixel_colors
             .into_par_iter()

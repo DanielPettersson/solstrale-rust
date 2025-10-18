@@ -6,7 +6,6 @@ use crate::post::{PostProcessor, PostProcessors};
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
-use std::time::Instant;
 
 #[derive(Clone)]
 /// Applies a saturation effect on the pixel colors
@@ -49,7 +48,6 @@ impl PostProcessor for SaturationPostProcessor {
         _normal_colors: &[Vec3],
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        let now = Instant::now();
 
         let ret = pixel_colors.par_iter().map(|p| {
             let gray = 0.2989 * p.x + 0.587 * p.y + 0.114 * p.z;
@@ -62,8 +60,6 @@ impl PostProcessor for SaturationPostProcessor {
             )
         }).collect();
 
-        println!("Saturation done after {}ms", now.elapsed().as_millis());
-        
         Ok(ret)
     }
 

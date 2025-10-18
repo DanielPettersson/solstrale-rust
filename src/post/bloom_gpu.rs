@@ -11,10 +11,7 @@ use crate::util::wgpu_util::{
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
-use std::time::Instant;
-#[cfg(feature = "gpu")]
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-#[cfg(feature = "gpu")]
 use wgpu::BufferUsages;
 
 #[derive(Clone)]
@@ -142,7 +139,6 @@ impl PostProcessor for BloomPostProcessor {
         _normal_colors: &[Vec3],
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        let now = Instant::now();
 
         let threshold = self.threshold * num_samples as f64;
         let max_intensity = self.max_intensity * num_samples as f64;
@@ -270,8 +266,6 @@ impl PostProcessor for BloomPostProcessor {
         queue.submit([command_buffer]);
 
         let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
-
-        println!("Bloom done after {}ms", now.elapsed().as_millis());
 
         Ok(result.par_iter().map(|d| d.into()).collect())
     }
