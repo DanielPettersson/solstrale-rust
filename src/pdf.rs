@@ -16,7 +16,7 @@ const SPHERE_PDF_VALUE: f64 = 1. / (4. * PI);
 pub trait Pdf {
     /// Returns the pdf value for a given vector
     fn value(&self, direction: Vec3) -> f64;
-    /// Generate random direction for the pdf shape
+    /// Generate a random direction for the pdf shape
     fn generate(&self) -> Vec3;
 }
 
@@ -47,16 +47,15 @@ pub fn mix_generate(p0: &Pdfs, p1: &Pdfs) -> Vec3 {
     }
 }
 
-/// A probability density functions with a cosine distribution
+/// A probability density function with a cosine distribution
 pub struct CosinePdf {
     uvw: Onb,
 }
 
-impl<'a> CosinePdf {
-    #![allow(clippy::new_ret_no_self)]
+impl CosinePdf {
     /// Creates a new instance of a CosinePdf
-    pub fn new(w: Vec3) -> Pdfs<'a> {
-        Pdfs::from(CosinePdf { uvw: Onb::new(w) })
+    pub fn new(w: Vec3) -> Self {
+        CosinePdf { uvw: Onb::new(w) }
     }
 }
 
@@ -78,10 +77,9 @@ pub struct ContainerPdf<'a> {
 }
 
 impl<'a> ContainerPdf<'a> {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new instance of ContainerPdf
-    pub fn new(objects: &'a [Hittables], origin: Vec3) -> Pdfs<'a> {
-        Pdfs::from(ContainerPdf { objects, origin })
+    pub fn new(objects: &'a [Hittables], origin: Vec3) -> Self {
+        ContainerPdf { objects, origin }
     }
 }
 
@@ -102,13 +100,13 @@ impl Pdf for ContainerPdf<'_> {
 }
 
 /// A probability density functions with a sphere distribution
+#[derive(Default)]
 pub struct SpherePdf();
 
-impl<'a> SpherePdf {
-    #![allow(clippy::new_ret_no_self)]
+impl SpherePdf {
     /// Creates a new instance of SpherePdf
-    pub fn new() -> Pdfs<'a> {
-        Pdfs::from(SpherePdf {})
+    pub fn new() -> Self {
+        SpherePdf::default()
     }
 }
 
@@ -118,7 +116,7 @@ impl Pdf for SpherePdf {
         SPHERE_PDF_VALUE
     }
 
-    /// Generate random direction for the SpherePdf shape
+    /// Generate a random direction for the SpherePdf shape
     fn generate(&self) -> Vec3 {
         random_unit_vector()
     }

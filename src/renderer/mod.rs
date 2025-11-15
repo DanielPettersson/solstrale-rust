@@ -44,7 +44,7 @@ impl Default for RenderConfig {
             width: 300,
             height: 200,
             samples_per_pixel: 50,
-            shader: PathTracingShader::new(50),
+            shader: PathTracingShader::new(50).into(),
             post_processors: vec![],
             render_image_strategy: RenderImageStrategy::OnlyFinal,
         }
@@ -150,7 +150,7 @@ impl Renderer {
             scene
                 .render_config
                 .post_processors
-                .push(NopPostProcessor::new());
+                .push(NopPostProcessor::new().into());
         }
         scene.render_config.post_processors.iter_mut().for_each(|p| {
             p.initialize(

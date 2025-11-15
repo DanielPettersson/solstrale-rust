@@ -53,20 +53,19 @@ impl BvhItem {
 }
 
 impl Bvh {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new hittable object from the given hittable list
     /// The bounding Volume Hierarchy sorts the hittables in a binary tree
     /// where each node has a bounding box.
     /// This is to optimize the ray intersection search when having many hittable objects.
-    pub fn new(list: Vec<Hittables>) -> Hittables {
+    pub fn new(list: Vec<Hittables>) -> Bvh {
         if list.is_empty() {
-            Hittables::from(Bvh {
+            Bvh {
                 left: Box::new(BvhItem::None),
                 right: Box::new(BvhItem::None),
                 b_box: Default::default(),
-            })
+            }
         } else {
-            Hittables::from(new_bvh(list))
+            new_bvh(list)
         }
     }
 }

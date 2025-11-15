@@ -2,7 +2,7 @@
 #![cfg(feature = "gpu")]
 
 use crate::geo::vec3::Vec3;
-use crate::post::{PostProcessor, PostProcessors};
+use crate::post::PostProcessor;
 use crate::util::gaussian::create_gaussian_blur_weights;
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
@@ -37,7 +37,6 @@ pub struct BloomPostProcessor {
 }
 
 impl BloomPostProcessor {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new bloom post-processor
     /// # Arguments
     /// * `kernel_size_fraction` Radius of the blur effect, as a fraction of the rendered image's width
@@ -47,7 +46,7 @@ impl BloomPostProcessor {
         kernel_size_fraction: f64,
         threshold: Option<f64>,
         max_intensity: Option<f64>,
-    ) -> Result<PostProcessors, simple_error::SimpleError> {
+    ) -> Result<Self, simple_error::SimpleError> {
         if !(0. ..=0.5).contains(&kernel_size_fraction) {
             return Err(simple_error::SimpleError::new(
                 "kernel_size_fraction must be between 0 and 0.5",
@@ -92,7 +91,7 @@ impl BloomPostProcessor {
 
         let add_pipeline = compute_pipeline(device, &add_bind_group_layout, &add_module, &[]);
 
-        Ok(PostProcessors::from(BloomPostProcessor {
+        Ok(BloomPostProcessor {
             width: 0,
             height: 0,
             kernel_size_fraction,
@@ -106,7 +105,7 @@ impl BloomPostProcessor {
             apply_pipeline_x: None,
             apply_pipeline_y: None,
             add_pipeline,
-        }))
+        })
     }
 }
 
@@ -244,13 +243,13 @@ impl PostProcessor for BloomPostProcessor {
         );
         add_compute_pass(
             &mut encoder,
-            &self.apply_pipeline_x.as_ref().unwrap(),
+            self.apply_pipeline_x.as_ref().unwrap(),
             &apply_bind_group_x,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
-            &self.apply_pipeline_y.as_ref().unwrap(),
+            self.apply_pipeline_y.as_ref().unwrap(),
             &apply_bind_group_y,
             workgroup_count,
         );

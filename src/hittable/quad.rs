@@ -7,7 +7,6 @@ use crate::geo::transformation::Transformer;
 use crate::geo::Uv;
 use crate::geo::vec3::{ALMOST_ZERO, Vec3};
 use crate::hittable::{Hittable, Hittables};
-use crate::hittable::Hittables::QuadType;
 use crate::material::{Material, Materials, RayHit};
 use crate::random::random_normal_float;
 use crate::util::interval::{Interval, RAY_INTERVAL};
@@ -29,7 +28,6 @@ pub struct Quad {
 }
 
 impl Quad {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new quad
     pub fn new(
         q: Vec3,
@@ -37,7 +35,7 @@ impl Quad {
         v: Vec3,
         mat: Materials,
         transformation: &dyn Transformer,
-    ) -> Hittables {
+    ) -> Self {
         let q = transformation.transform(q, false);
         let u = transformation.transform(u, true);
         let v = transformation.transform(v, true);
@@ -52,7 +50,7 @@ impl Quad {
         let n = u.cross(v);
         let normal = n.unit();
 
-        Hittables::from(Quad {
+        Quad {
             q,
             u,
             v,
@@ -62,7 +60,7 @@ impl Quad {
             mat,
             b_box,
             area: n.length(),
-        })
+        }
     }
 
     /// creates a new box shaped hittable object
@@ -72,7 +70,7 @@ impl Quad {
         mat: Materials,
         transformation: &dyn Transformer,
     ) -> Vec<Hittables> {
-        let mut sides = Vec::new();
+        let mut sides: Vec<Hittables> = Vec::new();
 
         let min = Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z));
         let max = Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z));
@@ -87,42 +85,42 @@ impl Quad {
             dy,
             mat.clone(),
             transformation,
-        ));
+        ).into());
         sides.push(Quad::new(
             Vec3::new(max.x, min.y, max.z),
             dz.neg(),
             dy,
             mat.clone(),
             transformation,
-        ));
+        ).into());
         sides.push(Quad::new(
             Vec3::new(max.x, min.y, min.z),
             dx.neg(),
             dy,
             mat.clone(),
             transformation,
-        ));
+        ).into());
         sides.push(Quad::new(
             Vec3::new(min.x, min.y, min.z),
             dz,
             dy,
             mat.clone(),
             transformation,
-        ));
+        ).into());
         sides.push(Quad::new(
             Vec3::new(min.x, max.y, max.z),
             dx,
             dz.neg(),
             mat.clone(),
             transformation,
-        ));
+        ).into());
         sides.push(Quad::new(
             Vec3::new(min.x, min.y, min.z),
             dx,
             dz,
             mat,
             transformation,
-        ));
+        ).into());
 
         sides
     }
@@ -199,7 +197,7 @@ impl Hittable for Quad {
 
     fn get_lights(&self) -> Vec<Hittables> {
         if self.mat.is_light() {
-            vec![QuadType(self.clone())]
+            vec![self.clone().into()]
         } else {
             vec![]
         }

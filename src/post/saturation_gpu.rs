@@ -2,7 +2,7 @@
 #![cfg(feature = "gpu")]
 
 use crate::geo::vec3::Vec3;
-use crate::post::{PostProcessor, PostProcessors};
+use crate::post::PostProcessor;
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
     compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
@@ -24,11 +24,10 @@ pub struct SaturationPostProcessor {
 }
 
 impl SaturationPostProcessor {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new saturation post-processor
     /// # Arguments
     /// * `saturation_factor` Saturation of the image. From -1 (black and white) to 1 (fully saturated)
-    pub fn new(saturation_factor: f64) -> Result<PostProcessors, simple_error::SimpleError> {
+    pub fn new(saturation_factor: f64) -> Result<Self, simple_error::SimpleError> {
         if !(-1. ..=1.).contains(&saturation_factor) {
             return Err(simple_error::SimpleError::new(
                 "saturation_factor must be between -1 and 1",
@@ -54,12 +53,12 @@ impl SaturationPostProcessor {
             &[("saturation_factor", saturation_factor)],
         );
 
-        Ok(PostProcessors::from(SaturationPostProcessor {
+        Ok(SaturationPostProcessor {
             width: 0,
             height: 0,
             bind_group_layout,
             pipeline,
-        }))
+        })
     }
 }
 
@@ -77,7 +76,6 @@ impl PostProcessor for SaturationPostProcessor {
         _normal_colors: &[Vec3],
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
         let (device, queue) = get_wgpu_device_and_queue();

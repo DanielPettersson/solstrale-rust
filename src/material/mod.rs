@@ -8,10 +8,9 @@ use crate::geo::{Onb, Ray};
 use crate::geo::Uv;
 use crate::geo::vec3::{ONE_VECTOR, random_in_unit_sphere, Vec3, ZERO_VECTOR};
 use crate::hittable::Hittables;
-use crate::material::Materials::{BlendType, DielectricType, DiffuseLightType, IsotropicType, LambertianType, MetalType};
 use crate::material::texture::{SolidColor, Texture};
 use crate::material::texture::Textures;
-use crate::pdf::{ContainerPdf, CosinePdf, mix_generate, mix_value, SpherePdf};
+use crate::pdf::{ContainerPdf, CosinePdf, mix_generate, mix_value, SpherePdf, Pdfs};
 use crate::random::random_normal_float;
 
 pub mod texture;
@@ -74,7 +73,7 @@ pub struct ScatterBasic {
     pub ray: Ray,
 }
 
-/// Scattering of a ray against a light emitting material
+/// Scattering of a ray against a light-emitting material
 pub struct ScatterEmission {
     /// The emitted color from the ray hit
     pub color: Vec3,
@@ -104,7 +103,7 @@ pub trait Material {
     /// Calculate scattering of the ray
     fn scatter(&self, _ray: &Ray, _rec: &RayHit, _lights: &[Hittables]) -> RayScatter;
 
-    /// Get normal transformed by the material, implementations typically uses a normal texture map
+    /// Get the normal transformed by the material, implementations typically uses a normal texture map
     fn get_transformed_normal(&self, onb: Onb, _uv: Uv) -> Vec3 {
         onb.normal
     }
@@ -115,7 +114,7 @@ pub trait Material {
 pub struct AttenuatedColor {
     /// Color value before attenuation
     pub color: Vec3,
-    /// Factor for calculating amount of attenuation
+    /// Factor for calculating the amount of attenuation
     pub attenuation_factor: Option<f64>,
     /// Distance the light has travelled
     pub accumulated_ray_length: f64,
@@ -132,34 +131,21 @@ impl AttenuatedColor {
 }
 
 #[enum_dispatch(Material)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// An enum of available materials
 pub enum Materials {
     /// [`Material`] of type [`Lambertian`]
-    LambertianType(Lambertian),
+    Lambertian,
     /// [`Material`] of type [`Metal`]
-    MetalType(Metal),
+    Metal,
     /// [`Material`] of type [`Dielectric`]
-    DielectricType(Dielectric),
+    Dielectric,
     /// [`Material`] of type [`DiffuseLight`]
-    DiffuseLightType(DiffuseLight),
+    DiffuseLight,
     /// [`Material`] of type [`Isotropic`]
-    IsotropicType(Isotropic),
+    Isotropic,
     /// [`Material`] of type [`Blend`]
-    BlendType(Blend),
-}
-
-impl Clone for Materials {
-    fn clone(&self) -> Self {
-        match self {
-            LambertianType(m) => LambertianType(m.clone()),
-            MetalType(m) => MetalType(m.clone()),
-            DielectricType(m) => DielectricType(m.clone()),
-            DiffuseLightType(m) => DiffuseLightType(m.clone()),
-            IsotropicType(m) => IsotropicType(m.clone()),
-            BlendType(m) => BlendType(m.clone())
-        }
-    }
+    Blend,
 }
 
 /// A typical matte material
@@ -170,10 +156,9 @@ pub struct Lambertian {
 }
 
 impl Lambertian {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new lambertian material
-    pub fn new(albedo: Textures, normal: Option<Textures>) -> Materials {
-        Materials::from(Lambertian { albedo, normal })
+    pub fn new(albedo: Textures, normal: Option<Textures>) -> Lambertian {
+        Lambertian { albedo, normal }
     }
 
     fn scattering_pdf_value(normal: Vec3, scatter_direction: Vec3) -> f64 {
@@ -190,9 +175,9 @@ impl Material for Lambertian {
 
     fn scatter(&self, _: &Ray, rec: &RayHit, lights: &[Hittables]) -> RayScatter {
         let color = self.albedo.color(rec.uv);
-        let pdf = CosinePdf::new(rec.normal);
+        let pdf: Pdfs = CosinePdf::new(rec.normal).into();
 
-        let light_pdf = ContainerPdf::new(lights, rec.hit_point);
+        let light_pdf: Pdfs = ContainerPdf::new(lights, rec.hit_point).into();
 
         let pdf_direction = mix_generate(&light_pdf, &pdf);
         let scattered = Ray::new(rec.hit_point, pdf_direction);
@@ -222,14 +207,13 @@ pub struct Metal {
 }
 
 impl Metal {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a metal material
-    pub fn new(albedo: Textures, normal: Option<Textures>, fuzz: f64) -> Materials {
-        Materials::from(Metal {
+    pub fn new(albedo: Textures, normal: Option<Textures>, fuzz: f64) -> Metal {
+        Metal {
             albedo,
             normal,
             fuzz,
-        })
+        }
     }
 }
 
@@ -264,14 +248,13 @@ pub struct Dielectric {
 }
 
 impl Dielectric {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new dielectric material
-    pub fn new(albedo: Textures, normal: Option<Textures>, index_of_refraction: f64) -> Materials {
-        Materials::from(Dielectric {
+    pub fn new(albedo: Textures, normal: Option<Textures>, index_of_refraction: f64) -> Self {
+        Dielectric {
             albedo,
             normal,
             index_of_refraction,
-        })
+        }
     }
 }
 
@@ -323,8 +306,6 @@ pub struct DiffuseLight {
 }
 
 impl DiffuseLight {
-    #![allow(clippy::new_ret_no_self)]
-
     /// Creates a new diffuse light material
     ///
     /// # Arguments
@@ -332,22 +313,22 @@ impl DiffuseLight {
     /// * `g` - The green component of the light
     /// * `b` - The blue component of the light
     /// * `attenuation_half_length` - The distance at which the light is attenuated to half its strength
-    pub fn new(r: f64, g: f64, b: f64, attenuation_half_length: Option<f64>) -> Materials {
-        Materials::from(DiffuseLight {
-            tex: SolidColor::new(r, g, b),
+    pub fn new(r: f64, g: f64, b: f64, attenuation_half_length: Option<f64>) -> Self {
+        DiffuseLight {
+            tex: SolidColor::new(r, g, b).into(),
             attenuation_factor: attenuation_half_length.map(|a| 1. / a),
-        })
+        }
     }
 
     /// Creates a new diffuse light material
     ///
     /// # Arguments
     /// * `v` - The [`Vec3`] representation of the light color
-    pub fn new_from_vec3(v: Vec3) -> Materials {
-        DiffuseLightType(DiffuseLight {
-            tex: SolidColor::new_from_vec3(v),
+    pub fn new_from_vec3(v: Vec3) -> Self {
+        DiffuseLight {
+            tex: SolidColor::new_from_vec3(v).into(),
             attenuation_factor: None,
-        })
+        }
     }
 }
 
@@ -376,10 +357,9 @@ pub struct Isotropic {
 }
 
 impl Isotropic {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new isotropic material
-    pub(crate) fn new(tex: Textures) -> Materials {
-        Materials::from(Isotropic { tex })
+    pub(crate) fn new(tex: Textures) -> Self {
+        Isotropic { tex }
     }
 }
 
@@ -396,8 +376,8 @@ impl Material for Isotropic {
     fn scatter(&self, _: &Ray, rec: &RayHit, lights: &[Hittables]) -> RayScatter {
         let color = self.tex.color(rec.uv);
 
-        let pdf = SpherePdf::new();
-        let light_pdf = ContainerPdf::new(lights, rec.hit_point);
+        let pdf: Pdfs = SpherePdf::new().into();
+        let light_pdf: Pdfs = ContainerPdf::new(lights, rec.hit_point).into();
         let pdf_direction = mix_generate(&light_pdf, &pdf);
         let scattered = Ray::new(rec.hit_point, pdf_direction);
         let light_pdf_value = mix_value(&light_pdf, &pdf, scattered.direction);
@@ -419,10 +399,9 @@ pub struct Blend {
 }
 
 impl Blend {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new blend material from two underlying material and a blend factor [0..1]
-    pub fn new(material_1: Materials, material_2: Materials, blend_factor: f64) -> Materials {
-        Materials::from(Blend { material_1: Box::new(material_1), material_2: Box::new(material_2), blend_factor })
+    pub fn new(material_1: Materials, material_2: Materials, blend_factor: f64) -> Self {
+        Blend { material_1: Box::new(material_1), material_2: Box::new(material_2), blend_factor }
     }
 }
 
@@ -456,7 +435,7 @@ mod tests {
     #[test]
     fn test_transform_normal_by_map() {
         let n = transform_normal_by_map(
-            &SolidColor::new(1., 0.5, 0.5),
+            &SolidColor::new(1., 0.5, 0.5).into(),
             Onb {
                 tangent: Vec3::new(0., 1., 0.),
                 bi_tangent: Vec3::new(0., 0., 1.),

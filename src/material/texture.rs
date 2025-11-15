@@ -10,7 +10,6 @@ use simple_error::SimpleError;
 use crate::geo::Uv;
 use crate::geo::vec3::Vec3;
 use crate::material::texture::BumpMap::{Height, Normal};
-use crate::material::texture::Textures::{ImageMapType, SolidColorType};
 use crate::util::height_map;
 use crate::util::rgb_color::rgb_to_vec3;
 
@@ -23,22 +22,13 @@ pub trait Texture {
 }
 
 #[enum_dispatch(Texture)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// An enum of available textures types
 pub enum Textures {
     /// [`Texture`] of the type [`SolidColor`]
-    SolidColorType(SolidColor),
+    SolidColor,
     /// [`Texture`] of the type [`ImageMap`]
-    ImageMapType(ImageMap),
-}
-
-impl Clone for Textures {
-    fn clone(&self) -> Self {
-        match self {
-            SolidColorType(t) => SolidColorType(t.clone()),
-            ImageMapType(t) => ImageMapType(t.clone()),
-        }
-    }
+    ImageMap,
 }
 
 /// The variants of bump maps supported.
@@ -86,7 +76,7 @@ fn load_bump_map(path: &str) -> Result<BumpMap, Box<dyn Error>> {
 }
 
 /// Load a normal map texture. Source image can either be a normal or height map
-pub fn load_normal_texture(path: &str) -> Result<Textures, Box<dyn Error>> {
+pub fn load_normal_texture(path: &str) -> Result<ImageMap, Box<dyn Error>> {
     match load_bump_map(path)? {
         Normal(n) => Ok(ImageMap::new(Arc::new(n))),
         Height(h) => {
@@ -101,19 +91,18 @@ pub fn load_normal_texture(path: &str) -> Result<Textures, Box<dyn Error>> {
 pub struct SolidColor(Vec3);
 
 impl SolidColor {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new solid color texture
-    pub fn new(r: f64, g: f64, b: f64) -> Textures {
+    pub fn new(r: f64, g: f64, b: f64) -> Self {
         SolidColor::new_from_vec3(Vec3::new(r, g, b))
     }
     /// Create a new solid color texture from an array
     /// where colors are in the order r, g, b
-    pub fn new_from_f32_array(c: [f32; 3]) -> Textures {
+    pub fn new_from_f32_array(c: [f32; 3]) -> Self {
         SolidColor::new(c[0] as f64, c[1] as f64, c[2] as f64)
     }
     /// Create a new solid color texture from a [`Vec3`]
-    pub fn new_from_vec3(color: Vec3) -> Textures {
-        Textures::from(SolidColor(color))
+    pub fn new_from_vec3(color: Vec3) -> Self {
+        SolidColor(color)
     }
 }
 
@@ -132,9 +121,8 @@ pub struct ImageMap {
 }
 
 impl ImageMap {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new image texture from a file path
-    pub fn load(path: &str) -> Result<Textures, Box<dyn Error>> {
+    pub fn load(path: &str) -> Result<Self, Box<dyn Error>> {
         let mut reader = ImageReader::open(path).map_err(|err| {
             SimpleError::new(format!("Failed to open image texture {}: {}", path, err))
         })?;
@@ -153,14 +141,14 @@ impl ImageMap {
     }
 
     /// Creates a texture that uses image data for color
-    pub fn new(image: Arc<RgbImage>) -> Textures {
+    pub fn new(image: Arc<RgbImage>) -> Self {
         let w = image.width();
         let h = image.height();
-        Textures::from(ImageMap {
+        ImageMap {
             image,
             max_x: w as f32 - 1.,
             max_y: h as f32 - 1.,
-        })
+        }
     }
 }
 

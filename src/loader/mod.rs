@@ -1,7 +1,7 @@
 //! Module containing object model loaders
 
 use crate::geo::transformation::Transformer;
-use crate::hittable::Hittables;
+use crate::hittable::Bvh;
 use crate::material::Materials;
 use std::error::Error;
 
@@ -14,5 +14,5 @@ pub trait Loader {
         &self,
         transformation: &dyn Transformer,
         default_material: Option<Materials>,
-    ) -> Result<Hittables, Box<dyn Error>>;
+    ) -> Result<Bvh, Box<dyn Error>>;
 }

@@ -1,11 +1,11 @@
 //! Contains the different shader used by the renderer
 use enum_dispatch::enum_dispatch;
 
-use crate::geo::Ray;
 use crate::geo::vec3::Vec3;
-use crate::material::{AttenuatedColor, RayHit};
+use crate::geo::Ray;
 use crate::material::Material;
 use crate::material::RayScatter::{ScatterBasic, ScatterEmission, ScatterPdf};
+use crate::material::{AttenuatedColor, RayHit};
 use crate::renderer::Renderer;
 
 /// Calculates the color from a ray hitting a hittable object
@@ -34,13 +34,13 @@ pub trait Shader {
 /// An enum of available shaders
 pub enum Shaders {
     /// [`Shader`] of type [`PathTracingShader`]
-    PathTracingShaderType(PathTracingShader),
+    PathTracingShader,
     /// [`Shader`] of type [`AlbedoShader`]
-    AlbedoShaderType(AlbedoShader),
+    AlbedoShader,
     /// [`Shader`] of type [`NormalShader`]
-    NormalShaderType(NormalShader),
+    NormalShader,
     /// [`Shader`] of type [`SimpleShader`]
-    SimpleShaderType(SimpleShader),
+    SimpleShader,
 }
 
 #[derive(Clone)]
@@ -50,10 +50,9 @@ pub struct PathTracingShader {
 }
 
 impl PathTracingShader {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new path tracing shader
-    pub fn new(max_depth: u32) -> Shaders {
-        Shaders::from(PathTracingShader { max_depth })
+    pub fn new(max_depth: u32) -> Self {
+        PathTracingShader { max_depth }
     }
 }
 
@@ -75,16 +74,13 @@ impl Shader for PathTracingShader {
         let ray_scatter = rec.material.scatter(ray, rec, &renderer.lights);
 
         match ray_scatter {
-            ScatterEmission(s) => {
-                AttenuatedColor {
-                    color: s.color,
-                    attenuation_factor: s.attenuation_factor,
-                    accumulated_ray_length: total_ray_length,
-                }
-            }
+            ScatterEmission(s) => AttenuatedColor {
+                color: s.color,
+                attenuation_factor: s.attenuation_factor,
+                accumulated_ray_length: total_ray_length,
+            },
             ScatterBasic(s) => {
-                let ray_color_res =
-                    renderer.ray_color(&s.ray, depth + 1, total_ray_length);
+                let ray_color_res = renderer.ray_color(&s.ray, depth + 1, total_ray_length);
 
                 AttenuatedColor {
                     color: s.color * ray_color_res.pixel_color.color,
@@ -124,41 +120,46 @@ fn filter_color_value(val: f64) -> f64 {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 /// Outputs flat color
 pub struct AlbedoShader {}
 
 impl AlbedoShader {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new albedo shader
-    pub fn new() -> Shaders {
-        Shaders::from(AlbedoShader {})
+    pub fn new() -> Self {
+        AlbedoShader::default()
     }
 }
 
 impl Shader for AlbedoShader {
     /// Calculates the color only attenuation color
-    fn shade(&self, renderer: &Renderer, rec: &RayHit, ray: &Ray, _: u32, _: f64) -> AttenuatedColor {
+    fn shade(
+        &self,
+        renderer: &Renderer,
+        rec: &RayHit,
+        ray: &Ray,
+        _: u32,
+        _: f64,
+    ) -> AttenuatedColor {
         AttenuatedColor {
             color: match rec.material.scatter(ray, rec, &renderer.lights) {
                 ScatterEmission(s) => s.color,
                 ScatterBasic(s) => s.color,
-                ScatterPdf(s) => s.color
+                ScatterPdf(s) => s.color,
             },
             ..AttenuatedColor::default()
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 /// Outputs the normals of the ray hit point
 pub struct NormalShader {}
 
 impl NormalShader {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new normal shader
-    pub fn new() -> Shaders {
-        Shaders::from(NormalShader {})
+    pub fn new() -> Self {
+        NormalShader::default()
     }
 }
 
@@ -172,25 +173,31 @@ impl Shader for NormalShader {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 /// A simple shader for quick rendering
 pub struct SimpleShader {
     light_dir: Vec3,
 }
 
 impl SimpleShader {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new simple shader
-    pub fn new() -> Shaders {
-        Shaders::from(SimpleShader {
+    pub fn new() -> Self {
+        SimpleShader {
             light_dir: Vec3::new(1., 1., -1.),
-        })
+        }
     }
 }
 
 impl Shader for SimpleShader {
     /// Calculates the color only using normal and attenuation color
-    fn shade(&self, renderer: &Renderer, rec: &RayHit, ray: &Ray, _: u32, _: f64) -> AttenuatedColor {
+    fn shade(
+        &self,
+        renderer: &Renderer,
+        rec: &RayHit,
+        ray: &Ray,
+        _: u32,
+        _: f64,
+    ) -> AttenuatedColor {
         AttenuatedColor {
             color: match rec.material.scatter(ray, rec, &renderer.lights) {
                 ScatterEmission(s) => s.color,
@@ -200,7 +207,7 @@ impl Shader for SimpleShader {
                     let normal_factor = rec.normal.dot(self.light_dir) * 0.5 + 0.75;
 
                     s.color * normal_factor
-                },
+                }
                 ScatterPdf(s) => {
                     // Get a factor to multiply attenuation color, range between .25 -> 1.25
                     // To get some decent flat shading

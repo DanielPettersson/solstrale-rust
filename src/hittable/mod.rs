@@ -15,7 +15,6 @@ pub use crate::hittable::constant_medium::ConstantMedium;
 pub use crate::hittable::quad::Quad;
 pub use crate::hittable::sphere::Sphere;
 pub use crate::hittable::triangle::Triangle;
-use crate::hittable::Hittables::{BvhType, ConstantMediumType, QuadType, SphereType, TriangleType};
 use crate::material::RayHit;
 use crate::util::interval::Interval;
 use enum_dispatch::enum_dispatch;
@@ -45,29 +44,18 @@ pub trait Hittable {
 }
 
 #[enum_dispatch(Hittable)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Enum of the available hittable types
 pub enum Hittables {
     /// [`Hittable`] of the type [`Sphere`]
-    SphereType(Sphere),
+   Sphere,
     /// [`Hittable`] of the type [`ConstantMedium`]
-    ConstantMediumType(ConstantMedium),
+    ConstantMedium,
     /// [`Hittable`] of the type [`Quad`]
-    QuadType(Quad),
+    Quad,
     /// [`Hittable`] of the type [`Triangle`]
-    TriangleType(Triangle),
+    Triangle,
     /// [`Hittable`] of the type [`Bvh`]
-    BvhType(Bvh),
+    Bvh,
 }
 
-impl Clone for Hittables {
-    fn clone(&self) -> Self {
-        match self {
-            SphereType(h) => SphereType(h.clone()),
-            ConstantMediumType(h) => ConstantMediumType(h.clone()),
-            QuadType(h) => QuadType(h.clone()),
-            TriangleType(h) => TriangleType(h.clone()),
-            BvhType(h) => BvhType(h.clone()),
-        }
-    }
-}

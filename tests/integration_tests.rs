@@ -33,8 +33,8 @@ const IMAGE_COMPARISON_SCORE_THRESHOLD: f64 = 0.95;
 #[test]
 fn test_render_scene() {
     let shaders: HashMap<&str, Shaders> = HashMap::from([
-        ("pathTracing", PathTracingShader::new(50)),
-        ("simple", SimpleShader::new()),
+        ("pathTracing", PathTracingShader::new(50).into()),
+        ("simple", SimpleShader::new().into()),
     ]);
 
     for (shader_name, shader) in shaders {
@@ -122,7 +122,7 @@ fn test_render_normal_mapping_disabled() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new()],
+        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
@@ -135,7 +135,7 @@ fn test_render_normal_mapping_1() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new()],
+        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
@@ -148,7 +148,7 @@ fn test_render_normal_mapping_2() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new()],
+        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
@@ -304,7 +304,7 @@ fn test_aabb_of_rotated_quad() {
             RenderConfig {
                 width: 300,
                 height: 300,
-                shader: SimpleShader::new(),
+                shader: SimpleShader::new().into(),
                 samples_per_pixel: 1,
                 ..RenderConfig::default()
             },
