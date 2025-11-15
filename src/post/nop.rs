@@ -1,5 +1,5 @@
 use crate::geo::vec3::Vec3;
-use crate::post::{PostProcessor, PostProcessors};
+use crate::post::PostProcessor;
 use std::error::Error;
 
 #[derive(Clone, Default)]
@@ -10,10 +10,9 @@ pub struct NopPostProcessor {
 }
 
 impl NopPostProcessor {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new nop post-processor
-    pub fn new() -> PostProcessors {
-        PostProcessors::from(NopPostProcessor::default())
+    pub fn new() -> Self {
+        NopPostProcessor::default()
     }
 }
 

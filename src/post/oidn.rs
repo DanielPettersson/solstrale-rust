@@ -1,5 +1,5 @@
 use crate::geo::vec3::Vec3;
-use crate::post::{PostProcessor, PostProcessors};
+use crate::post::PostProcessor;
 use std::error::Error;
 
 #[derive(Clone, Default)]
@@ -10,10 +10,9 @@ pub struct OidnPostProcessor {
 }
 
 impl OidnPostProcessor {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new oidn post processor
-    pub fn new() -> PostProcessors {
-        PostProcessors::from(OidnPostProcessor::default())
+    pub fn new() -> Self {
+        OidnPostProcessor::default()
     }
 }
 

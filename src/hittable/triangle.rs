@@ -4,12 +4,11 @@ use crate::geo::transformation::Transformer;
 use crate::geo::Uv;
 use crate::geo::vec3::{ALMOST_ZERO, Vec3};
 use crate::hittable::{Hittable, Hittables};
-use crate::hittable::Hittables::TriangleType;
 use crate::material::{Material, Materials, RayHit};
 use crate::random::random_normal_float;
 use crate::util::interval::{Interval, RAY_INTERVAL};
 
-/// A triangle shaped hittable object
+/// A triangle-shaped hittable object
 #[derive(Clone, Debug)]
 pub struct Triangle {
     v0: Vec3,
@@ -27,7 +26,6 @@ pub struct Triangle {
 }
 
 impl Triangle {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new triangle hittable object with no texture coordinates
     pub fn new(
         v0: Vec3,
@@ -35,7 +33,7 @@ impl Triangle {
         v2: Vec3,
         mat: Materials,
         transformation: &dyn Transformer,
-    ) -> Hittables {
+    ) -> Triangle {
         Triangle::new_with_tex_coords(
             v0,
             v1,
@@ -59,7 +57,7 @@ impl Triangle {
         uv2: Uv,
         mat: Materials,
         transformation: &dyn Transformer,
-    ) -> Hittables {
+    ) -> Triangle {
         let v0 = transformation.transform(v0, false);
         let v1 = transformation.transform(v1, false);
         let v2 = transformation.transform(v2, false);
@@ -79,7 +77,7 @@ impl Triangle {
         let tangent = ((delta_pos_1 * delta_uv_2.v - delta_pos_2 * delta_uv_1.v) * r).unit();
         let bi_tangent = ((delta_pos_2 * delta_uv_1.u - delta_pos_1 * delta_uv_2.u) * r).unit();
 
-        Hittables::from(Triangle {
+        Triangle {
             v0,
             v0v1,
             v0v2,
@@ -92,7 +90,7 @@ impl Triangle {
             mat,
             b_box,
             area,
-        })
+        }
     }
 }
 
@@ -178,7 +176,7 @@ impl Hittable for Triangle {
 
     fn get_lights(&self) -> Vec<Hittables> {
         if self.mat.is_light() {
-            vec![TriangleType(self.clone())]
+            vec![self.clone().into()]
         } else {
             vec![]
         }

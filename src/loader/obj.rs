@@ -16,7 +16,7 @@ use crate::hittable::Hittables;
 use crate::hittable::Triangle;
 use crate::loader::Loader;
 use crate::material::{Lambertian, Materials, texture};
-use crate::material::texture::{ImageMap, SolidColor};
+use crate::material::texture::{ImageMap, SolidColor, Textures};
 
 /// Contains file information about the obj to load
 pub struct Obj {
@@ -39,9 +39,9 @@ impl Loader for Obj {
         &self,
         transformation: &dyn Transformer,
         default_material: Option<Materials>,
-    ) -> Result<Hittables, Box<dyn Error>> {
+    ) -> Result<Bvh, Box<dyn Error>> {
         let default_material =
-            default_material.unwrap_or(Lambertian::new(SolidColor::new(1., 1., 1.), None));
+            default_material.unwrap_or(Lambertian::new(SolidColor::new(1., 1., 1.).into(), None).into());
         let load_options = LoadOptions {
             triangulate: true,
             ..Default::default()
@@ -56,26 +56,26 @@ impl Loader for Obj {
 
         let mut mat_map = HashMap::from([(-1, default_material.clone())]);
         for (i, m) in materials.iter().enumerate() {
-            let albedo_texture = match &m.diffuse_texture {
+            let albedo_texture: Textures = match &m.diffuse_texture {
                 None => match m.diffuse {
-                    None => SolidColor::new(1., 1., 1.),
-                    Some(c) => SolidColor::new_from_f32_array(c),
+                    None => SolidColor::new(1., 1., 1.).into(),
+                    Some(c) => SolidColor::new_from_f32_array(c).into(),
                 },
                 Some(diffuse_texture_filename) => {
-                    ImageMap::load(&format!("{}{}", self.path, diffuse_texture_filename))?
+                    ImageMap::load(&format!("{}{}", self.path, diffuse_texture_filename))?.into()
                 }
             };
-            let normal_texture = match &m.normal_texture {
+            let normal_texture: Option<Textures> = match &m.normal_texture {
                 None => None,
                 Some(bump_texture_filename) => {
                     let bump_texture_path = format!("{}{}", self.path, bump_texture_filename);
-                    Some(texture::load_normal_texture(&bump_texture_path)?)
+                    Some(texture::load_normal_texture(&bump_texture_path)?.into())
                 }
             };
-            mat_map.insert(i as i8, Lambertian::new(albedo_texture, normal_texture));
+            mat_map.insert(i as i8, Lambertian::new(albedo_texture, normal_texture).into());
         }
 
-        let mut triangles = Vec::new();
+        let mut triangles: Vec<Hittables> = Vec::new();
 
         for m in models {
             let mesh = &m.mesh;
@@ -128,7 +128,7 @@ impl Loader for Obj {
                     uv2,
                     material,
                     transformation,
-                ));
+                ).into());
             }
         }
 

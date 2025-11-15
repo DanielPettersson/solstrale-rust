@@ -3,7 +3,7 @@
 
 use crate::geo::vec3::Vec3;
 use crate::geo::vec3::ZERO_VECTOR;
-use crate::post::{PostProcessor, PostProcessors};
+use crate::post::PostProcessor;
 use crate::util::gaussian::create_gaussian_blur_weights;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelIterator;
@@ -22,7 +22,6 @@ pub struct BloomPostProcessor {
 }
 
 impl BloomPostProcessor {
-    #![allow(clippy::new_ret_no_self)]
     /// Create a new bloom post-processor
     /// # Arguments
     /// * `kernel_size_fraction` Radius of the blur effect, as a fraction of the rendered image's width
@@ -32,7 +31,7 @@ impl BloomPostProcessor {
         kernel_size_fraction: f64,
         threshold: Option<f64>,
         max_intensity: Option<f64>,
-    ) -> Result<PostProcessors, simple_error::SimpleError> {
+    ) -> Result<Self, simple_error::SimpleError> {
         if !(0. ..=0.5).contains(&kernel_size_fraction) {
             return Err(simple_error::SimpleError::new(
                 "kernel_size_fraction must be between 0 and 0.5",
@@ -42,13 +41,13 @@ impl BloomPostProcessor {
         let threshold = threshold.unwrap_or(Vec3::new(1., 1., 1.).length());
         let max_intensity = max_intensity.unwrap_or(1000.);
 
-        Ok(PostProcessors::from(BloomPostProcessor {
+        Ok(BloomPostProcessor {
             width: 0,
             height: 0,
             kernel_size_fraction,
             threshold,
             max_intensity,
-        }))
+        })
     }
 }
 
@@ -65,7 +64,6 @@ impl PostProcessor for BloomPostProcessor {
         _normal_colors: &[Vec3],
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-
         let threshold = self.threshold * num_samples as f64;
         let max_intensity = self.max_intensity * num_samples as f64;
         let kernel_size = (self.kernel_size_fraction * self.width as f64) as usize * 2 + 1;

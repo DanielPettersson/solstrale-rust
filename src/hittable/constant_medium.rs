@@ -20,14 +20,13 @@ pub struct ConstantMedium {
 }
 
 impl ConstantMedium {
-    #![allow(clippy::new_ret_no_self)]
     /// Creates a new instance of the constant medium
-    pub fn new(boundary: Hittables, density: f64, color: Vec3) -> Hittables {
-        Hittables::from(ConstantMedium {
+    pub fn new(boundary: Hittables, density: f64, color: Vec3) -> Self {
+        ConstantMedium {
             boundary: Box::new(boundary),
             negative_inverse_density: -1. / density,
-            phase_function: Isotropic::new(SolidColor::new_from_vec3(color)),
-        })
+            phase_function: Isotropic::new(SolidColor::new_from_vec3(color).into()).into(),
+        }
     }
 }
 

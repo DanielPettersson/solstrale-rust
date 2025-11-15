@@ -78,13 +78,13 @@ pub trait PostProcessor {
 /// An enum of available post-processors
 pub enum PostProcessors {
     /// [`PostProcessor`] of type [`OidnPostProcessor`]
-    OidnPostProcessorType(OidnPostProcessor),
+    OidnPostProcessor,
     /// [`PostProcessor`] of type [`BloomPostProcessor`]
-    BloomPostProcessorType(BloomPostProcessor),
+    BloomPostProcessor,
     /// [`PostProcessor`] of type [`SaturationPostProcessor`]
-    SaturationPostProcessorType(SaturationPostProcessor),
+    SaturationPostProcessor,
     /// [`PostProcessor`] of type [`NopPostProcessor`]
-    NopPostProcessorType(NopPostProcessor),
+    NopPostProcessor,
 }
 
 fn pixel_colors_to_rgb_image(

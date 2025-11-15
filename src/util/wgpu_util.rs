@@ -1,5 +1,4 @@
 //! Utility functions for working with wgpu
-#![cfg(feature = "gpu")]
 use bytemuck::AnyBitPattern;
 use once_cell::sync::Lazy;
 use simple_error::SimpleError;
