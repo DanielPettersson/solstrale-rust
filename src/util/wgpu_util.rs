@@ -51,8 +51,12 @@ pub(crate) fn get_result_from_buffer<T: AnyBitPattern>(
     let buffer_slice = buffer.slice(..);
     buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = buffer_slice.get_mapped_range();
-    bytemuck::cast_slice(&data).to_vec()
+    let result = {
+        let data = buffer_slice.get_mapped_range();
+        bytemuck::cast_slice(&data).to_vec()
+    };
+    buffer.unmap();
+    result
 }
 
 pub(crate) fn add_compute_pass(

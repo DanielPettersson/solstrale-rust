@@ -10,7 +10,6 @@ use crate::util::wgpu_util::{
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::BufferUsages;
 
 #[derive(Clone)]
@@ -21,6 +20,11 @@ pub struct SaturationPostProcessor {
 
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
+
+    input_pixels_buffer: Option<wgpu::Buffer>,
+    output_pixels_buffer: Option<wgpu::Buffer>,
+    download_buffer: Option<wgpu::Buffer>,
+    bind_group: Option<wgpu::BindGroup>,
 }
 
 impl SaturationPostProcessor {
@@ -58,14 +62,57 @@ impl SaturationPostProcessor {
             height: 0,
             bind_group_layout,
             pipeline,
+            input_pixels_buffer: None,
+            output_pixels_buffer: None,
+            download_buffer: None,
+            bind_group: None,
         })
     }
 }
 
 impl PostProcessor for SaturationPostProcessor {
     fn initialize(&mut self, width: u32, height: u32) {
+        if self.width == width && self.height == height && self.input_pixels_buffer.is_some() {
+            return;
+        }
+
         self.width = width;
         self.height = height;
+
+        let (device, _) = get_wgpu_device_and_queue();
+        let size = (width * height * 16) as u64;
+
+        let input_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let output_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = bind_group(
+            device,
+            &self.bind_group_layout,
+            &[&input_pixels_buffer, &output_pixels_buffer],
+        );
+
+        self.input_pixels_buffer = Some(input_pixels_buffer);
+        self.output_pixels_buffer = Some(output_pixels_buffer);
+        self.download_buffer = Some(download_buffer);
+        self.bind_group = Some(bind_group);
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -80,43 +127,24 @@ impl PostProcessor for SaturationPostProcessor {
 
         let (device, queue) = get_wgpu_device_and_queue();
 
-        let input_pixels_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&input_pixels),
-            usage: BufferUsages::STORAGE,
-        });
+        let input_pixels_buffer = self.input_pixels_buffer.as_ref().ok_or("Not initialized")?;
+        let output_pixels_buffer = self.output_pixels_buffer.as_ref().ok_or("Not initialized")?;
+        let download_buffer = self.download_buffer.as_ref().ok_or("Not initialized")?;
+        let bind_group = self.bind_group.as_ref().ok_or("Not initialized")?;
 
-        let output_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: input_pixels_buffer.size(),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: input_pixels_buffer.size(),
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = bind_group(
-            device,
-            &self.bind_group_layout,
-            &[&input_pixels_buffer, &output_pixels_buffer],
-        );
+        queue.write_buffer(input_pixels_buffer, 0, bytemuck::cast_slice(&input_pixels));
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         let workgroup_count = pixel_colors.len().div_ceil(64) as u32;
-        add_compute_pass(&mut encoder, &self.pipeline, &bind_group, workgroup_count);
-        add_buffer_copy(&mut encoder, &output_pixels_buffer, &download_buffer);
+        add_compute_pass(&mut encoder, &self.pipeline, bind_group, workgroup_count);
+        add_buffer_copy(&mut encoder, output_pixels_buffer, download_buffer);
 
         let command_buffer = encoder.finish();
         queue.submit([command_buffer]);
 
-        let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
+        let result = get_result_from_buffer::<[f32; 4]>(device, download_buffer);
 
         Ok(result.par_iter().map(|d| d.into()).collect())
     }
