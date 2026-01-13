@@ -15,4 +15,7 @@ jobs:
       - uses: actions-rs/clippy-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo test --no-default-features
+      - name: Generate code coverage
+        run: cargo llvm-cov --workspace --no-default-features --lcov --output-path lcov.info
+      - name: Display coverage summary
+        run: cargo llvm-cov report --no-default-features
