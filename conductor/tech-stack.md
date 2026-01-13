@@ -20,3 +20,4 @@
 ## Utilities
 - **derive_more:** To reduce boilerplate for common trait implementations.
 - **once_cell:** For thread-safe initialization of global or shared resources.
+- **cargo-llvm-cov:** Tooling for measuring and reporting test coverage using LLVM source-based coverage.

@@ -21,3 +21,4 @@ Cargo.lock
 /out.jpg
 /perf.data
 lcov.info
+lcov_ci.info
