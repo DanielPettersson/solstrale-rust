@@ -2,7 +2,7 @@
 
 ## Phase 1: Local Tooling Setup
 - [x] Task: Install `cargo-llvm-cov` and required LLVM components locally
-- [ ] Task: Verify `cargo-llvm-cov` can generate a text summary report
+- [x] Task: Verify `cargo-llvm-cov` can generate a text summary report
 - [ ] Task: Verify `cargo-llvm-cov` can generate an `lcov.info` report
 - [ ] Task: Create a helper script `coverage.sh` for easy local execution
 - [ ] Task: Conductor - User Manual Verification 'Local Tooling Setup' (Protocol in workflow.md)
