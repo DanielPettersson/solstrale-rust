@@ -34,6 +34,18 @@ pub struct BloomPostProcessor {
     apply_pipeline_x: Option<wgpu::ComputePipeline>,
     apply_pipeline_y: Option<wgpu::ComputePipeline>,
     add_pipeline: wgpu::ComputePipeline,
+
+    weights_buffer: Option<wgpu::Buffer>,
+    input_pixels_buffer: Option<wgpu::Buffer>,
+    intermediate_buffer1: Option<wgpu::Buffer>,
+    intermediate_buffer2: Option<wgpu::Buffer>,
+    output_pixels_buffer: Option<wgpu::Buffer>,
+    download_buffer: Option<wgpu::Buffer>,
+
+    filter_bright_bind_group: Option<wgpu::BindGroup>,
+    apply_bind_group_x: Option<wgpu::BindGroup>,
+    apply_bind_group_y: Option<wgpu::BindGroup>,
+    add_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl BloomPostProcessor {
@@ -105,12 +117,26 @@ impl BloomPostProcessor {
             apply_pipeline_x: None,
             apply_pipeline_y: None,
             add_pipeline,
+            weights_buffer: None,
+            input_pixels_buffer: None,
+            intermediate_buffer1: None,
+            intermediate_buffer2: None,
+            output_pixels_buffer: None,
+            download_buffer: None,
+            filter_bright_bind_group: None,
+            apply_bind_group_x: None,
+            apply_bind_group_y: None,
+            add_bind_group: None,
         })
     }
 }
 
 impl PostProcessor for BloomPostProcessor {
     fn initialize(&mut self, width: u32, height: u32) {
+        if self.width == width && self.height == height && self.weights_buffer.is_some() {
+            return;
+        }
+
         self.width = width;
         self.height = height;
 
@@ -128,24 +154,10 @@ impl PostProcessor for BloomPostProcessor {
             &self.apply_module,
             &[("width", width as f64), ("x_dir", 0.), ("y_dir", 1.)],
         ));
-    }
 
-    #[allow(clippy::needless_range_loop)]
-    fn intermediate_post_process(
-        &self,
-        pixel_colors: &[Vec3],
-        _albedo_colors: &[Vec3],
-        _normal_colors: &[Vec3],
-        num_samples: u32,
-    ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-
-        let threshold = self.threshold * num_samples as f64;
-        let max_intensity = self.max_intensity * num_samples as f64;
-        let kernel_size = (self.kernel_size_fraction * self.width as f64) as usize * 2 + 1;
+        let kernel_size = (self.kernel_size_fraction * width as f64) as usize * 2 + 1;
         let weights = create_gaussian_blur_weights(kernel_size, kernel_size as f32 / 5.);
-        let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
-
-        let (device, queue) = get_wgpu_device_and_queue();
+        let size = (width * height * 16) as u64;
 
         let weights_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
@@ -153,36 +165,37 @@ impl PostProcessor for BloomPostProcessor {
             usage: BufferUsages::STORAGE,
         });
 
-        let input_pixels_buffer = device.create_buffer_init(&BufferInitDescriptor {
+        let input_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(&input_pixels),
-            usage: BufferUsages::STORAGE,
+            size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let intermediate_buffer1 = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: input_pixels_buffer.size(),
+            size,
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
         let intermediate_buffer2 = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: input_pixels_buffer.size(),
+            size,
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
         let output_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: input_pixels_buffer.size(),
+            size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: input_pixels_buffer.size(),
+            size,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -223,13 +236,49 @@ impl PostProcessor for BloomPostProcessor {
             ],
         );
 
+        self.weights_buffer = Some(weights_buffer);
+        self.input_pixels_buffer = Some(input_pixels_buffer);
+        self.intermediate_buffer1 = Some(intermediate_buffer1);
+        self.intermediate_buffer2 = Some(intermediate_buffer2);
+        self.output_pixels_buffer = Some(output_pixels_buffer);
+        self.download_buffer = Some(download_buffer);
+        self.filter_bright_bind_group = Some(filter_bright_bind_group);
+        self.apply_bind_group_x = Some(apply_bind_group_x);
+        self.apply_bind_group_y = Some(apply_bind_group_y);
+        self.add_bind_group = Some(add_bind_group);
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn intermediate_post_process(
+        &self,
+        pixel_colors: &[Vec3],
+        _albedo_colors: &[Vec3],
+        _normal_colors: &[Vec3],
+        num_samples: u32,
+    ) -> Result<Vec<Vec3>, Box<dyn Error>> {
+
+        let threshold = self.threshold * num_samples as f64;
+        let max_intensity = self.max_intensity * num_samples as f64;
+        let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
+
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        let input_pixels_buffer = self.input_pixels_buffer.as_ref().ok_or("Not initialized")?;
+        let output_pixels_buffer = self.output_pixels_buffer.as_ref().ok_or("Not initialized")?;
+        let download_buffer = self.download_buffer.as_ref().ok_or("Not initialized")?;
+        let filter_bright_bind_group = self.filter_bright_bind_group.as_ref().ok_or("Not initialized")?;
+        let apply_bind_group_x = self.apply_bind_group_x.as_ref().ok_or("Not initialized")?;
+        let apply_bind_group_y = self.apply_bind_group_y.as_ref().ok_or("Not initialized")?;
+        let add_bind_group = self.add_bind_group.as_ref().ok_or("Not initialized")?;
+
+        queue.write_buffer(input_pixels_buffer, 0, bytemuck::cast_slice(&input_pixels));
+
         let filter_bright_pipeline = compute_pipeline(
             device,
             &self.filter_bright_bind_group_layout,
             &self.filter_bright_module,
             &[("threshold", threshold), ("max_intensity", max_intensity)],
         );
-
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -238,33 +287,33 @@ impl PostProcessor for BloomPostProcessor {
         add_compute_pass(
             &mut encoder,
             &filter_bright_pipeline,
-            &filter_bright_bind_group,
+            filter_bright_bind_group,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
             self.apply_pipeline_x.as_ref().unwrap(),
-            &apply_bind_group_x,
+            apply_bind_group_x,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
             self.apply_pipeline_y.as_ref().unwrap(),
-            &apply_bind_group_y,
+            apply_bind_group_y,
             workgroup_count,
         );
         add_compute_pass(
             &mut encoder,
             &self.add_pipeline,
-            &add_bind_group,
+            add_bind_group,
             workgroup_count,
         );
-        add_buffer_copy(&mut encoder, &output_pixels_buffer, &download_buffer);
+        add_buffer_copy(&mut encoder, output_pixels_buffer, download_buffer);
 
         let command_buffer = encoder.finish();
         queue.submit([command_buffer]);
 
-        let result = get_result_from_buffer::<[f32; 4]>(device, &download_buffer);
+        let result = get_result_from_buffer::<[f32; 4]>(device, download_buffer);
 
         Ok(result.par_iter().map(|d| d.into()).collect())
     }
