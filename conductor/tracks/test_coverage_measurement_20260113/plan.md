@@ -5,7 +5,7 @@
 - [x] Task: Verify `cargo-llvm-cov` can generate a text summary report
 - [x] Task: Verify `cargo-llvm-cov` can generate an `lcov.info` report
 - [x] Task: Create a helper script `coverage.sh` for easy local execution
-- [ ] Task: Conductor - User Manual Verification 'Local Tooling Setup' (Protocol in workflow.md)
+- [~] Task: Conductor - User Manual Verification 'Local Tooling Setup' (Protocol in workflow.md)
 
 ## Phase 2: CI Integration
 - [ ] Task: Update `.github/workflows/ci.yaml` to install `cargo-llvm-cov` and its dependencies
