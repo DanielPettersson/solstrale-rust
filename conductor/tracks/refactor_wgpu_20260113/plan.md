@@ -13,9 +13,9 @@ This track focuses on optimizing GPU resource management for Bloom and Saturatio
 - [x] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md) 64aa039
 
 ## Phase 3: Refactor BloomPostProcessor
-- [ ] Task: Modify `BloomPostProcessor` to store buffers as fields.
-- [ ] Task: Implement resource reuse logic in `BloomPostProcessor::initialize` and `BloomPostProcessor::intermediate_post_process`.
-- [ ] Task: Verify `BloomPostProcessor` with existing tests and ensure no regressions.
+- [x] Task: Modify `BloomPostProcessor` to store buffers as fields. 0521489
+- [x] Task: Implement resource reuse logic in `BloomPostProcessor::initialize` and `BloomPostProcessor::intermediate_post_process`. 0521489
+- [x] Task: Verify `BloomPostProcessor` with existing tests and ensure no regressions. 0521489
 - [ ] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
 
 ## Phase 4: Final Verification and Cleanup
