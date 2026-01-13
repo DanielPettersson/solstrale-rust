@@ -14,6 +14,8 @@ use std::error::Error;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::BufferUsages;
 
+use std::sync::{Arc, Mutex};
+
 #[derive(Clone)]
 /// Applies a bloom effect on the pixel colors
 pub struct BloomPostProcessor {
@@ -46,6 +48,8 @@ pub struct BloomPostProcessor {
     apply_bind_group_x: Option<wgpu::BindGroup>,
     apply_bind_group_y: Option<wgpu::BindGroup>,
     add_bind_group: Option<wgpu::BindGroup>,
+
+    filter_bright_pipeline_cache: Arc<Mutex<Option<(u32, wgpu::ComputePipeline)>>>,
 }
 
 impl BloomPostProcessor {
@@ -127,6 +131,7 @@ impl BloomPostProcessor {
             apply_bind_group_x: None,
             apply_bind_group_y: None,
             add_bind_group: None,
+            filter_bright_pipeline_cache: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -246,6 +251,7 @@ impl PostProcessor for BloomPostProcessor {
         self.apply_bind_group_x = Some(apply_bind_group_x);
         self.apply_bind_group_y = Some(apply_bind_group_y);
         self.add_bind_group = Some(add_bind_group);
+        *self.filter_bright_pipeline_cache.lock().unwrap() = None;
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -257,8 +263,6 @@ impl PostProcessor for BloomPostProcessor {
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
 
-        let threshold = self.threshold * num_samples as f64;
-        let max_intensity = self.max_intensity * num_samples as f64;
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
         let (device, queue) = get_wgpu_device_and_queue();
@@ -273,12 +277,19 @@ impl PostProcessor for BloomPostProcessor {
 
         queue.write_buffer(input_pixels_buffer, 0, bytemuck::cast_slice(&input_pixels));
 
-        let filter_bright_pipeline = compute_pipeline(
-            device,
-            &self.filter_bright_bind_group_layout,
-            &self.filter_bright_module,
-            &[("threshold", threshold), ("max_intensity", max_intensity)],
-        );
+        let mut cache = self.filter_bright_pipeline_cache.lock().unwrap();
+        if cache.as_ref().map(|(n, _)| *n != num_samples).unwrap_or(true) {
+            let threshold = self.threshold * num_samples as f64;
+            let max_intensity = self.max_intensity * num_samples as f64;
+            let pipeline = compute_pipeline(
+                device,
+                &self.filter_bright_bind_group_layout,
+                &self.filter_bright_module,
+                &[("threshold", threshold), ("max_intensity", max_intensity)],
+            );
+            *cache = Some((num_samples, pipeline));
+        }
+        let filter_bright_pipeline = &cache.as_ref().unwrap().1;
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -286,7 +297,7 @@ impl PostProcessor for BloomPostProcessor {
         let workgroup_count = pixel_colors.len().div_ceil(64) as u32;
         add_compute_pass(
             &mut encoder,
-            &filter_bright_pipeline,
+            filter_bright_pipeline,
             filter_bright_bind_group,
             workgroup_count,
         );
