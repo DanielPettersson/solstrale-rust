@@ -2,9 +2,9 @@
 
 This track focuses on optimizing GPU resource management for Bloom and Saturation post-processors.
 
-## Phase 1: Analysis and Benchmarking (Baseline)
+## Phase 1: Analysis and Benchmarking (Baseline) [checkpoint: feae0ad]
 - [x] Task: Create a baseline benchmark or performance test to measure current buffer allocation overhead. f2c669d
-- [ ] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md) feae0ad
 
 ## Phase 2: Refactor SaturationPostProcessor
 - [ ] Task: Modify `SaturationPostProcessor` to store buffers as fields.
