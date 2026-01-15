@@ -1,6 +1,6 @@
 //! Basic geometric constructs
-use std::ops::{Add, Sub};
 use derive_more::Constructor;
+use std::ops::{Add, Sub};
 
 use crate::geo::vec3::Vec3;
 use crate::util::interval::{combine_intervals, Interval, EMPTY_INTERVAL};
@@ -216,7 +216,8 @@ impl Aabb {
             self.x.min - self.x.max,
             self.y.min - self.y.max,
             self.z.min - self.z.max,
-        ).length()
+        )
+        .length()
     }
 }
 
@@ -253,7 +254,11 @@ impl Onb {
         let v = unit_w.cross(a).unit();
         let u = unit_w.cross(v);
 
-        Onb { tangent: u, bi_tangent: v, normal: unit_w }
+        Onb {
+            tangent: u,
+            bi_tangent: v,
+            normal: unit_w,
+        }
     }
 
     /// Translates the given vector to the Orthonormal Basis
@@ -299,7 +304,8 @@ impl Ray {
             self.direction.cross(od).length() / self.direction.length()
         } else {
             od.dot(n) / n.length()
-        }.abs()
+        }
+        .abs()
     }
 }
 
@@ -370,8 +376,14 @@ mod ray_tests {
 
     #[test]
     fn test_shortest_xxx() {
-        let r1 = Ray::new(Vec3::new(395.8288, 170.6440, 112.1048), Vec3::new(-38.2351, 383.3560, 77.8286));
-        let r2 = Ray::new(Vec3::new(-3.4878, -0.0001, -95.4594), Vec3::new(629.3250, -0.0001, -95.4594));
+        let r1 = Ray::new(
+            Vec3::new(395.8288, 170.6440, 112.1048),
+            Vec3::new(-38.2351, 383.3560, 77.8286),
+        );
+        let r2 = Ray::new(
+            Vec3::new(-3.4878, -0.0001, -95.4594),
+            Vec3::new(629.3250, -0.0001, -95.4594),
+        );
         assert_eq!(r1.shortest_distance(&r2), 229.4765553708466);
         assert_eq!(r2.shortest_distance(&r1), 229.4765553708466);
     }

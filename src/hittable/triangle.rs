@@ -1,8 +1,8 @@
-use crate::geo::{Aabb, Onb};
-use crate::geo::Ray;
 use crate::geo::transformation::Transformer;
+use crate::geo::vec3::{Vec3, ALMOST_ZERO};
+use crate::geo::Ray;
 use crate::geo::Uv;
-use crate::geo::vec3::{ALMOST_ZERO, Vec3};
+use crate::geo::{Aabb, Onb};
 use crate::hittable::{Hittable, Hittables};
 use crate::material::{Material, Materials, RayHit};
 use crate::random::random_normal_float;

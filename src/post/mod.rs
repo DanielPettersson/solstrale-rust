@@ -1,24 +1,23 @@
 //! Post processors for applying effects to the raw rendered image
 
-mod bloom_gpu;
+mod bloom;
 mod nop;
 mod oidn;
-mod saturation_gpu;
+mod saturation;
 
 use std::error::Error;
 
 use enum_dispatch::enum_dispatch;
 
 use crate::geo::vec3::Vec3;
-pub use crate::post::bloom_gpu::BloomPostProcessor;
+pub use crate::post::bloom::BloomPostProcessor;
 pub use crate::post::nop::NopPostProcessor;
 pub use crate::post::oidn::OidnPostProcessor;
-pub use crate::post::saturation_gpu::SaturationPostProcessor;
+pub use crate::post::saturation::SaturationPostProcessor;
 
 /// Responsible for taking the rendered image and transforming it
 #[enum_dispatch]
 pub trait PostProcessor {
-
     /// Do post-construct initialization for the post-processor when with and height it known
     fn initialize(&mut self, width: u32, height: u32);
 

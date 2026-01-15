@@ -279,8 +279,7 @@ fn test_saturation() -> Result<(), Box<dyn Error>> {
 
         post.initialize(w, h);
 
-        let res =
-            post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+        let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
         compare_output(&format!("saturation_{}", saturation_factor), &res);
 

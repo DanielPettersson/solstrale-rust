@@ -1,17 +1,17 @@
 use std::ops::RangeInclusive;
 
 use crate::combine_aabbs;
-use crate::geo::{Aabb, Onb};
-use crate::geo::Ray;
 use crate::geo::transformation::Transformer;
+use crate::geo::vec3::{Vec3, ALMOST_ZERO};
+use crate::geo::Ray;
 use crate::geo::Uv;
-use crate::geo::vec3::{ALMOST_ZERO, Vec3};
+use crate::geo::{Aabb, Onb};
 use crate::hittable::{Hittable, Hittables};
 use crate::material::{Material, Materials, RayHit};
 use crate::random::random_normal_float;
 use crate::util::interval::{Interval, RAY_INTERVAL};
 
-const ZERO_TO_ONE: RangeInclusive<f32> = 0. ..= 1.;
+const ZERO_TO_ONE: RangeInclusive<f32> = 0. ..=1.;
 
 /// A rectangular flat hittable object
 #[derive(Clone, Debug)]
@@ -79,48 +79,57 @@ impl Quad {
         let dy = Vec3::new(0., max.y - min.y, 0.);
         let dz = Vec3::new(0., 0., max.z - min.z);
 
-        sides.push(Quad::new(
-            Vec3::new(min.x, min.y, max.z),
-            dx,
-            dy,
-            mat.clone(),
-            transformation,
-        ).into());
-        sides.push(Quad::new(
-            Vec3::new(max.x, min.y, max.z),
-            dz.neg(),
-            dy,
-            mat.clone(),
-            transformation,
-        ).into());
-        sides.push(Quad::new(
-            Vec3::new(max.x, min.y, min.z),
-            dx.neg(),
-            dy,
-            mat.clone(),
-            transformation,
-        ).into());
-        sides.push(Quad::new(
-            Vec3::new(min.x, min.y, min.z),
-            dz,
-            dy,
-            mat.clone(),
-            transformation,
-        ).into());
-        sides.push(Quad::new(
-            Vec3::new(min.x, max.y, max.z),
-            dx,
-            dz.neg(),
-            mat.clone(),
-            transformation,
-        ).into());
-        sides.push(Quad::new(
-            Vec3::new(min.x, min.y, min.z),
-            dx,
-            dz,
-            mat,
-            transformation,
-        ).into());
+        sides.push(
+            Quad::new(
+                Vec3::new(min.x, min.y, max.z),
+                dx,
+                dy,
+                mat.clone(),
+                transformation,
+            )
+            .into(),
+        );
+        sides.push(
+            Quad::new(
+                Vec3::new(max.x, min.y, max.z),
+                dz.neg(),
+                dy,
+                mat.clone(),
+                transformation,
+            )
+            .into(),
+        );
+        sides.push(
+            Quad::new(
+                Vec3::new(max.x, min.y, min.z),
+                dx.neg(),
+                dy,
+                mat.clone(),
+                transformation,
+            )
+            .into(),
+        );
+        sides.push(
+            Quad::new(
+                Vec3::new(min.x, min.y, min.z),
+                dz,
+                dy,
+                mat.clone(),
+                transformation,
+            )
+            .into(),
+        );
+        sides.push(
+            Quad::new(
+                Vec3::new(min.x, max.y, max.z),
+                dx,
+                dz.neg(),
+                mat.clone(),
+                transformation,
+            )
+            .into(),
+        );
+        sides.push(Quad::new(Vec3::new(min.x, min.y, min.z), dx, dz, mat, transformation).into());
 
         sides
     }

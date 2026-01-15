@@ -48,7 +48,7 @@ pub trait Hittable {
 /// Enum of the available hittable types
 pub enum Hittables {
     /// [`Hittable`] of the type [`Sphere`]
-   Sphere,
+    Sphere,
     /// [`Hittable`] of the type [`ConstantMedium`]
     ConstantMedium,
     /// [`Hittable`] of the type [`Quad`]
@@ -58,4 +58,3 @@ pub enum Hittables {
     /// [`Hittable`] of the type [`Bvh`]
     Bvh,
 }
-

@@ -2,7 +2,7 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, black_box, Criterion, criterion_group, criterion_main, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use derive_more::{Constructor, Display};
 
 use solstrale::ray_trace;
@@ -49,12 +49,7 @@ pub fn bvh_benchmark(c: &mut Criterion) {
                         let (_, abort_receiver) = channel();
 
                         thread::spawn(move || {
-                            ray_trace(
-                                scene,
-                                &output_sender,
-                                &abort_receiver,
-                            )
-                            .unwrap();
+                            ray_trace(scene, &output_sender, &abort_receiver).unwrap();
                         });
 
                         for _ in output_receiver {}
@@ -83,12 +78,7 @@ pub fn scene_benchmark(c: &mut Criterion) {
                 let (_, abort_receiver) = channel();
 
                 thread::spawn(move || {
-                    ray_trace(
-                        scene,
-                        &output_sender,
-                        &abort_receiver,
-                    )
-                    .unwrap();
+                    ray_trace(scene, &output_sender, &abort_receiver).unwrap();
                 });
 
                 for _ in output_receiver {}

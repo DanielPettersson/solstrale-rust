@@ -9,14 +9,14 @@ use simple_error::SimpleError;
 use tobj::LoadOptions;
 
 use crate::geo::transformation::Transformer;
-use crate::geo::Uv;
 use crate::geo::vec3::Vec3;
+use crate::geo::Uv;
 use crate::hittable::Bvh;
 use crate::hittable::Hittables;
 use crate::hittable::Triangle;
 use crate::loader::Loader;
-use crate::material::{Lambertian, Materials, texture};
 use crate::material::texture::{ImageMap, SolidColor, Textures};
+use crate::material::{texture, Lambertian, Materials};
 
 /// Contains file information about the obj to load
 pub struct Obj {
@@ -40,8 +40,8 @@ impl Loader for Obj {
         transformation: &dyn Transformer,
         default_material: Option<Materials>,
     ) -> Result<Bvh, Box<dyn Error>> {
-        let default_material =
-            default_material.unwrap_or(Lambertian::new(SolidColor::new(1., 1., 1.).into(), None).into());
+        let default_material = default_material
+            .unwrap_or(Lambertian::new(SolidColor::new(1., 1., 1.).into(), None).into());
         let load_options = LoadOptions {
             triangulate: true,
             ..Default::default()
@@ -72,7 +72,10 @@ impl Loader for Obj {
                     Some(texture::load_normal_texture(&bump_texture_path)?.into())
                 }
             };
-            mat_map.insert(i as i8, Lambertian::new(albedo_texture, normal_texture).into());
+            mat_map.insert(
+                i as i8,
+                Lambertian::new(albedo_texture, normal_texture).into(),
+            );
         }
 
         let mut triangles: Vec<Hittables> = Vec::new();
@@ -119,16 +122,19 @@ impl Loader for Obj {
                     Some(m) => m.to_owned(),
                 };
 
-                triangles.push(Triangle::new_with_tex_coords(
-                    v0,
-                    v1,
-                    v2,
-                    uv0,
-                    uv1,
-                    uv2,
-                    material,
-                    transformation,
-                ).into());
+                triangles.push(
+                    Triangle::new_with_tex_coords(
+                        v0,
+                        v1,
+                        v2,
+                        uv0,
+                        uv1,
+                        uv2,
+                        material,
+                        transformation,
+                    )
+                    .into(),
+                );
             }
         }
 
