@@ -8,7 +8,7 @@ This plan outlines the steps to upgrade the project from Rust edition 2021 to 20
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Preparation & Research' (Protocol in workflow.md) 5d66fe2
 
 ## Phase 2: Edition Update & Automated Fixes
-- [ ] Task: Modify `Cargo.toml` to set the project-wide edition to `"2024"`.
+- [x] Task: Modify `Cargo.toml` to set the project-wide edition to `"2024"`. 77e1ea6
 - [ ] Task: Run the `cargo fix --edition` command to apply all suggested automatic migration lints.
 - [ ] Task: Review and commit the automated changes.
 - [ ] Task: Perform a preliminary test run with `cargo test` to catch any immediate and obvious breakages.
