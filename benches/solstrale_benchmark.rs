@@ -1,8 +1,9 @@
+use std::hint::black_box;
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use derive_more::{Constructor, Display};
 
 use solstrale::ray_trace;
