@@ -22,7 +22,7 @@ Remove the CPU fallback for saturation and enforce the GPU implementation.
     - [x] Ensure `post_processing_benchmark` and integration tests still pass.
 - [x] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
 
-## Phase 3: Refactor Bloom Post-Processing
+## Phase 3: Refactor Bloom Post-Processing [checkpoint: 7d9eeb2]
 Remove the CPU fallback for bloom and enforce the GPU implementation.
 - [x] Task: Remove `src/post/bloom_cpu.rs`. 8f136fa
 - [x] Task: Update `src/post/bloom_gpu.rs`.
@@ -30,9 +30,9 @@ Remove the CPU fallback for bloom and enforce the GPU implementation.
 - [x] Task: Update `src/post/mod.rs`.
     - [x] Remove `cfg` attributes for bloom modules.
     - [x] Unconditionally import and use the GPU bloom implementation.
-- [ ] Task: Verify tests.
-    - [ ] Ensure `post_processing_benchmark` and integration tests still pass.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
+- [x] Task: Verify tests.
+    - [x] Ensure `post_processing_benchmark` and integration tests still pass.
+- [x] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
 
 ## Phase 4: Final Cleanup & Verification
 Clean up any remaining feature flags and verify the entire system.
