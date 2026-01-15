@@ -1,0 +1,8 @@
+{
+  "track_id": "gpu_renderer_migration_20260115",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-01-15T10:00:00Z",
+  "updated_at": "2026-01-15T10:00:00Z",
+  "description": "Move as much as possible of the work done by the Renderer implementation to the GPU using WGPU compute shaders"
+}
