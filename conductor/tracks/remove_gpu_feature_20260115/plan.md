@@ -15,9 +15,9 @@ Remove the CPU fallback for saturation and enforce the GPU implementation.
 - [x] Task: Remove `src/post/saturation_cpu.rs`. 87130e0
 - [x] Task: Update `src/post/saturation_gpu.rs`.
     - [x] Remove `#![cfg(feature = "gpu")]`.
-- [~] Task: Update `src/post/mod.rs`.
-    - [ ] Remove `cfg` attributes for saturation modules.
-    - [ ] Unconditionally import and use the GPU saturation implementation.
+- [x] Task: Update `src/post/mod.rs`.
+    - [x] Remove `cfg` attributes for saturation modules.
+    - [x] Unconditionally import and use the GPU saturation implementation.
 - [ ] Task: Verify tests.
     - [ ] Ensure `post_processing_benchmark` and integration tests still pass.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
