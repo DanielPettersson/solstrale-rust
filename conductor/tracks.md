@@ -8,5 +8,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Update the project to use rust edition 2024 and apply any recommended changes for the new edition**
+- [x] **Track: Update the project to use rust edition 2024 and apply any recommended changes for the new edition**
 *Link: [./tracks/update_rust_edition_2024_20260115/](./tracks/update_rust_edition_2024_20260115/)*
