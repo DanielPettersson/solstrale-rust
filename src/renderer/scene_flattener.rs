@@ -54,6 +54,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
                 max,
                 left_child_index: prim_index,
                 right_child_index: prim_type | flag,
+                _pad: [0; 2],
              });
         }
     }
@@ -65,7 +66,7 @@ fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
     let index = data.nodes.len() as u32;
     // Reserve slot
     data.nodes.push(GpuBvhNode {
-        min: [0.0; 3], max: [0.0; 3], left_child_index: 0, right_child_index: 0
+        min: [0.0; 3], max: [0.0; 3], left_child_index: 0, right_child_index: 0, _pad: [0; 2]
     });
 
     let left_idx = process_item(&bvh.left, data);
@@ -80,6 +81,7 @@ fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
         max,
         left_child_index: left_idx,
         right_child_index: right_idx,
+        _pad: [0; 2],
     };
     
     index
@@ -103,6 +105,7 @@ fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
                 max,
                 left_child_index: prim_index,
                 right_child_index: prim_type | flag,
+                _pad: [0; 2],
             });
             
             index
@@ -138,6 +141,7 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 _pad2: 0.0,
                 normal: to_array(t.normal), 
                 material_index: mat_idx,
+                _pad3: [0; 3],
             });
             (index, 1) // Type 1 = Triangle
         },
@@ -156,7 +160,7 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 w: to_array(q.w),
                 d: q.d as f32,
                 material_index: mat_idx,
-                _pad4: [0; 3],
+                _pad4: [0; 2],
             });
             (index, 2) // Type 2 = Quad
         },

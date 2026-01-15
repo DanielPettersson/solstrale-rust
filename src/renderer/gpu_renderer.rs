@@ -62,20 +62,17 @@ impl GpuRenderer {
         let quads_buffer = create_and_upload_buffer(device, queue, "Quads Buffer", &scene_data.quads, BufferUsages::STORAGE);
         let materials_buffer = create_and_upload_buffer(device, queue, "Materials Buffer", &scene_data.materials, BufferUsages::STORAGE);
 
-        let camera = Camera::new(width as usize, height as usize, &scene.camera);
-        // We need to access private fields of Camera. Let's check Camera struct in camera.rs
-        // origin, lower_left_corner, horizontal, vertical, lens_radius
-        // They are private. I should make them pub(crate) as well.
+        let camera_inst = Camera::new(width as usize, height as usize, &scene.camera);
         
         let gpu_camera = GpuCamera {
-            origin: [camera.origin.x as f32, camera.origin.y as f32, camera.origin.z as f32],
+            origin: [camera_inst.origin.x as f32, camera_inst.origin.y as f32, camera_inst.origin.z as f32],
             _pad0: 0.0,
-            lower_left_corner: [camera.lower_left_corner.x as f32, camera.lower_left_corner.y as f32, camera.lower_left_corner.z as f32],
+            lower_left_corner: [camera_inst.lower_left_corner.x as f32, camera_inst.lower_left_corner.y as f32, camera_inst.lower_left_corner.z as f32],
             _pad1: 0.0,
-            horizontal: [camera.horizontal.x as f32, camera.horizontal.y as f32, camera.horizontal.z as f32],
+            horizontal: [camera_inst.horizontal.x as f32, camera_inst.horizontal.y as f32, camera_inst.horizontal.z as f32],
             _pad2: 0.0,
-            vertical: [camera.vertical.x as f32, camera.vertical.y as f32, camera.vertical.z as f32],
-            lens_radius: camera.lens_radius as f32,
+            vertical: [camera_inst.vertical.x as f32, camera_inst.vertical.y as f32, camera_inst.vertical.z as f32],
+            lens_radius: camera_inst.lens_radius as f32,
         };
         let camera_buffer = create_and_upload_buffer(device, queue, "Camera Buffer", &[gpu_camera], BufferUsages::UNIFORM);
 
@@ -85,14 +82,14 @@ impl GpuRenderer {
         let bind_group_layout = bind_group_layout(
             device,
             &[
-                storage_binding(false, 16), // 0: output buffer
-                storage_binding(true, 32),  // 1: nodes
-                storage_binding(true, 32),  // 2: spheres
-                storage_binding(true, 64),  // 3: triangles
-                storage_binding(true, 96),  // 4: quads
-                storage_binding(true, 48),  // 5: materials
-                uniform_binding(64),        // 6: camera
-                uniform_binding(8),         // 7: config
+                storage_binding(false, 0), // 0: output buffer
+                storage_binding(true, 0),  // 1: nodes
+                storage_binding(true, 0),  // 2: spheres
+                storage_binding(true, 0),  // 3: triangles
+                storage_binding(true, 0),  // 4: quads
+                storage_binding(true, 0),  // 5: materials
+                uniform_binding(std::mem::size_of::<GpuCamera>() as u64),      // 6: camera
+                uniform_binding(std::mem::size_of::<GpuRenderConfig>() as u64), // 7: config
             ],
         );
 
@@ -220,11 +217,17 @@ fn create_and_upload_buffer<T: bytemuck::Pod>(
     usage: BufferUsages,
 ) -> wgpu::Buffer {
     let size_bytes = (data.len() * std::mem::size_of::<T>()) as u64;
-    let effective_size = if size_bytes == 0 {
+    
+    // Ensure minimum size for valid buffer and pad to 16 bytes for WGSL array compatibility
+    let mut effective_size = if size_bytes == 0 {
         std::mem::size_of::<T>() as u64
     } else {
         size_bytes
     };
+    
+    if effective_size % 16 != 0 {
+        effective_size = ((effective_size / 16) + 1) * 16;
+    }
 
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),

@@ -163,12 +163,12 @@ fn bind_group_layout_entry0(
             ty: wgpu::BufferBindingType::Storage {
                 read_only,
             },
-            min_binding_size: Some(NonZeroU64::new(min_binding_size).unwrap()),
+            min_binding_size: NonZeroU64::new(min_binding_size),
             has_dynamic_offset: false,
         },
         BindingType::Uniform { min_binding_size } => wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
-            min_binding_size: Some(NonZeroU64::new(min_binding_size).unwrap()),
+            min_binding_size: NonZeroU64::new(min_binding_size),
             has_dynamic_offset: false,
         },
     };

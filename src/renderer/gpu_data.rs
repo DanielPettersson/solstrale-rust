@@ -24,7 +24,7 @@ pub struct Sphere {
     pub radius: f32,
     /// Index of the material in the materials buffer
     pub material_index: u32,
-    /// Padding to align to 32 bytes (16 for vec3/radius + 4 + 12 padding)
+    /// Padding to align to 32 bytes (16 for vec3/radius + 16 for mat_idx/pad)
     pub _padding: [u32; 3],
 }
 
@@ -48,6 +48,8 @@ pub struct Triangle {
     pub normal: [f32; 3],
     /// Index of the material
     pub material_index: u32,
+    /// Padding to 80 bytes
+    pub _pad3: [u32; 3],
 }
 
 #[repr(C)]
@@ -76,8 +78,8 @@ pub struct Quad {
     pub d: f32,
     /// Index of the material
     pub material_index: u32,
-    /// Padding
-    pub _pad4: [u32; 3],
+    /// Padding to 112 bytes
+    pub _pad4: [u32; 2],
 }
 
 #[repr(C)]
@@ -92,112 +94,60 @@ pub struct BvhNode {
     pub max: [f32; 3],
     /// Right child index (or primitive count/type if leaf)
     pub right_child_index: u32,
+    /// Padding to 48 bytes
+    pub _pad: [u32; 2],
 }
 
 #[repr(C)]
-
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-
 /// Material structure matching WGSL layout
-
 pub struct Material {
-
     /// Albedo color
-
     pub albedo: [f32; 3],
-
     /// Padding
-
     pub _padding1: f32,
-
     /// Emission color
-
     pub emission: [f32; 3],
-
     /// Padding
-
     pub _padding2: f32,
-
     /// Fuzziness (for metal)
-
     pub fuzz: f32,
-
     /// Refraction index (for dielectric)
-
     pub refraction_index: f32,
-
     /// Material type identifier
-
     pub mat_type: u32,
-
     /// Padding
-
     pub _padding3: u32,
-
 }
 
-
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+/// Camera structure matching WGSL layout
+pub struct GpuCamera {
+    /// Origin of the camera
+    pub origin: [f32; 3],
+    /// Padding
+    pub _pad0: f32,
+    /// Lower left corner of the viewport
+    pub lower_left_corner: [f32; 3],
+    /// Padding
+    pub _pad1: f32,
+    /// Horizontal viewport vector
+    pub horizontal: [f32; 3],
+    /// Padding
+    pub _pad2: f32,
+    /// Vertical viewport vector
+    pub vertical: [f32; 3],
+    /// lens radius
+    pub lens_radius: f32,
+}
 
 #[repr(C)]
-
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-
-/// Camera structure matching WGSL layout
-
-pub struct GpuCamera {
-
-    /// Origin of the camera
-
-    pub origin: [f32; 3],
-
-    /// Padding
-
-    pub _pad0: f32,
-
-    /// Lower left corner of the viewport
-
-    pub lower_left_corner: [f32; 3],
-
-    /// Padding
-
-    pub _pad1: f32,
-
-    /// Horizontal viewport vector
-
-    pub horizontal: [f32; 3],
-
-    /// Padding
-
-    pub _pad2: f32,
-
-    /// Vertical viewport vector
-
-    pub vertical: [f32; 3],
-
-        /// lens radius
-
-        pub lens_radius: f32,
-
-    }
-
-    
-
-    #[repr(C)]
-
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-
-    /// Render configuration matching WGSL layout
-
-    pub struct GpuRenderConfig {
-
-        /// Width of the image
-
-        pub width: u32,
-
-        /// Height of the image
-
-        pub height: u32,
-
-    }
-
-    
+/// Render configuration matching WGSL layout
+pub struct GpuRenderConfig {
+    /// Width of the image
+    pub width: u32,
+    /// Height of the image
+    pub height: u32,
+}

@@ -126,10 +126,82 @@ mod tests {
         }
         let renderer = renderer.unwrap();
         
-        let (tx, _rx) = channel();
+        let (tx, rx) = channel();
         let (_abort_tx, abort_rx) = channel();
         
         let result = renderer.render(&tx, &abort_rx);
         assert!(result.is_ok());
+
+        let mut received_hit = false;
+        while let Ok(progress) = rx.recv_timeout(Duration::from_secs(5)) {
+            if let Some(image) = progress.render_image {
+                // The center of the image should hit the sphere
+                let center_pixel = image.get_pixel(image.width()/2, image.height()/2);
+                
+                // Background center ray direction is roughly [0, 0, -1]
+                // visualized as [0 * 0.5 + 0.5, 0 * 0.5 + 0.5, -1 * 0.5 + 0.5] = [0.5, 0.5, 0.0]
+                // in u8 roughly [127, 127, 0]
+                let bg_color = [127, 127, 0];
+                
+                // Check if different from background color
+                assert_ne!(center_pixel.0, bg_color);
+                
+                received_hit = true;
+                break;
+            }
+        }
+        assert!(received_hit);
+    }
+
+    #[test]
+    fn test_gpu_renderer_with_box() {
+        use solstrale::hittable::Quad;
+        use solstrale::material::{Lambertian, Materials};
+        use solstrale::material::texture::SolidColor;
+        use solstrale::geo::transformation::NopTransformer;
+        
+        let mat = Materials::Lambertian(Lambertian::new(
+            SolidColor::new(0.0, 1.0, 0.0).into(),
+            None
+        ));
+        
+        // Create a box at z = -2
+        let box_sides = Quad::new_box(
+            Vec3::new(-0.5, -0.5, -2.5),
+            Vec3::new(0.5, 0.5, -1.5),
+            mat,
+            &NopTransformer {},
+        );
+        
+        let scene = Scene {
+            world: Hittables::Bvh(Bvh::new(box_sides)),
+            camera: CameraConfig {
+                look_from: Vec3::new(0., 0., 0.),
+                look_at: Vec3::new(0., 0., -1.),
+                vertical_fov_degrees: 90.,
+                up: Vec3::new(0., 1., 0.),
+                aperture_size: 0.,
+            },
+            background_color: Vec3::new(0., 0., 0.),
+            render_config: Default::default(),
+        };
+
+        let renderer = GpuRenderer::new(scene).unwrap();
+        let (tx, rx) = channel();
+        let (_abort_tx, abort_rx) = channel();
+        
+        renderer.render(&tx, &abort_rx).unwrap();
+
+        let mut received_hit = false;
+        while let Ok(progress) = rx.recv_timeout(Duration::from_secs(5)) {
+            if let Some(image) = progress.render_image {
+                let center_pixel = image.get_pixel(image.width()/2, image.height()/2);
+                let bg_color = [127, 127, 0];
+                assert_ne!(center_pixel.0, bg_color);
+                received_hit = true;
+                break;
+            }
+        }
+        assert!(received_hit);
     }
 }
