@@ -10,8 +10,8 @@ use crate::util::wgpu_util::{
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::error::Error;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::BufferUsages;
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 use std::sync::{Arc, Mutex};
 

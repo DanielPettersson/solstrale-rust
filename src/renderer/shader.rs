@@ -1,8 +1,8 @@
 //! Contains the different shader used by the renderer
 use enum_dispatch::enum_dispatch;
 
-use crate::geo::vec3::Vec3;
 use crate::geo::Ray;
+use crate::geo::vec3::Vec3;
 use crate::material::Material;
 use crate::material::RayScatter::{ScatterBasic, ScatterEmission, ScatterPdf};
 use crate::material::{AttenuatedColor, RayHit};

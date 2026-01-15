@@ -5,8 +5,8 @@ use std::ops::Deref;
 use std::sync::mpsc::channel;
 use std::thread;
 
-use image::imageops::FilterType;
 use image::RgbImage;
+use image::imageops::FilterType;
 use image_compare::Algorithm::RootMeanSquared;
 
 use solstrale::geo::transformation::{RotationX, RotationY, RotationZ, Transformer};

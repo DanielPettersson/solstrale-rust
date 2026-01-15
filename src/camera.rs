@@ -1,6 +1,6 @@
 //! Provides a camera used by raytracer to shoot rays into the scene
 
-use crate::geo::vec3::{random_in_unit_disc, Vec3, ZERO_VECTOR};
+use crate::geo::vec3::{Vec3, ZERO_VECTOR, random_in_unit_disc};
 use crate::geo::{Ray, Uv};
 use crate::util::degrees_to_radians;
 

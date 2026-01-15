@@ -7,8 +7,8 @@ use image::ImageReader;
 use image::RgbImage;
 use simple_error::SimpleError;
 
-use crate::geo::vec3::Vec3;
 use crate::geo::Uv;
+use crate::geo::vec3::Vec3;
 use crate::material::texture::BumpMap::{Height, Normal};
 use crate::util::height_map;
 use crate::util::rgb_color::rgb_to_vec3;
@@ -169,7 +169,7 @@ impl Texture for ImageMap {
 
 #[cfg(test)]
 mod tests {
-    use crate::material::texture::{load_bump_map, BumpMap};
+    use crate::material::texture::{BumpMap, load_bump_map};
 
     #[test]
     fn test_load_normal_bump_map() {

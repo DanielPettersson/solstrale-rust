@@ -97,7 +97,7 @@ impl Interval {
 
 #[cfg(test)]
 mod tests {
-    use crate::util::interval::{combine_intervals, Interval};
+    use crate::util::interval::{Interval, combine_intervals};
 
     #[test]
     fn test_combine_intervals() {

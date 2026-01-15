@@ -3,7 +3,7 @@ use derive_more::Constructor;
 use std::ops::{Add, Sub};
 
 use crate::geo::vec3::Vec3;
-use crate::util::interval::{combine_intervals, Interval, EMPTY_INTERVAL};
+use crate::util::interval::{EMPTY_INTERVAL, Interval, combine_intervals};
 
 pub mod transformation;
 pub mod vec3;
@@ -311,8 +311,8 @@ impl Ray {
 
 #[cfg(test)]
 mod ray_tests {
-    use crate::geo::vec3::Vec3;
     use crate::geo::Ray;
+    use crate::geo::vec3::Vec3;
 
     #[test]
     fn test_at() {

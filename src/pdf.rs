@@ -4,8 +4,8 @@ use std::f64::consts::PI;
 
 use enum_dispatch::enum_dispatch;
 
-use crate::geo::vec3::{random_cosine_direction, random_unit_vector, Vec3};
 use crate::geo::Onb;
+use crate::geo::vec3::{Vec3, random_cosine_direction, random_unit_vector};
 use crate::hittable::{Hittable, Hittables};
 use crate::random::{random_element_index, random_normal_float};
 
