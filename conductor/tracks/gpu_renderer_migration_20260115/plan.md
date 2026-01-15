@@ -12,11 +12,11 @@ Establish the basic compute pipeline and implement the robust transfer of comple
     - [x] Define WGSL structs for `Ray`, `HitRecord`, `Sphere`, `Triangle`, `Quad`, `Material`, and `BvhNode` ensuring strict alignment rules (std140/std430).
     - [x] Create corresponding `repr(C)` Rust structs in `src/renderer/gpu_data.rs` implementing `bytemuck::Pod`.
     - [x] Test: Write unit tests to assert the size and alignment of Rust structs match WGSL expectations.
-- [ ] Task: Scene Data Upload System
-    - [ ] Implement logic to flatten the CPU BVH tree and primitive lists into linear `Vec` buffers.
-    - [ ] Create Storage Buffers for Nodes, Primitives, and Materials on the GPU.
-    - [ ] Upload the linear buffers to the GPU.
-    - [ ] Test: Create a small mock scene, upload it, and read back the buffers to verify data integrity (staging buffer readback).
+- [x] Task: Scene Data Upload System c31467b
+    - [x] Implement logic to flatten the CPU BVH tree and primitive lists into linear `Vec` buffers.
+    - [x] Create Storage Buffers for Nodes, Primitives, and Materials on the GPU.
+    - [x] Upload the linear buffers to the GPU.
+    - [x] Test: Create a small mock scene, upload it, and read back the buffers to verify data integrity (staging buffer readback).
 - [ ] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
 
 ## Phase 2: Ray Generation & Intersection
