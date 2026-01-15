@@ -40,10 +40,13 @@ Implement the core Monte Carlo integration, material evaluation, and sample accu
     - [x] Port a lightweight PRNG (e.g., PCG Hash or Xorshift) to WGSL.
     - [x] manage per-pixel RNG state.
     - [x] Test: Render a visual noise image to verify distribution quality.
-- [ ] Task: Port Material System to WGSL
-    - [ ] Implement `scatter` functions for Lambertian, Metal, and Dielectric materials in WGSL.
-    - [ ] Implement texture sampling for material properties.
-    - [ ] Test: Render a scene with one of each material type (no global illumination yet, just direct hit color).
+- [x] Task: Port Material System to WGSL c5c24d5
+    - [x] Implement `scatter` functions for Lambertian, Metal, and Dielectric materials in WGSL.
+    - [x] Implement texture sampling for material properties.
+    - [x] Test: Render a scene with one of each material type (no global illumination yet, just direct hit color).
+- [ ] Task: Debug BVH Traversal (Integration Issue)
+    - [ ] Fix the BVH traversal bug that causes misses in multi-object scenes.
+    - [ ] Verify `test_gpu_renderer_with_different_materials` passes with strict assertions.
 - [ ] Task: Implement the Path Tracing Loop
     - [ ] Write the iterative bounce loop (max depth limit).
     - [ ] Accumulate emitted light and attenuation at each bounce.
