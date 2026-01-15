@@ -1,6 +1,5 @@
 //! Post processors for applying effects to the raw rendered image
 
-mod bloom_cpu;
 mod bloom_gpu;
 mod nop;
 mod oidn;
@@ -11,9 +10,6 @@ use std::error::Error;
 use enum_dispatch::enum_dispatch;
 
 use crate::geo::vec3::Vec3;
-#[cfg(not(feature = "gpu"))]
-pub use crate::post::bloom_cpu::BloomPostProcessor;
-#[cfg(feature = "gpu")]
 pub use crate::post::bloom_gpu::BloomPostProcessor;
 pub use crate::post::nop::NopPostProcessor;
 pub use crate::post::oidn::OidnPostProcessor;
