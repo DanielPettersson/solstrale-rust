@@ -12,7 +12,7 @@ Update the project configuration to make WGPU standard and ensure CI verifies it
 
 ## Phase 2: Refactor Saturation Post-Processing
 Remove the CPU fallback for saturation and enforce the GPU implementation.
-- [ ] Task: Remove `src/post/saturation_cpu.rs`.
+- [x] Task: Remove `src/post/saturation_cpu.rs`. 87130e0
 - [ ] Task: Update `src/post/saturation_gpu.rs`.
     - [ ] Remove `#![cfg(feature = "gpu")]`.
 - [ ] Task: Update `src/post/mod.rs`.
