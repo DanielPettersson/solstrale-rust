@@ -1,7 +1,7 @@
 # Tech Stack
 
 ## Core Language & Runtime
-- **Rust (Edition 2021):** The primary language chosen for memory safety, performance, and its rich ecosystem for graphics and systems programming.
+- **Rust (Edition 2024):** The primary language chosen for memory safety, performance, and its rich ecosystem for graphics and systems programming.
 
 ## Graphics & Rendering
 - **Path Tracing Engine:** Custom-built Monte Carlo path tracer.
