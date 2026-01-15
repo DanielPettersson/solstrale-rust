@@ -36,10 +36,10 @@ Implement the primary visibility rays. Instead of full path tracing, we will fir
 ## Phase 3: Shading & Path Tracing Loop
 Implement the core Monte Carlo integration, material evaluation, and sample accumulation.
 
-- [ ] Task: Implement Random Number Generation in WGSL
-    - [ ] Port a lightweight PRNG (e.g., PCG Hash or Xorshift) to WGSL.
-    - [ ] manage per-pixel RNG state.
-    - [ ] Test: Render a visual noise image to verify distribution quality.
+- [x] Task: Implement Random Number Generation in WGSL fc681b1
+    - [x] Port a lightweight PRNG (e.g., PCG Hash or Xorshift) to WGSL.
+    - [x] manage per-pixel RNG state.
+    - [x] Test: Render a visual noise image to verify distribution quality.
 - [ ] Task: Port Material System to WGSL
     - [ ] Implement `scatter` functions for Lambertian, Metal, and Dielectric materials in WGSL.
     - [ ] Implement texture sampling for material properties.
