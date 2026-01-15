@@ -4,7 +4,6 @@ mod bloom_cpu;
 mod bloom_gpu;
 mod nop;
 mod oidn;
-mod saturation_cpu;
 mod saturation_gpu;
 
 use std::error::Error;
@@ -18,9 +17,6 @@ pub use crate::post::bloom_cpu::BloomPostProcessor;
 pub use crate::post::bloom_gpu::BloomPostProcessor;
 pub use crate::post::nop::NopPostProcessor;
 pub use crate::post::oidn::OidnPostProcessor;
-#[cfg(not(feature = "gpu"))]
-pub use crate::post::saturation_cpu::SaturationPostProcessor;
-#[cfg(feature = "gpu")]
 pub use crate::post::saturation_gpu::SaturationPostProcessor;
 
 /// Responsible for taking the rendered image and transforming it
