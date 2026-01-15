@@ -10,7 +10,7 @@ Update the project configuration to make WGPU standard and ensure CI verifies it
     - [x] Remove `--no-default-features` flag from the coverage generation step to ensure all code is tested.
 - [x] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
 
-## Phase 2: Refactor Saturation Post-Processing
+## Phase 2: Refactor Saturation Post-Processing [checkpoint: 9f1c44e]
 Remove the CPU fallback for saturation and enforce the GPU implementation.
 - [x] Task: Remove `src/post/saturation_cpu.rs`. 87130e0
 - [x] Task: Update `src/post/saturation_gpu.rs`.
@@ -18,9 +18,9 @@ Remove the CPU fallback for saturation and enforce the GPU implementation.
 - [x] Task: Update `src/post/mod.rs`.
     - [x] Remove `cfg` attributes for saturation modules.
     - [x] Unconditionally import and use the GPU saturation implementation.
-- [ ] Task: Verify tests.
-    - [ ] Ensure `post_processing_benchmark` and integration tests still pass.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
+- [x] Task: Verify tests.
+    - [x] Ensure `post_processing_benchmark` and integration tests still pass.
+- [x] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
 
 ## Phase 3: Refactor Bloom Post-Processing
 Remove the CPU fallback for bloom and enforce the GPU implementation.
