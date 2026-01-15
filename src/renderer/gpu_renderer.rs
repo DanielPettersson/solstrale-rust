@@ -1,11 +1,13 @@
 //! GPU-based renderer implementation using WGPU
 
-use crate::renderer::gpu_data::{BvhNode, Material, Quad, Sphere, Triangle};
+use crate::camera::Camera;
+use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
 use crate::renderer::{RenderProgress, Scene};
 use crate::util::wgpu_util::{
-    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
+    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout,
     compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
+    storage_binding, uniform_binding,
 };
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
@@ -35,6 +37,10 @@ pub struct GpuRenderer {
     quads_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     materials_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    camera_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    config_buffer: wgpu::Buffer,
 }
 
 impl GpuRenderer {
@@ -50,21 +56,43 @@ impl GpuRenderer {
         let scene_data = flatten_scene(&scene);
 
         // Create buffers
-        let nodes_buffer = create_and_upload_buffer(device, queue, "Nodes Buffer", &scene_data.nodes);
-        let spheres_buffer = create_and_upload_buffer(device, queue, "Spheres Buffer", &scene_data.spheres);
-        let triangles_buffer = create_and_upload_buffer(device, queue, "Triangles Buffer", &scene_data.triangles);
-        let quads_buffer = create_and_upload_buffer(device, queue, "Quads Buffer", &scene_data.quads);
-        let materials_buffer = create_and_upload_buffer(device, queue, "Materials Buffer", &scene_data.materials);
+        let nodes_buffer = create_and_upload_buffer(device, queue, "Nodes Buffer", &scene_data.nodes, BufferUsages::STORAGE);
+        let spheres_buffer = create_and_upload_buffer(device, queue, "Spheres Buffer", &scene_data.spheres, BufferUsages::STORAGE);
+        let triangles_buffer = create_and_upload_buffer(device, queue, "Triangles Buffer", &scene_data.triangles, BufferUsages::STORAGE);
+        let quads_buffer = create_and_upload_buffer(device, queue, "Quads Buffer", &scene_data.quads, BufferUsages::STORAGE);
+        let materials_buffer = create_and_upload_buffer(device, queue, "Materials Buffer", &scene_data.materials, BufferUsages::STORAGE);
+
+        let camera = Camera::new(width as usize, height as usize, &scene.camera);
+        // We need to access private fields of Camera. Let's check Camera struct in camera.rs
+        // origin, lower_left_corner, horizontal, vertical, lens_radius
+        // They are private. I should make them pub(crate) as well.
+        
+        let gpu_camera = GpuCamera {
+            origin: [camera.origin.x as f32, camera.origin.y as f32, camera.origin.z as f32],
+            _pad0: 0.0,
+            lower_left_corner: [camera.lower_left_corner.x as f32, camera.lower_left_corner.y as f32, camera.lower_left_corner.z as f32],
+            _pad1: 0.0,
+            horizontal: [camera.horizontal.x as f32, camera.horizontal.y as f32, camera.horizontal.z as f32],
+            _pad2: 0.0,
+            vertical: [camera.vertical.x as f32, camera.vertical.y as f32, camera.vertical.z as f32],
+            lens_radius: camera.lens_radius as f32,
+        };
+        let camera_buffer = create_and_upload_buffer(device, queue, "Camera Buffer", &[gpu_camera], BufferUsages::UNIFORM);
+
+        let gpu_config = GpuRenderConfig { width, height };
+        let config_buffer = create_and_upload_buffer(device, queue, "Config Buffer", &[gpu_config], BufferUsages::UNIFORM);
 
         let bind_group_layout = bind_group_layout(
             device,
             &[
-                bind_group_layout_entry(false, 16), // 0: output buffer
-                bind_group_layout_entry(true, 32),  // 1: nodes
-                bind_group_layout_entry(true, 32),  // 2: spheres
-                bind_group_layout_entry(true, 64),  // 3: triangles
-                bind_group_layout_entry(true, 96),  // 4: quads
-                bind_group_layout_entry(true, 48),  // 5: materials
+                storage_binding(false, 16), // 0: output buffer
+                storage_binding(true, 32),  // 1: nodes
+                storage_binding(true, 32),  // 2: spheres
+                storage_binding(true, 64),  // 3: triangles
+                storage_binding(true, 96),  // 4: quads
+                storage_binding(true, 48),  // 5: materials
+                uniform_binding(64),        // 6: camera
+                uniform_binding(8),         // 7: config
             ],
         );
 
@@ -101,6 +129,8 @@ impl GpuRenderer {
                 &triangles_buffer,
                 &quads_buffer,
                 &materials_buffer,
+                &camera_buffer,
+                &config_buffer,
             ],
         );
 
@@ -118,6 +148,8 @@ impl GpuRenderer {
             triangles_buffer,
             quads_buffer,
             materials_buffer,
+            camera_buffer,
+            config_buffer,
         })
     }
 
@@ -185,12 +217,9 @@ fn create_and_upload_buffer<T: bytemuck::Pod>(
     queue: &wgpu::Queue,
     label: &str,
     data: &[T],
+    usage: BufferUsages,
 ) -> wgpu::Buffer {
     let size_bytes = (data.len() * std::mem::size_of::<T>()) as u64;
-    // Ensure minimum size for valid buffer (e.g., 4 bytes? or align to struct size?)
-    // Structs are aligned to 16/32 etc.
-    // If empty, creating 0 size buffer is problematic for binding.
-    // create a dummy buffer with size of 1 element if empty.
     let effective_size = if size_bytes == 0 {
         std::mem::size_of::<T>() as u64
     } else {
@@ -200,7 +229,7 @@ fn create_and_upload_buffer<T: bytemuck::Pod>(
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: effective_size,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        usage: usage | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 

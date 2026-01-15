@@ -5,9 +5,13 @@ use simple_error::SimpleError;
 use std::error::Error;
 use std::num::NonZeroU64;
 
-pub(crate) struct BindGroupLayoutEntryInfo {
-    pub read_only: bool,
-    pub min_binding_size: u64,
+pub(crate) enum BindingType {
+    Storage { read_only: bool, min_binding_size: u64 },
+    Uniform { min_binding_size: u64 },
+}
+
+pub(crate) struct BindingInfo {
+    pub binding_type: BindingType,
 }
 
 static DEVICE_AND_QUEUE: Lazy<(wgpu::Device, wgpu::Queue)> =
@@ -124,7 +128,7 @@ pub(crate) fn bind_group(
 
 pub(crate) fn bind_group_layout(
     device: &wgpu::Device,
-    entry_infos: &[BindGroupLayoutEntryInfo],
+    entry_infos: &[BindingInfo],
 ) -> wgpu::BindGroupLayout {
     let entries = entry_infos
         .iter()
@@ -138,27 +142,41 @@ pub(crate) fn bind_group_layout(
     })
 }
 
-pub fn bind_group_layout_entry(read_only: bool, min_binding_size: u64) -> BindGroupLayoutEntryInfo {
-    BindGroupLayoutEntryInfo {
-        read_only,
-        min_binding_size,
+pub(crate) fn storage_binding(read_only: bool, min_binding_size: u64) -> BindingInfo {
+    BindingInfo {
+        binding_type: BindingType::Storage { read_only, min_binding_size },
+    }
+}
+
+pub(crate) fn uniform_binding(min_binding_size: u64) -> BindingInfo {
+    BindingInfo {
+        binding_type: BindingType::Uniform { min_binding_size },
     }
 }
 
 fn bind_group_layout_entry0(
     binding: u32,
-    info: &BindGroupLayoutEntryInfo,
+    info: &BindingInfo,
 ) -> wgpu::BindGroupLayoutEntry {
+    let ty = match info.binding_type {
+        BindingType::Storage { read_only, min_binding_size } => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage {
+                read_only,
+            },
+            min_binding_size: Some(NonZeroU64::new(min_binding_size).unwrap()),
+            has_dynamic_offset: false,
+        },
+        BindingType::Uniform { min_binding_size } => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            min_binding_size: Some(NonZeroU64::new(min_binding_size).unwrap()),
+            has_dynamic_offset: false,
+        },
+    };
+
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage {
-                read_only: info.read_only,
-            },
-            min_binding_size: Some(NonZeroU64::new(info.min_binding_size).unwrap()),
-            has_dynamic_offset: false,
-        },
+        ty,
         count: None,
     }
 }

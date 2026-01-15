@@ -33,13 +33,13 @@ impl Default for CameraConfig {
 /// Contains all data needed to describe a cameras position, field of view and
 /// where it is pointing
 pub struct Camera {
-    origin: Vec3,
-    lower_left_corner: Vec3,
-    horizontal: Vec3,
-    vertical: Vec3,
-    u: Vec3,
-    v: Vec3,
-    lens_radius: f64,
+    pub(crate) origin: Vec3,
+    pub(crate) lower_left_corner: Vec3,
+    pub(crate) horizontal: Vec3,
+    pub(crate) vertical: Vec3,
+    pub(crate) u: Vec3,
+    pub(crate) v: Vec3,
+    pub(crate) lens_radius: f64,
 }
 
 impl Camera {

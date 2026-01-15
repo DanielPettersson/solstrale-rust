@@ -4,8 +4,9 @@ use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
 use crate::util::gaussian::create_gaussian_blur_weights;
 use crate::util::wgpu_util::{
-    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
+    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout,
     compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
+    storage_binding,
 };
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
@@ -81,26 +82,26 @@ impl BloomPostProcessor {
         let filter_bright_bind_group_layout = bind_group_layout(
             device,
             &[
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(false, 16),
+                storage_binding(true, 16),
+                storage_binding(false, 16),
             ],
         );
 
         let apply_bind_group_layout = bind_group_layout(
             device,
             &[
-                bind_group_layout_entry(true, 4),
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(false, 16),
+                storage_binding(true, 4),
+                storage_binding(true, 16),
+                storage_binding(false, 16),
             ],
         );
 
         let add_bind_group_layout = bind_group_layout(
             device,
             &[
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(true, 16),
-                bind_group_layout_entry(false, 16),
+                storage_binding(true, 16),
+                storage_binding(true, 16),
+                storage_binding(false, 16),
             ],
         );
 
@@ -127,8 +128,8 @@ impl BloomPostProcessor {
             output_pixels_buffer: None,
             download_buffer: None,
             filter_bright_bind_group: None,
-            apply_bind_group_x: None,
-            apply_bind_group_y: None,
+            apply_bind_group_x: Option::None,
+            apply_bind_group_y: Option::None,
             add_bind_group: None,
             filter_bright_pipeline_cache: Arc::new(Mutex::new(None)),
         })
