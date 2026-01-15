@@ -1,6 +1,6 @@
 # Plan: GPU Path Tracing Migration
 
-## Phase 1: WGPU Compute Foundation & Data Transfer
+## Phase 1: WGPU Compute Foundation & Data Transfer [checkpoint: e5aaa38]
 Establish the basic compute pipeline and implement the robust transfer of complex scene data (BVH, primitives, materials) from CPU to GPU memory.
 
 - [x] Task: Initialize WGPU Compute Pipeline for Ray Tracing d88b119
@@ -17,7 +17,7 @@ Establish the basic compute pipeline and implement the robust transfer of comple
     - [x] Create Storage Buffers for Nodes, Primitives, and Materials on the GPU.
     - [x] Upload the linear buffers to the GPU.
     - [x] Test: Create a small mock scene, upload it, and read back the buffers to verify data integrity (staging buffer readback).
-- [ ] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
 
 ## Phase 2: Ray Generation & Intersection
 Implement the primary visibility rays. Instead of full path tracing, we will first render a "Normal Buffer" or "Depth Buffer" to visually verify that geometry and BVH traversal are working correctly.
