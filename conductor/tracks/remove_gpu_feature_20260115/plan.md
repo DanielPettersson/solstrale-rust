@@ -27,9 +27,9 @@ Remove the CPU fallback for bloom and enforce the GPU implementation.
 - [x] Task: Remove `src/post/bloom_cpu.rs`. 8f136fa
 - [x] Task: Update `src/post/bloom_gpu.rs`.
     - [x] Remove `#![cfg(feature = "gpu")]`.
-- [~] Task: Update `src/post/mod.rs`.
-    - [ ] Remove `cfg` attributes for bloom modules.
-    - [ ] Unconditionally import and use the GPU bloom implementation.
+- [x] Task: Update `src/post/mod.rs`.
+    - [x] Remove `cfg` attributes for bloom modules.
+    - [x] Unconditionally import and use the GPU bloom implementation.
 - [ ] Task: Verify tests.
     - [ ] Ensure `post_processing_benchmark` and integration tests still pass.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
