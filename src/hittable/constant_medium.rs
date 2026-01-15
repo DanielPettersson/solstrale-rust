@@ -1,10 +1,10 @@
-use crate::geo::vec3::{random_unit_vector, Vec3, ONE_VECTOR};
 use crate::geo::Ray;
 use crate::geo::Uv;
+use crate::geo::vec3::{ONE_VECTOR, Vec3, random_unit_vector};
 use crate::geo::{Aabb, Onb};
 use crate::hittable::{Hittable, Hittables};
-use crate::material::texture::SolidColor;
 use crate::material::Materials;
+use crate::material::texture::SolidColor;
 use crate::material::{Isotropic, RayHit};
 use crate::random::random_normal_float;
 use crate::util::interval::{Interval, UNIVERSE_INTERVAL};

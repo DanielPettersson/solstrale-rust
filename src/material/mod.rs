@@ -4,13 +4,13 @@ use std::f64::consts::PI;
 
 use enum_dispatch::enum_dispatch;
 
-use crate::geo::vec3::{random_in_unit_sphere, Vec3, ONE_VECTOR, ZERO_VECTOR};
 use crate::geo::Uv;
+use crate::geo::vec3::{ONE_VECTOR, Vec3, ZERO_VECTOR, random_in_unit_sphere};
 use crate::geo::{Onb, Ray};
 use crate::hittable::Hittables;
 use crate::material::texture::Textures;
 use crate::material::texture::{SolidColor, Texture};
-use crate::pdf::{mix_generate, mix_value, ContainerPdf, CosinePdf, Pdfs, SpherePdf};
+use crate::pdf::{ContainerPdf, CosinePdf, Pdfs, SpherePdf, mix_generate, mix_value};
 use crate::random::random_normal_float;
 
 pub mod texture;
@@ -163,11 +163,7 @@ impl Lambertian {
 
     fn scattering_pdf_value(normal: Vec3, scatter_direction: Vec3) -> f64 {
         let cos_theta = normal.dot(scatter_direction);
-        if cos_theta < 0. {
-            0.
-        } else {
-            cos_theta / PI
-        }
+        if cos_theta < 0. { 0. } else { cos_theta / PI }
     }
 }
 

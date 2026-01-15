@@ -1,10 +1,10 @@
 use std::f64::consts::PI;
 
-use crate::geo::vec3::{Vec3, UNIT_Y};
 use crate::geo::Aabb;
 use crate::geo::Onb;
 use crate::geo::Ray;
 use crate::geo::Uv;
+use crate::geo::vec3::{UNIT_Y, Vec3};
 use crate::hittable::{Hittable, Hittables};
 use crate::material::{Material, Materials, RayHit};
 use crate::random::random_normal_float;

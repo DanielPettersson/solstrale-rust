@@ -1,16 +1,16 @@
 use solstrale::camera::CameraConfig;
+use solstrale::geo::Uv;
 use solstrale::geo::transformation::{
     NopTransformer, RotationY, Transformations, Transformer, Translation,
 };
 use solstrale::geo::vec3::Vec3;
-use solstrale::geo::Uv;
 use solstrale::hittable::Sphere;
 use solstrale::hittable::Triangle;
 use solstrale::hittable::{Bvh, Quad};
 use solstrale::hittable::{ConstantMedium, Hittables};
-use solstrale::loader::obj::Obj;
 use solstrale::loader::Loader;
-use solstrale::material::texture::{load_normal_texture, ImageMap, SolidColor, Textures};
+use solstrale::loader::obj::Obj;
+use solstrale::material::texture::{ImageMap, SolidColor, Textures, load_normal_texture};
 use solstrale::material::{Blend, Dielectric, DiffuseLight, Lambertian};
 use solstrale::renderer::{RenderConfig, Scene};
 

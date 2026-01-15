@@ -7,9 +7,9 @@ mod quad;
 mod sphere;
 mod triangle;
 
-use crate::geo::vec3::Vec3;
 use crate::geo::Aabb;
 use crate::geo::Ray;
+use crate::geo::vec3::Vec3;
 pub use crate::hittable::bvh::Bvh;
 pub use crate::hittable::constant_medium::ConstantMedium;
 pub use crate::hittable::quad::Quad;

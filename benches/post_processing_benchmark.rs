@@ -1,7 +1,7 @@
-use std::hint::black_box;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use solstrale::geo::vec3::Vec3;
 use solstrale::post::{BloomPostProcessor, PostProcessor, SaturationPostProcessor};
+use std::hint::black_box;
 
 pub fn bloom_benchmark(c: &mut Criterion) {
     let width = 800;

@@ -8,15 +8,15 @@ use std::error::Error;
 use simple_error::SimpleError;
 use tobj::LoadOptions;
 
+use crate::geo::Uv;
 use crate::geo::transformation::Transformer;
 use crate::geo::vec3::Vec3;
-use crate::geo::Uv;
 use crate::hittable::Bvh;
 use crate::hittable::Hittables;
 use crate::hittable::Triangle;
 use crate::loader::Loader;
 use crate::material::texture::{ImageMap, SolidColor, Textures};
-use crate::material::{texture, Lambertian, Materials};
+use crate::material::{Lambertian, Materials, texture};
 
 /// Contains file information about the obj to load
 pub struct Obj {
@@ -178,14 +178,18 @@ mod tests {
     #[test]
     fn missing_image_file() {
         let res = Obj::new("resources/obj/", "missingImage.obj").load(&NopTransformer(), None);
-        assert!(format!("{}", res.err().unwrap())
-            .contains("Failed to open image texture resources/obj/missing.jpg"));
+        assert!(
+            format!("{}", res.err().unwrap())
+                .contains("Failed to open image texture resources/obj/missing.jpg")
+        );
     }
 
     #[test]
     fn invalid_image_file() {
         let res = Obj::new("resources/obj/", "invalidImage.obj").load(&NopTransformer(), None);
-        assert!(format!("{}", res.err().unwrap())
-            .contains("Failed to decode image texture resources/obj/invalidImage.mtl"));
+        assert!(
+            format!("{}", res.err().unwrap())
+                .contains("Failed to decode image texture resources/obj/invalidImage.mtl")
+        );
     }
 }
