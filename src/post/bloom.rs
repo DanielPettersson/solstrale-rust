@@ -1,5 +1,4 @@
 //! Post-processor for applying bloom effect
-#![cfg(feature = "gpu")]
 
 use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
@@ -262,15 +261,20 @@ impl PostProcessor for BloomPostProcessor {
         _normal_colors: &[Vec3],
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-
         let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
 
         let (device, queue) = get_wgpu_device_and_queue();
 
         let input_pixels_buffer = self.input_pixels_buffer.as_ref().ok_or("Not initialized")?;
-        let output_pixels_buffer = self.output_pixels_buffer.as_ref().ok_or("Not initialized")?;
+        let output_pixels_buffer = self
+            .output_pixels_buffer
+            .as_ref()
+            .ok_or("Not initialized")?;
         let download_buffer = self.download_buffer.as_ref().ok_or("Not initialized")?;
-        let filter_bright_bind_group = self.filter_bright_bind_group.as_ref().ok_or("Not initialized")?;
+        let filter_bright_bind_group = self
+            .filter_bright_bind_group
+            .as_ref()
+            .ok_or("Not initialized")?;
         let apply_bind_group_x = self.apply_bind_group_x.as_ref().ok_or("Not initialized")?;
         let apply_bind_group_y = self.apply_bind_group_y.as_ref().ok_or("Not initialized")?;
         let add_bind_group = self.add_bind_group.as_ref().ok_or("Not initialized")?;
@@ -278,7 +282,11 @@ impl PostProcessor for BloomPostProcessor {
         queue.write_buffer(input_pixels_buffer, 0, bytemuck::cast_slice(&input_pixels));
 
         let mut cache = self.filter_bright_pipeline_cache.lock().unwrap();
-        if cache.as_ref().map(|(n, _)| *n != num_samples).unwrap_or(true) {
+        if cache
+            .as_ref()
+            .map(|(n, _)| *n != num_samples)
+            .unwrap_or(true)
+        {
             let threshold = self.threshold * num_samples as f64;
             let max_intensity = self.max_intensity * num_samples as f64;
             let pipeline = compute_pipeline(

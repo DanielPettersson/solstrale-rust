@@ -26,7 +26,7 @@ pub fn create_gaussian_blur_weights(kernel_size: usize, std_dev: f32) -> Vec<f32
 
 #[cfg(test)]
 mod tests {
-    use crate::geo::vec3::{ALMOST_ZERO_F32};
+    use crate::geo::vec3::ALMOST_ZERO_F32;
     use crate::util::gaussian::create_gaussian_blur_weights;
 
     #[test]
@@ -34,13 +34,7 @@ mod tests {
         let weights = create_gaussian_blur_weights(5, 1.);
         assert_eq!(
             weights,
-            vec![
-                0.05448869,
-                0.24420136,
-                0.40261996,
-                0.24420136,
-                0.05448869
-            ]
+            vec![0.05448869, 0.24420136, 0.40261996, 0.24420136, 0.05448869]
         );
 
         let total_weight: f32 = weights.iter().sum();

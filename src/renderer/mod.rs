@@ -152,12 +152,16 @@ impl Renderer {
                 .post_processors
                 .push(NopPostProcessor::new().into());
         }
-        scene.render_config.post_processors.iter_mut().for_each(|p| {
-            p.initialize(
-                scene.render_config.width as u32,
-                scene.render_config.height as u32,
-            )
-        });
+        scene
+            .render_config
+            .post_processors
+            .iter_mut()
+            .for_each(|p| {
+                p.initialize(
+                    scene.render_config.width as u32,
+                    scene.render_config.height as u32,
+                )
+            });
 
         Ok(Renderer {
             scene,

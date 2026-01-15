@@ -4,13 +4,13 @@ use std::f64::consts::PI;
 
 use enum_dispatch::enum_dispatch;
 
-use crate::geo::{Onb, Ray};
+use crate::geo::vec3::{random_in_unit_sphere, Vec3, ONE_VECTOR, ZERO_VECTOR};
 use crate::geo::Uv;
-use crate::geo::vec3::{ONE_VECTOR, random_in_unit_sphere, Vec3, ZERO_VECTOR};
+use crate::geo::{Onb, Ray};
 use crate::hittable::Hittables;
-use crate::material::texture::{SolidColor, Texture};
 use crate::material::texture::Textures;
-use crate::pdf::{ContainerPdf, CosinePdf, mix_generate, mix_value, SpherePdf, Pdfs};
+use crate::material::texture::{SolidColor, Texture};
+use crate::pdf::{mix_generate, mix_value, ContainerPdf, CosinePdf, Pdfs, SpherePdf};
 use crate::random::random_normal_float;
 
 pub mod texture;
@@ -62,7 +62,7 @@ pub struct ScatterPdf {
     /// The scattered ray
     pub ray: Ray,
     /// The probability factor for the scattered ray
-    pub probability: f64
+    pub probability: f64,
 }
 
 /// Scattering of a ray against a basic material
@@ -172,7 +172,6 @@ impl Lambertian {
 }
 
 impl Material for Lambertian {
-
     fn scatter(&self, _: &Ray, rec: &RayHit, lights: &[Hittables]) -> RayScatter {
         let color = self.albedo.color(rec.uv);
         let pdf: Pdfs = CosinePdf::new(rec.normal).into();
@@ -182,7 +181,8 @@ impl Material for Lambertian {
         let pdf_direction = mix_generate(&light_pdf, &pdf);
         let scattered = Ray::new(rec.hit_point, pdf_direction);
         let light_pdf_value = mix_value(&light_pdf, &pdf, scattered.direction);
-        let scattering_pdf_value = Lambertian::scattering_pdf_value(rec.normal, scattered.direction.unit());
+        let scattering_pdf_value =
+            Lambertian::scattering_pdf_value(rec.normal, scattered.direction.unit());
 
         RayScatter::ScatterPdf(ScatterPdf {
             color,
@@ -371,7 +371,6 @@ fn transform_normal_by_map(normal_map: &Textures, onb: Onb, uv: Uv) -> Vec3 {
 const SPHERE_PDF_VALUE: f64 = 1. / (4. * PI);
 
 impl Material for Isotropic {
-
     /// Returns a randomly scattered ray in any direction
     fn scatter(&self, _: &Ray, rec: &RayHit, lights: &[Hittables]) -> RayScatter {
         let color = self.tex.color(rec.uv);
@@ -384,10 +383,10 @@ impl Material for Isotropic {
 
         RayScatter::ScatterPdf(ScatterPdf {
             color,
-            ray: scattered, 
+            ray: scattered,
             probability: SPHERE_PDF_VALUE / light_pdf_value,
         })
-  }
+    }
 }
 
 /// A blend of two underlying materials
@@ -401,7 +400,11 @@ pub struct Blend {
 impl Blend {
     /// Create a new blend material from two underlying material and a blend factor [0..1]
     pub fn new(material_1: Materials, material_2: Materials, blend_factor: f64) -> Self {
-        Blend { material_1: Box::new(material_1), material_2: Box::new(material_2), blend_factor }
+        Blend {
+            material_1: Box::new(material_1),
+            material_2: Box::new(material_2),
+            blend_factor,
+        }
     }
 }
 
@@ -427,8 +430,8 @@ impl Material for Blend {
 mod tests {
     use std::ops::Sub;
 
-    use crate::geo::{Onb, Uv};
     use crate::geo::vec3::Vec3;
+    use crate::geo::{Onb, Uv};
     use crate::material::texture::SolidColor;
     use crate::material::transform_normal_by_map;
 
@@ -439,7 +442,7 @@ mod tests {
             Onb {
                 tangent: Vec3::new(0., 1., 0.),
                 bi_tangent: Vec3::new(0., 0., 1.),
-                normal: Vec3::new(1., 0., 0.)
+                normal: Vec3::new(1., 0., 0.),
             },
             Uv::default(),
         );

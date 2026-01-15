@@ -1,5 +1,4 @@
 //! Post-processor for applying saturation
-#![cfg(feature = "gpu")]
 
 use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
@@ -128,7 +127,10 @@ impl PostProcessor for SaturationPostProcessor {
         let (device, queue) = get_wgpu_device_and_queue();
 
         let input_pixels_buffer = self.input_pixels_buffer.as_ref().ok_or("Not initialized")?;
-        let output_pixels_buffer = self.output_pixels_buffer.as_ref().ok_or("Not initialized")?;
+        let output_pixels_buffer = self
+            .output_pixels_buffer
+            .as_ref()
+            .ok_or("Not initialized")?;
         let download_buffer = self.download_buffer.as_ref().ok_or("Not initialized")?;
         let bind_group = self.bind_group.as_ref().ok_or("Not initialized")?;
 

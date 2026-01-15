@@ -1,3 +1,4 @@
+use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use solstrale::geo::vec3::Vec3;
 use solstrale::post::{BloomPostProcessor, PostProcessor, SaturationPostProcessor};
@@ -18,9 +19,9 @@ pub fn bloom_benchmark(c: &mut Criterion) {
             },
             |post| {
                 post.intermediate_post_process(
-                    std::hint::black_box(&pixel_colors),
-                    std::hint::black_box(&albedo_colors),
-                    std::hint::black_box(&normal_colors),
+                    black_box(&pixel_colors),
+                    black_box(&albedo_colors),
+                    black_box(&normal_colors),
                     1,
                 )
                 .unwrap();
@@ -45,9 +46,9 @@ pub fn saturation_benchmark(c: &mut Criterion) {
             },
             |post| {
                 post.intermediate_post_process(
-                    std::hint::black_box(&pixel_colors),
-                    std::hint::black_box(&albedo_colors),
-                    std::hint::black_box(&normal_colors),
+                    black_box(&pixel_colors),
+                    black_box(&albedo_colors),
+                    black_box(&normal_colors),
                     1,
                 )
                 .unwrap();

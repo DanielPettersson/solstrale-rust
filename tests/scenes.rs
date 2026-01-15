@@ -271,7 +271,11 @@ pub fn create_normal_mapping_scene(
     world.push(Sphere::new(light_pos, 5., light.into()).into());
 
     let normal_tex: Option<Textures> = if normal_mapping_enabled {
-        Some(load_normal_texture("resources/textures/normal.png").unwrap().into())
+        Some(
+            load_normal_texture("resources/textures/normal.png")
+                .unwrap()
+                .into(),
+        )
     } else {
         None
     };
@@ -319,7 +323,11 @@ pub fn create_normal_mapping_sphere_scene(render_config: RenderConfig, light_pos
 
     world.push(Sphere::new(light_pos, 5., light.into()).into());
 
-    let normal_tex = Some(load_normal_texture("resources/textures/earth_height.jpg").unwrap().into());
+    let normal_tex = Some(
+        load_normal_texture("resources/textures/earth_height.jpg")
+            .unwrap()
+            .into(),
+    );
     let mat = Lambertian::new(SolidColor::new(0.8, 0.8, 0.8).into(), normal_tex);
 
     world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.6, mat.into()).into());
@@ -517,7 +525,9 @@ pub fn create_blend_material_scene(render_config: RenderConfig, blend_factor: f6
                 Vec3::new(0., 0., 200.),
                 Blend::new(
                     Lambertian::new(
-                        ImageMap::load("resources/textures/checker.jpg").unwrap().into(),
+                        ImageMap::load("resources/textures/checker.jpg")
+                            .unwrap()
+                            .into(),
                         None,
                     )
                     .into(),

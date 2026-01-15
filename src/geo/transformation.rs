@@ -1,8 +1,8 @@
 //! Contains transformations that can modify [`Vec3`]
 //! Used to translate and rotate hittables
-use derive_more::Constructor;
 use crate::geo::vec3::Vec3;
 use crate::util::degrees_to_radians;
+use derive_more::Constructor;
 
 /// A trait used for different transformations on [`Vec3`]
 pub trait Transformer {
