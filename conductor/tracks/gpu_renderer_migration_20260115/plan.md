@@ -22,10 +22,10 @@ Establish the basic compute pipeline and implement the robust transfer of comple
 ## Phase 2: Ray Generation & Intersection
 Implement the primary visibility rays. Instead of full path tracing, we will first render a "Normal Buffer" or "Depth Buffer" to visually verify that geometry and BVH traversal are working correctly.
 
-- [ ] Task: Implement Camera Uniforms & Ray Generation
-    - [ ] Map the `Camera` struct to a Uniform Buffer.
-    - [ ] Write the WGSL `ray_generation` function to spawn rays based on pixel coordinates.
-    - [ ] Test: Render a "UV map" image where pixel color corresponds to ray direction, verify against CPU equivalent.
+- [x] Task: Implement Camera Uniforms & Ray Generation 7c056d7
+    - [x] Map the `Camera` struct to a Uniform Buffer.
+    - [x] Write the WGSL `ray_generation` function to spawn rays based on pixel coordinates.
+    - [x] Test: Render a "UV map" image where pixel color corresponds to ray direction, verify against CPU equivalent.
 - [ ] Task: Implement Iterative BVH Traversal in WGSL
     - [ ] Write the stack-based traversal algorithm in WGSL (replacing CPU recursion).
     - [ ] Implement intersection functions for Sphere, Triangle, and Quad in WGSL.
