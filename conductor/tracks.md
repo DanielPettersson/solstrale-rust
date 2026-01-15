@@ -14,5 +14,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Remove the gpu feature flag, it is not needed since wgpu supports running on the cpu**
+- [x] **Track: Remove the gpu feature flag, it is not needed since wgpu supports running on the cpu**
 *Link: [./tracks/remove_gpu_feature_20260115/](./tracks/remove_gpu_feature_20260115/)*
