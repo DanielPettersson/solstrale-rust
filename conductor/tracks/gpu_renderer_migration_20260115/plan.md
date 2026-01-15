@@ -8,10 +8,10 @@ Establish the basic compute pipeline and implement the robust transfer of comple
     - [x] Set up the WGPU infrastructure to render to a texture using wgpu_util in much the same way as the GPU-based post-processing pipeline.
     - [x] Create a "Hello World" compute shader that simply writes a solid color to the output texture.
     - [x] Test: Write a test that initializes the renderer and checks if the output texture has the expected color.
-- [ ] Task: Implement GPU Data Structures (WGSL & Rust)
-    - [ ] Define WGSL structs for `Ray`, `HitRecord`, `Sphere`, `Triangle`, `Quad`, `Material`, and `BvhNode` ensuring strict alignment rules (std140/std430).
-    - [ ] Create corresponding `repr(C)` Rust structs in `src/renderer/gpu_data.rs` implementing `bytemuck::Pod`.
-    - [ ] Test: Write unit tests to assert the size and alignment of Rust structs match WGSL expectations.
+- [x] Task: Implement GPU Data Structures (WGSL & Rust) 1fcb5b2
+    - [x] Define WGSL structs for `Ray`, `HitRecord`, `Sphere`, `Triangle`, `Quad`, `Material`, and `BvhNode` ensuring strict alignment rules (std140/std430).
+    - [x] Create corresponding `repr(C)` Rust structs in `src/renderer/gpu_data.rs` implementing `bytemuck::Pod`.
+    - [x] Test: Write unit tests to assert the size and alignment of Rust structs match WGSL expectations.
 - [ ] Task: Scene Data Upload System
     - [ ] Implement logic to flatten the CPU BVH tree and primitive lists into linear `Vec` buffers.
     - [ ] Create Storage Buffers for Nodes, Primitives, and Materials on the GPU.
