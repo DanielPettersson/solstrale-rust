@@ -45,6 +45,21 @@ struct Material {
 @group(0) @binding(0)
 var<storage, read_write> output_buffer: array<vec3<f32>>;
 
+@group(0) @binding(1)
+var<storage, read> nodes: array<BvhNode>;
+
+@group(0) @binding(2)
+var<storage, read> spheres: array<Sphere>;
+
+@group(0) @binding(3)
+var<storage, read> triangles: array<Triangle>;
+
+@group(0) @binding(4)
+var<storage, read> quads: array<Quad>;
+
+@group(0) @binding(5)
+var<storage, read> materials: array<Material>;
+
 @compute @workgroup_size(64)
 fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;

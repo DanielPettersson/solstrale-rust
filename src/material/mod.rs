@@ -151,8 +151,8 @@ pub enum Materials {
 /// A typical matte material
 #[derive(Clone, Debug)]
 pub struct Lambertian {
-    albedo: Textures,
-    normal: Option<Textures>,
+    pub(crate) albedo: Textures,
+    pub(crate) normal: Option<Textures>,
 }
 
 impl Lambertian {
@@ -197,9 +197,9 @@ impl Material for Lambertian {
 /// Metal is a material that is reflective
 #[derive(Clone, Debug)]
 pub struct Metal {
-    albedo: Textures,
-    normal: Option<Textures>,
-    fuzz: f64,
+    pub(crate) albedo: Textures,
+    pub(crate) normal: Option<Textures>,
+    pub(crate) fuzz: f64,
 }
 
 impl Metal {
@@ -238,9 +238,9 @@ impl Material for Metal {
 /// A glass type material with an index of refraction
 #[derive(Clone, Debug)]
 pub struct Dielectric {
-    albedo: Textures,
-    normal: Option<Textures>,
-    index_of_refraction: f64,
+    pub(crate) albedo: Textures,
+    pub(crate) normal: Option<Textures>,
+    pub(crate) index_of_refraction: f64,
 }
 
 impl Dielectric {
@@ -297,8 +297,8 @@ fn reflectance(cosine: f64, index_of_refraction: f64) -> f64 {
 /// A material used for emitting light
 #[derive(Clone, Debug)]
 pub struct DiffuseLight {
-    tex: Textures,
-    attenuation_factor: Option<f64>,
+    pub(crate) tex: Textures,
+    pub(crate) attenuation_factor: Option<f64>,
 }
 
 impl DiffuseLight {

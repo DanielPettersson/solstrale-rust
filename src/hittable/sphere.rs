@@ -13,9 +13,9 @@ use crate::util::interval::{Interval, RAY_INTERVAL};
 /// A sphere-shaped hittable object
 #[derive(Debug)]
 pub struct Sphere {
-    center: Vec3,
-    radius: f64,
-    mat: Materials,
+    pub(crate) center: Vec3,
+    pub(crate) radius: f64,
+    pub(crate) mat: Materials,
     b_box: Aabb,
 }
 

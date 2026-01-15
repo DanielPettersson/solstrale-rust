@@ -11,6 +11,7 @@ use crate::geo::Aabb;
 use crate::geo::Ray;
 use crate::geo::vec3::Vec3;
 pub use crate::hittable::bvh::Bvh;
+pub(crate) use crate::hittable::bvh::BvhItem;
 pub use crate::hittable::constant_medium::ConstantMedium;
 pub use crate::hittable::quad::Quad;
 pub use crate::hittable::sphere::Sphere;

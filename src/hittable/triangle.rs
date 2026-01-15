@@ -11,16 +11,16 @@ use crate::util::interval::{Interval, RAY_INTERVAL};
 /// A triangle-shaped hittable object
 #[derive(Clone, Debug)]
 pub struct Triangle {
-    v0: Vec3,
-    v0v1: Vec3,
-    v0v2: Vec3,
+    pub(crate) v0: Vec3,
+    pub(crate) v0v1: Vec3,
+    pub(crate) v0v2: Vec3,
     uv0: Uv,
     uv1: Uv,
     uv2: Uv,
-    normal: Vec3,
+    pub(crate) normal: Vec3,
     tangent: Vec3,
     bi_tangent: Vec3,
-    mat: Materials,
+    pub(crate) mat: Materials,
     b_box: Aabb,
     area: f64,
 }

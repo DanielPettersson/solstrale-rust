@@ -36,7 +36,7 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
         required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::downlevel_defaults(),
+        required_limits: wgpu::Limits::default(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         trace: wgpu::Trace::Off,

@@ -1,5 +1,7 @@
 //! GPU-based renderer implementation using WGPU
 
+use crate::renderer::gpu_data::{BvhNode, Material, Quad, Sphere, Triangle};
+use crate::renderer::scene_flattener::flatten_scene;
 use crate::renderer::{RenderProgress, Scene};
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, bind_group_layout_entry,
@@ -23,6 +25,16 @@ pub struct GpuRenderer {
     output_buffer: wgpu::Buffer,
     download_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
+    nodes_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    spheres_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    triangles_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    quads_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    materials_buffer: wgpu::Buffer,
 }
 
 impl GpuRenderer {
@@ -30,14 +42,29 @@ impl GpuRenderer {
     pub fn new(scene: Scene) -> Result<Self, Box<dyn Error>> {
         let width = scene.render_config.width as u32;
         let height = scene.render_config.height as u32;
-        let (device, _) = get_wgpu_device_and_queue();
+        let (device, queue) = get_wgpu_device_and_queue();
 
         let module = device.create_shader_module(wgpu::include_wgsl!("ray_trace.wgsl"));
+
+        // Flatten scene
+        let scene_data = flatten_scene(&scene);
+
+        // Create buffers
+        let nodes_buffer = create_and_upload_buffer(device, queue, "Nodes Buffer", &scene_data.nodes);
+        let spheres_buffer = create_and_upload_buffer(device, queue, "Spheres Buffer", &scene_data.spheres);
+        let triangles_buffer = create_and_upload_buffer(device, queue, "Triangles Buffer", &scene_data.triangles);
+        let quads_buffer = create_and_upload_buffer(device, queue, "Quads Buffer", &scene_data.quads);
+        let materials_buffer = create_and_upload_buffer(device, queue, "Materials Buffer", &scene_data.materials);
 
         let bind_group_layout = bind_group_layout(
             device,
             &[
-                bind_group_layout_entry(false, 16), // output buffer
+                bind_group_layout_entry(false, 16), // 0: output buffer
+                bind_group_layout_entry(true, 32),  // 1: nodes
+                bind_group_layout_entry(true, 32),  // 2: spheres
+                bind_group_layout_entry(true, 64),  // 3: triangles
+                bind_group_layout_entry(true, 96),  // 4: quads
+                bind_group_layout_entry(true, 48),  // 5: materials
             ],
         );
 
@@ -67,7 +94,14 @@ impl GpuRenderer {
         let bind_group = bind_group(
             device,
             &bind_group_layout,
-            &[&output_buffer],
+            &[
+                &output_buffer,
+                &nodes_buffer,
+                &spheres_buffer,
+                &triangles_buffer,
+                &quads_buffer,
+                &materials_buffer,
+            ],
         );
 
         Ok(GpuRenderer {
@@ -79,6 +113,11 @@ impl GpuRenderer {
             output_buffer,
             download_buffer,
             bind_group,
+            nodes_buffer,
+            spheres_buffer,
+            triangles_buffer,
+            quads_buffer,
+            materials_buffer,
         })
     }
 
@@ -139,4 +178,35 @@ impl GpuRenderer {
 
         Ok(())
     }
+}
+
+fn create_and_upload_buffer<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    data: &[T],
+) -> wgpu::Buffer {
+    let size_bytes = (data.len() * std::mem::size_of::<T>()) as u64;
+    // Ensure minimum size for valid buffer (e.g., 4 bytes? or align to struct size?)
+    // Structs are aligned to 16/32 etc.
+    // If empty, creating 0 size buffer is problematic for binding.
+    // create a dummy buffer with size of 1 element if empty.
+    let effective_size = if size_bytes == 0 {
+        std::mem::size_of::<T>() as u64
+    } else {
+        size_bytes
+    };
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: effective_size,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    if size_bytes > 0 {
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+    }
+
+    buffer
 }

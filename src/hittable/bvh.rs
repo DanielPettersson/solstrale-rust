@@ -12,13 +12,13 @@ use crate::util::interval::Interval;
 #[derive(Display, Debug)]
 #[display("{{\"left\": {}, \"right\": {}}}", left, right)]
 pub struct Bvh {
-    left: Box<BvhItem>,
-    right: Box<BvhItem>,
+    pub(crate) left: Box<BvhItem>,
+    pub(crate) right: Box<BvhItem>,
     b_box: Aabb,
 }
 
 #[derive(Debug, Clone)]
-enum BvhItem {
+pub(crate) enum BvhItem {
     Node(Bvh),
     Leaf(Box<Hittables>),
     None,

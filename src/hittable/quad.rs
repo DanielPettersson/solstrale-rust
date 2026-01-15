@@ -16,13 +16,13 @@ const ZERO_TO_ONE: RangeInclusive<f32> = 0. ..=1.;
 /// A rectangular flat hittable object
 #[derive(Clone, Debug)]
 pub struct Quad {
-    q: Vec3,
-    u: Vec3,
-    v: Vec3,
-    normal: Vec3,
-    d: f64,
-    w: Vec3,
-    mat: Materials,
+    pub(crate) q: Vec3,
+    pub(crate) u: Vec3,
+    pub(crate) v: Vec3,
+    pub(crate) normal: Vec3,
+    pub(crate) d: f64,
+    pub(crate) w: Vec3,
+    pub(crate) mat: Materials,
     b_box: Aabb,
     area: f64,
 }

@@ -22,6 +22,7 @@ use crate::util::interval::RAY_INTERVAL;
 pub mod shader;
 pub mod gpu_renderer;
 pub mod gpu_data;
+pub mod scene_flattener;
 
 ///Input to the ray tracer for how the image should be rendered
 #[derive(Clone)]
