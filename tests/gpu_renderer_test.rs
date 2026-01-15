@@ -1,12 +1,21 @@
 #[cfg(test)]
 mod tests {
+    use image::RgbImage;
+    use image::imageops::FilterType;
+    use image_compare::Algorithm::RootMeanSquared;
     use solstrale::camera::CameraConfig;
+    use solstrale::geo::transformation::NopTransformer;
     use solstrale::geo::vec3::Vec3;
-    use solstrale::hittable::{Bvh, Hittables};
-    use solstrale::renderer::Scene;
+    use solstrale::hittable::{Bvh, Hittables, Quad, Sphere};
+    use solstrale::material::texture::SolidColor;
+    use solstrale::material::{DiffuseLight, Lambertian};
     use solstrale::renderer::gpu_renderer::GpuRenderer;
+    use solstrale::renderer::{RenderConfig, Scene};
     use std::sync::mpsc::channel;
+    use std::thread;
     use std::time::Duration;
+
+    const IMAGE_COMPARISON_SCORE_THRESHOLD: f64 = 0.95;
 
     #[test]
     fn test_gpu_renderer_initialization_and_basic_render() {
@@ -215,5 +224,170 @@ mod tests {
             }
         }
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_gpu_scene_sphere() {
+        let render_config = RenderConfig {
+            width: 400,
+            height: 400,
+            ..Default::default()
+        };
+
+        let camera = CameraConfig {
+            look_from: Vec3::new(0., 0., 20.),
+            look_at: Vec3::new(0., 0., 0.),
+            ..Default::default()
+        };
+
+        let mut world: Vec<Hittables> = Vec::new();
+        let light = DiffuseLight::new(45., 45., 45., None);
+        world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+        let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
+
+        world.push(Sphere::new(Vec3::new(0., 0., 0.), 6., mat.into()).into());
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera,
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        render_and_compare_output(scene, "gpu_sphere");
+    }
+
+    #[test]
+    fn test_gpu_scene_sphere2() {
+        let render_config = RenderConfig {
+            width: 400,
+            height: 400,
+            ..Default::default()
+        };
+
+        let camera = CameraConfig {
+            look_from: Vec3::new(0., 0., 20.),
+            look_at: Vec3::new(0., 0., 0.),
+            ..Default::default()
+        };
+
+        let mut world: Vec<Hittables> = Vec::new();
+        let light = DiffuseLight::new(45., 45., 45., None);
+        world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+        let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+        let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+
+        world.push(Sphere::new(Vec3::new(-4., -1., 0.), 4., blue.into()).into());
+        world.push(Sphere::new(Vec3::new(4., 1., 0.), 4., red.into()).into());
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera,
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        render_and_compare_output(scene, "gpu_sphere2");
+    }
+
+    #[test]
+    fn test_gpu_scene_sphere2_and_quad() {
+        let render_config = RenderConfig {
+            width: 400,
+            height: 400,
+            ..Default::default()
+        };
+
+        let camera = CameraConfig {
+            look_from: Vec3::new(0., 0., 15.),
+            look_at: Vec3::new(0., 0., 0.),
+            ..Default::default()
+        };
+
+        let mut world: Vec<Hittables> = Vec::new();
+        let light = DiffuseLight::new(45., 45., 45., None);
+        world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+        let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+        let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+        let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
+
+        world.push(Sphere::new(Vec3::new(-4., 1., 0.), 2., blue.into()).into());
+        world.push(Sphere::new(Vec3::new(4., -1., 0.), 2., red.clone().into()).into());
+        world.push(
+            Quad::new(
+                Vec3::new(-1., -1., 0.),
+                Vec3::new(2., 0., 0.),
+                Vec3::new(0., 2., 0.),
+                green.into(),
+                &NopTransformer(),
+            )
+            .into(),
+        );
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera,
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        render_and_compare_output(scene, "gpu_sphere2_and_quad");
+    }
+
+    fn render_and_compare_output(scene: Scene, name: &str) {
+        let (output_sender, output_receiver) = channel();
+        let (_, abort_receiver) = channel();
+
+        let width = scene.render_config.width as u32;
+        let height = scene.render_config.height as u32;
+
+        thread::spawn(move || {
+            GpuRenderer::new(scene)
+                .unwrap()
+                .render(&output_sender, &abort_receiver)
+                .unwrap();
+        });
+
+        let mut image = RgbImage::new(width, height);
+        for render_output in output_receiver {
+            if let Some(render_image) = render_output.render_image {
+                image = render_image;
+            }
+        }
+
+        compare_output(name, &image);
+    }
+
+    fn compare_output(name: &str, actual_image: &RgbImage) {
+        actual_image
+            .save(format!("tests/output/out_actual_{}.jpg", name))
+            .unwrap();
+
+        let expected_image_path = format!("tests/output/out_expected_{}.jpg", name);
+        let expected_image = image::open(&expected_image_path)
+            .unwrap_or_else(|_| panic!("Could not load {}", &expected_image_path))
+            .into_rgb8();
+
+        let sized_actual = image::imageops::resize(actual_image, 100, 50, FilterType::Gaussian);
+        let sized_expected =
+            image::imageops::resize(&expected_image, 100, 50, FilterType::Gaussian);
+
+        let score = image_compare::rgb_similarity_structure(
+            &RootMeanSquared,
+            &sized_expected,
+            &sized_actual,
+        )
+        .expect("Failed to compare images")
+        .score;
+
+        assert!(
+            score > IMAGE_COMPARISON_SCORE_THRESHOLD,
+            "Comparison score for {} is: {}",
+            name,
+            score
+        )
     }
 }

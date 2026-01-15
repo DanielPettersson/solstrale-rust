@@ -124,7 +124,7 @@ fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
 
             index
         }
-        BvhItem::None => 0xFFFFFFFF,
+        BvhItem::None => 0x0FFFFFFF,
     }
 }
 
@@ -272,7 +272,7 @@ mod tests {
         // Check root node (inner)
         let n0 = &data.nodes[0];
         assert_eq!(n0.min_and_left[3], 1);
-        assert_eq!(n0.max_and_right[3], 0xFFFFFFFF);
+        assert_eq!(n0.max_and_right[3], 0x0FFFFFFF);
 
         // Check leaf node
         let n1 = &data.nodes[1];

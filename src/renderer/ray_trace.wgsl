@@ -321,7 +321,7 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> b
         stack_ptr--;
         let node_idx = stack[stack_ptr];
         
-        if (node_idx == 0xFFFFFFFFu) { continue; }
+        if (node_idx == 0x0FFFFFFFu) { continue; }
         
         let node = nodes[node_idx];
 

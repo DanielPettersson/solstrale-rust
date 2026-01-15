@@ -1,4 +1,7 @@
+//! GPU data structures matching WGSL layout
+
 use bytemuck::{Pod, Zeroable};
+use std::fmt::Debug;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -81,13 +84,27 @@ pub struct Quad {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 /// BVH Node structure matching WGSL layout
 pub struct BvhNode {
     /// Minimum point of the AABB (as u32 bits) + Left child index
     pub min_and_left: [u32; 4],
     /// Maximum point of the AABB (as u32 bits) + Right child index
     pub max_and_right: [u32; 4],
+}
+
+impl Debug for BvhNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let leaf = &self.max_and_right[3] & 0x80000000 != 0;
+        let prim_type = self.max_and_right[3] & 0x7FFFFFFF;
+        f.debug_struct("BvhNode")
+            .field("leaf", &leaf)
+            .field("idx", if leaf { &self.min_and_left[3] } else { &-1 })
+            .field("type", if leaf { &prim_type } else { &-1 })
+            .field("left_idx", if leaf { &-1 } else { &self.min_and_left[3] })
+            .field("right_idx", if leaf { &-1 } else { &self.max_and_right[3] })
+            .finish()
+    }
 }
 
 #[repr(C)]
