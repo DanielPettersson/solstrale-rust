@@ -18,13 +18,11 @@ pub struct Ray {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Sphere structure matching WGSL layout
 pub struct Sphere {
-    /// Center of the sphere
-    pub center: [f32; 3],
-    /// Radius of the sphere
-    pub radius: f32,
+    /// Center of the sphere + radius in w
+    pub center_and_radius: [f32; 4],
     /// Index of the material in the materials buffer
     pub material_index: u32,
-    /// Padding to align to 32 bytes (16 for vec3/radius + 16 for mat_idx/pad)
+    /// Padding to align to 32 bytes
     pub _padding: [u32; 3],
 }
 
@@ -86,16 +84,10 @@ pub struct Quad {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// BVH Node structure matching WGSL layout
 pub struct BvhNode {
-    /// Minimum point of the AABB
-    pub min: [f32; 3],
-    /// Left child index (or primitive index if leaf)
-    pub left_child_index: u32,
-    /// Maximum point of the AABB
-    pub max: [f32; 3],
-    /// Right child index (or primitive count/type if leaf)
-    pub right_child_index: u32,
-    /// Padding to 48 bytes
-    pub _pad: [u32; 2],
+    /// Minimum point of the AABB (as u32 bits) + Left child index
+    pub min_and_left: [u32; 4],
+    /// Maximum point of the AABB (as u32 bits) + Right child index
+    pub max_and_right: [u32; 4],
 }
 
 #[repr(C)]
@@ -143,27 +135,15 @@ pub struct GpuCamera {
 }
 
 #[repr(C)]
-
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-
 /// Render configuration matching WGSL layout
-
 pub struct GpuRenderConfig {
-
     /// Width of the image
-
     pub width: u32,
-
     /// Height of the image
-
     pub height: u32,
-
     /// Number of samples taken so far (used for RNG seed)
-
     pub sample_count: u32,
-
     /// Padding to align to 16 bytes
-
     pub _pad: u32,
-
 }

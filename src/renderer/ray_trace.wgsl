@@ -1,11 +1,11 @@
+// ... (structs same as before) ...
 struct Ray {
     origin: vec3<f32>,
     direction: vec3<f32>,
 }
 
 struct Sphere {
-    center: vec3<f32>,
-    radius: f32,
+    center_and_radius: vec4<f32>,
     material_index: u32,
 }
 
@@ -28,10 +28,8 @@ struct Quad {
 }
 
 struct BvhNode {
-    min: vec3<f32>,
-    max: vec3<f32>,
-    left_child_index: u32,
-    right_child_index: u32,
+    min_and_left: vec4<u32>,
+    max_and_right: vec4<u32>,
 }
 
 struct Material {
@@ -103,11 +101,100 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.origin + t * r.direction;
 }
 
+fn random_in_unit_sphere(state: ptr<function, u32>) -> vec3<f32> {
+    for (var i = 0u; i < 100u; i++) {
+        let p = vec3<f32>(rand_float(state), rand_float(state), rand_float(state)) * 2.0 - 1.0;
+        if (dot(p, p) < 1.0) { return p; }
+    }
+    return vec3<f32>(0.0);
+}
+
+fn random_unit_vector(state: ptr<function, u32>) -> vec3<f32> {
+    return normalize(random_in_unit_sphere(state));
+}
+
+fn reflect(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return v - 2.0 * dot(v, n) * n;
+}
+
+fn refract(uv: vec3<f32>, n: vec3<f32>, etai_over_etat: f32) -> vec3<f32> {
+    let cos_theta = min(dot(-uv, n), 1.0);
+    let r_out_perp = etai_over_etat * (uv + cos_theta * n);
+    let r_out_parallel = -sqrt(abs(1.0 - dot(r_out_perp, r_out_perp))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
+fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
+    var r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
+}
+
+struct ScatterRecord {
+    attenuation: vec3<f32>,
+    scattered: Ray,
+    emitted: vec3<f32>,
+    is_scattered: bool,
+}
+
+fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
+    let mat = materials[rec.material_index];
+    (*s_rec).emitted = vec3<f32>(0.0);
+    (*s_rec).is_scattered = true;
+
+    if (mat.mat_type == 0u) { // Lambertian
+        var scatter_direction = rec.normal + random_unit_vector(state);
+        // Catch degenerate scatter direction
+        if (all(abs(scatter_direction) < vec3<f32>(1e-8))) {
+            scatter_direction = rec.normal;
+        }
+        (*s_rec).scattered = Ray(rec.p, scatter_direction);
+        (*s_rec).attenuation = mat.albedo;
+        return true;
+    } else if (mat.mat_type == 1u) { // Metal
+        let reflected = reflect(normalize(r_in.direction), rec.normal);
+        (*s_rec).scattered = Ray(rec.p, reflected + mat.fuzz * random_in_unit_sphere(state));
+        (*s_rec).attenuation = mat.albedo;
+        return dot((*s_rec).scattered.direction, rec.normal) > 0.0;
+    } else if (mat.mat_type == 2u) { // Dielectric
+        (*s_rec).attenuation = vec3<f32>(1.0, 1.0, 1.0);
+        var refraction_ratio = mat.refraction_index;
+        if (rec.front_face) {
+            refraction_ratio = 1.0 / mat.refraction_index;
+        }
+
+        let unit_direction = normalize(r_in.direction);
+        let cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+        let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+        let cannot_refract = refraction_ratio * sin_theta > 1.0;
+        var direction: vec3<f32>;
+
+        if (cannot_refract || reflectance(cos_theta, refraction_ratio) > rand_float(state)) {
+            direction = reflect(unit_direction, rec.normal);
+        } else {
+            direction = refract(unit_direction, rec.normal, refraction_ratio);
+        }
+
+        (*s_rec).scattered = Ray(rec.p, direction);
+        return true;
+    } else if (mat.mat_type == 3u) { // DiffuseLight
+        (*s_rec).emitted = mat.emission;
+        (*s_rec).is_scattered = false;
+        return true;
+    }
+
+    return false;
+}
+
 fn hit_sphere(r: Ray, s: Sphere, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> bool {
-    let oc = r.origin - s.center;
+    let center = s.center_and_radius.xyz;
+    let radius = s.center_and_radius.w;
+    
+    let oc = r.origin - center;
     let a = dot(r.direction, r.direction);
     let half_b = dot(oc, r.direction);
-    let c = dot(oc, oc) - s.radius * s.radius;
+    let c = dot(oc, oc) - radius * radius;
 
     let discriminant = half_b * half_b - a * c;
     if (discriminant < 0.0) { return false; }
@@ -123,7 +210,7 @@ fn hit_sphere(r: Ray, s: Sphere, t_min: f32, t_max: f32, rec: ptr<function, HitR
 
     (*rec).t = root;
     (*rec).p = ray_at(r, root);
-    let outward_normal = ((*rec).p - s.center) / s.radius;
+    let outward_normal = ((*rec).p - center) / radius;
     (*rec).front_face = dot(r.direction, outward_normal) < 0.0;
     if ((*rec).front_face) {
         (*rec).normal = outward_normal;
@@ -195,24 +282,25 @@ fn hit_quad(r: Ray, q: Quad, t_min: f32, t_max: f32, rec: ptr<function, HitRecor
     return true;
 }
 
-fn hit_aabb(r: Ray, min: vec3<f32>, max: vec3<f32>, t_min_in: f32, t_max_in: f32) -> bool {
+fn hit_aabb(r: Ray, min_val: vec3<f32>, max_val: vec3<f32>, t_min_in: f32, t_max_in: f32) -> bool {
     var t_min = t_min_in;
     var t_max = t_max_in;
-    let inv_dir = 1.0 / r.direction;
-
-    for (var i = 0u; i < 3u; i++) {
-        var t0 = (min[i] - r.origin[i]) * inv_dir[i];
-        var t1 = (max[i] - r.origin[i]) * inv_dir[i];
-        if (inv_dir[i] < 0.0) {
-            let tmp = t0;
-            t0 = t1;
-            t1 = tmp;
-        }
-        t_min = max(t0, t_min);
-        t_max = min(t1, t_max);
-        if (t_max <= t_min) { return false; }
-    }
-    return true;
+    
+    // Improved precision hit_aabb
+    let inv_dir = 1.0 / (r.direction + vec3<f32>(1e-6));
+    let t0 = (min_val - r.origin) * inv_dir;
+    let t1 = (max_val - r.origin) * inv_dir;
+    
+    let t_min_v = min(t0, t1);
+    let t_max_v = max(t0, t1);
+    
+    let t_min_max = max(t_min_v.x, max(t_min_v.y, t_min_v.z));
+    let t_max_min = min(t_max_v.x, min(t_max_v.y, t_max_v.z));
+    
+    t_min = max(t_min, t_min_max);
+    t_max = min(t_max, t_max_min);
+    
+    return t_min < t_max;
 }
 
 fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> bool {
@@ -232,13 +320,30 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> b
         safety_counter++;
         stack_ptr--;
         let node_idx = stack[stack_ptr];
+        
+        if (node_idx == 0xFFFFFFFFu) { continue; }
+        
         let node = nodes[node_idx];
 
-        if (hit_aabb(r, node.min, node.max, t_min, closest_so_far)) {
-            let is_leaf = (node.right_child_index & 0x80000000u) != 0u;
+        let node_min = vec3<f32>(
+            bitcast<f32>(node.min_and_left.x),
+            bitcast<f32>(node.min_and_left.y),
+            bitcast<f32>(node.min_and_left.z)
+        );
+        let node_max = vec3<f32>(
+            bitcast<f32>(node.max_and_right.x),
+            bitcast<f32>(node.max_and_right.y),
+            bitcast<f32>(node.max_and_right.z)
+        );
+
+        if (hit_aabb(r, node_min, node_max, t_min, closest_so_far)) {
+            let left_idx = node.min_and_left.w;
+            let right_idx = node.max_and_right.w;
+            
+            let is_leaf = (right_idx & 0x80000000u) != 0u;
             if (is_leaf) {
-                let prim_type = node.right_child_index & 0x7FFFFFFFu;
-                let prim_idx = node.left_child_index;
+                let prim_type = right_idx & 0x7FFFFFFFu;
+                let prim_idx = left_idx;
                 var temp_rec: HitRecord;
                 var hit = false;
 
@@ -255,30 +360,55 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> b
                     closest_so_far = temp_rec.t;
                     *rec = temp_rec;
                 }
-                        } else {
-                            if (stack_ptr < 62u) {
-                                stack[stack_ptr] = node.right_child_index;
-                                stack_ptr++;
-                                stack[stack_ptr] = node.left_child_index;
-                                stack_ptr++;
-                            }
-                        }
-                    }
+            } else {
+                if (stack_ptr < 62u) {
+                    stack[stack_ptr] = right_idx;
+                    stack_ptr++;
+                    stack[stack_ptr] = left_idx;
+                    stack_ptr++;
                 }
-            
-                return hit_anything;
             }
-            
-            @compute @workgroup_size(64)
-            fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
-                let index = global_id.x;
-                if (index >= arrayLength(&output_buffer)) {
-                    return;
-                }
-            
-                var rng_state = index + config.sample_count * 712371u;
-                let r_val = rand_float(&rng_state);
-                output_buffer[index] = vec3<f32>(r_val, r_val, r_val);
+        }
+    }
+
+    return hit_anything;
+}
+
+@compute @workgroup_size(64)
+fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= arrayLength(&output_buffer)) {
+        return;
+    }
+
+    var rng_state = index + config.sample_count * 712371u;
+    
+    let x = f32(index % config.width);
+    let y = f32(index / config.width);
+
+    let u = x / f32(config.width - 1u);
+    let v = y / f32(config.height - 1u);
+
+    let ray_direction = normalize(camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin);
+    let r = Ray(camera.origin, ray_direction);
+
+    var rec: HitRecord;
+    if (world_hit(r, 0.001, 10000.0, &rec)) {
+        var s_rec: ScatterRecord;
+        if (scatter(r, rec, &rng_state, &s_rec)) {
+            var color: vec3<f32>;
+            if (s_rec.is_scattered) {
+                color = s_rec.attenuation;
+            } else {
+                color = s_rec.emitted;
             }
-            
+            output_buffer[index] = color + rand_float(&rng_state) * 0.001;
+        } else {
+            output_buffer[index] = vec3<f32>(0.0, 0.0, 0.0);
+        }
+        } else {
+            // Black miss color (standard)
+            output_buffer[index] = vec3<f32>(0.0, 0.0, 0.0);
+        }
+    }
     

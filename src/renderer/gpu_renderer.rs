@@ -245,35 +245,69 @@ impl GpuRenderer {
 }
 
 fn create_and_upload_buffer<T: bytemuck::Pod>(
+
     device: &wgpu::Device,
+
     queue: &wgpu::Queue,
+
     label: &str,
+
     data: &[T],
+
     usage: BufferUsages,
+
 ) -> wgpu::Buffer {
+
     let size_bytes = (data.len() * std::mem::size_of::<T>()) as u64;
+
     
+
     // Ensure minimum size for valid buffer and pad to 16 bytes for WGSL array compatibility
+
     let mut effective_size = if size_bytes == 0 {
+
         std::mem::size_of::<T>() as u64
+
     } else {
+
         size_bytes
+
     };
+
     
+
     if effective_size % 16 != 0 {
+
         effective_size = ((effective_size / 16) + 1) * 16;
+
     }
+
+
 
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+
         label: Some(label),
+
         size: effective_size,
+
         usage: usage | BufferUsages::COPY_DST,
+
         mapped_at_creation: false,
+
     });
 
+
+
     if size_bytes > 0 {
+
         queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+
     }
 
+
+
     buffer
+
 }
+
+

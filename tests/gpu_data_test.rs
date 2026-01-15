@@ -10,6 +10,6 @@ mod tests {
         assert_eq!(size_of::<Material>(), 48);
         assert_eq!(size_of::<Triangle>(), 80);
         assert_eq!(size_of::<Quad>(), 112);
-        assert_eq!(size_of::<BvhNode>(), 48);
+        assert_eq!(size_of::<BvhNode>(), 32);
     }
 }

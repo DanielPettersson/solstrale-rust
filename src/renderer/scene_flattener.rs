@@ -41,20 +41,23 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
              process_node(bvh, &mut data);
         },
         _ => {
-             // If root is not BVH, treat as leaf node at index 0
              let (prim_index, prim_type) = add_primitive(&scene.world, &mut data);
-             
              let bbox = scene.world.bounding_box();
-             let min = [bbox.x.min as f32, bbox.y.min as f32, bbox.z.min as f32];
-             let max = [bbox.x.max as f32, bbox.y.max as f32, bbox.z.max as f32];
              
              let flag = 0x80000000;
              data.nodes.push(GpuBvhNode {
-                min,
-                max,
-                left_child_index: prim_index,
-                right_child_index: prim_type | flag,
-                _pad: [0; 2],
+                min_and_left: [
+                    (bbox.x.min as f32).to_bits(), 
+                    (bbox.y.min as f32).to_bits(), 
+                    (bbox.z.min as f32).to_bits(), 
+                    prim_index
+                ],
+                max_and_right: [
+                    (bbox.x.max as f32).to_bits(), 
+                    (bbox.y.max as f32).to_bits(), 
+                    (bbox.z.max as f32).to_bits(), 
+                    prim_type | flag
+                ],
              });
         }
     }
@@ -66,22 +69,27 @@ fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
     let index = data.nodes.len() as u32;
     // Reserve slot
     data.nodes.push(GpuBvhNode {
-        min: [0.0; 3], max: [0.0; 3], left_child_index: 0, right_child_index: 0, _pad: [0; 2]
+        min_and_left: [0; 4], max_and_right: [0; 4]
     });
 
     let left_idx = process_item(&bvh.left, data);
     let right_idx = process_item(&bvh.right, data);
     
     let bbox = bvh.bounding_box();
-    let min = [bbox.x.min as f32, bbox.y.min as f32, bbox.z.min as f32];
-    let max = [bbox.x.max as f32, bbox.y.max as f32, bbox.z.max as f32];
     
     data.nodes[index as usize] = GpuBvhNode {
-        min,
-        max,
-        left_child_index: left_idx,
-        right_child_index: right_idx,
-        _pad: [0; 2],
+        min_and_left: [
+            (bbox.x.min as f32).to_bits(), 
+            (bbox.y.min as f32).to_bits(), 
+            (bbox.z.min as f32).to_bits(), 
+            left_idx
+        ],
+        max_and_right: [
+            (bbox.x.max as f32).to_bits(), 
+            (bbox.y.max as f32).to_bits(), 
+            (bbox.z.max as f32).to_bits(), 
+            right_idx
+        ],
     };
     
     index
@@ -95,22 +103,27 @@ fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
             
             let index = data.nodes.len() as u32;
             let bbox = hittable.bounding_box();
-            let min = [bbox.x.min as f32, bbox.y.min as f32, bbox.z.min as f32];
-            let max = [bbox.x.max as f32, bbox.y.max as f32, bbox.z.max as f32];
 
             let flag = 0x80000000;
             
             data.nodes.push(GpuBvhNode {
-                min,
-                max,
-                left_child_index: prim_index,
-                right_child_index: prim_type | flag,
-                _pad: [0; 2],
+                min_and_left: [
+                    (bbox.x.min as f32).to_bits(), 
+                    (bbox.y.min as f32).to_bits(), 
+                    (bbox.z.min as f32).to_bits(), 
+                    prim_index
+                ],
+                max_and_right: [
+                    (bbox.x.max as f32).to_bits(), 
+                    (bbox.y.max as f32).to_bits(), 
+                    (bbox.z.max as f32).to_bits(), 
+                    prim_type | flag
+                ],
             });
             
             index
         },
-        BvhItem::None => 0, 
+        BvhItem::None => 0xFFFFFFFF, 
     }
 }
 
@@ -120,8 +133,7 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
             let index = data.spheres.len() as u32;
             let mat_idx = add_material(&s.mat, data);
             data.spheres.push(GpuSphere {
-                center: to_array(s.center),
-                radius: s.radius as f32,
+                center_and_radius: [s.center.x as f32, s.center.y as f32, s.center.z as f32, s.radius as f32],
                 material_index: mat_idx,
                 _padding: [0; 3],
             });
@@ -164,8 +176,8 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
             });
             (index, 2) // Type 2 = Quad
         },
-        Hittables::Bvh(_) => (0, 0),
-        Hittables::ConstantMedium(_) => (0, 0)
+        Hittables::Bvh(_) => (0xFFFFFFFF, 0),
+        Hittables::ConstantMedium(_) => (0xFFFFFFFF, 0)
     }
 }
 
@@ -238,20 +250,19 @@ mod tests {
         
         // Check sphere data
         let s = &data.spheres[0];
-        assert_eq!(s.center, [0.0, 0.0, -2.0]);
-        assert_eq!(s.radius, 1.0);
+        assert_eq!(s.center_and_radius, [0.0, 0.0, -2.0, 1.0]);
         assert_eq!(s.material_index, 0);
         
         // Check root node (inner)
         let n0 = &data.nodes[0];
-        assert_eq!(n0.left_child_index, 1);
-        assert_eq!(n0.right_child_index, 0);
+        assert_eq!(n0.min_and_left[3], 1);
+        assert_eq!(n0.max_and_right[3], 0xFFFFFFFF);
 
         // Check leaf node
         let n1 = &data.nodes[1];
         // left_child_index should point to sphere index (0)
-        assert_eq!(n1.left_child_index, 0);
+        assert_eq!(n1.min_and_left[3], 0);
         // right_child_index should have flag set and type 0 (Sphere)
-        assert_eq!(n1.right_child_index, 0x80000000 | 0);
+        assert_eq!(n1.max_and_right[3], 0x80000000 | 0);
     }
 }
