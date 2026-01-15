@@ -15,11 +15,11 @@ This plan outlines the steps to upgrade the project from Rust edition 2021 to 20
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Edition Update & Automated Fixes' (Protocol in workflow.md) f104b1b
 
 ## Phase 3: Manual Refactoring & Idiom Adoption
-- [ ] Task: Manually refactor the codebase to adopt beneficial new idioms from the 2024 edition, based on the research from Phase 1.
-    - [ ] Sub-task: Identify and list specific code patterns that can be improved.
-    - [ ] Sub-task: Apply the refactoring changes incrementally.
-- [ ] Task: Address any new compiler warnings or linter suggestions (`cargo clippy`) that arise from the manual changes.
-- [ ] Task: Run the test suite after each significant manual change to ensure no regressions are introduced.
+- [x] Task: Manually refactor the codebase to adopt beneficial new idioms from the 2024 edition, based on the research from Phase 1. f701a52
+    - [x] Sub-task: Identify and list specific code patterns that can be improved. f701a52
+    - [x] Sub-task: Apply the refactoring changes incrementally. f701a52
+- [x] Task: Address any new compiler warnings or linter suggestions (`cargo clippy`) that arise from the manual changes. f701a52
+- [x] Task: Run the test suite after each significant manual change to ensure no regressions are introduced. f701a52
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Manual Refactoring & Idiom Adoption' (Protocol in workflow.md)
 
 ## Phase 4: Full Verification & Quality Assurance
