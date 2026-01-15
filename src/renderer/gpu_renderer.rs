@@ -76,7 +76,7 @@ impl GpuRenderer {
         };
         let camera_buffer = create_and_upload_buffer(device, queue, "Camera Buffer", &[gpu_camera], BufferUsages::UNIFORM);
 
-        let gpu_config = GpuRenderConfig { width, height };
+        let gpu_config = GpuRenderConfig { width, height, sample_count: 0, _pad: 0 };
         let config_buffer = create_and_upload_buffer(device, queue, "Config Buffer", &[gpu_config], BufferUsages::UNIFORM);
 
         let bind_group_layout = bind_group_layout(
@@ -158,52 +158,87 @@ impl GpuRenderer {
     ) -> Result<(), Box<dyn Error>> {
         let (device, queue) = get_wgpu_device_and_queue();
         let render_start_time = SystemTime::now();
-
-        // One pass "rendering" for now
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        let pixel_count = self.width * self.height;
-        let workgroup_count = pixel_count.div_ceil(64);
-
-        add_compute_pass(&mut encoder, &self.pipeline, &self.bind_group, workgroup_count);
-        add_buffer_copy(&mut encoder, &self.output_buffer, &self.download_buffer);
-
-        let command_buffer = encoder.finish();
-        queue.submit([command_buffer]);
-
-        // Read back
-        let result: Vec<[f32; 4]> = get_result_from_buffer(device, &self.download_buffer);
+        let mut last_image_generated_time = SystemTime::UNIX_EPOCH;
         
-        if abort.try_recv().is_ok() {
-             return Ok(());
-        }
+        let samples_per_pixel = self.scene.render_config.samples_per_pixel;
 
-        // Convert to Image
-        let mut img = RgbImage::new(self.width, self.height);
-        for (i, pixel) in result.iter().enumerate() {
-            let x = (i as u32) % self.width;
-            let y = (i as u32) / self.width;
-            if x < self.width && y < self.height {
-                 // Simple tone mapping (clip)
-                 let r = (pixel[0] * 255.0).clamp(0.0, 255.0) as u8;
-                 let g = (pixel[1] * 255.0).clamp(0.0, 255.0) as u8;
-                 let b = (pixel[2] * 255.0).clamp(0.0, 255.0) as u8;
-                 img.put_pixel(x, y, Rgb([r, g, b]));
+        for sample in 1..=samples_per_pixel {
+            if abort.try_recv().is_ok() {
+                return Ok(());
+            }
+
+            // Update config buffer with current sample count
+            let gpu_config = GpuRenderConfig { 
+                width: self.width, 
+                height: self.height, 
+                sample_count: sample,
+                _pad: 0 
+            };
+            queue.write_buffer(&self.config_buffer, 0, bytemuck::cast_slice(&[gpu_config]));
+
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+            let pixel_count = self.width * self.height;
+            let workgroup_count = pixel_count.div_ceil(64);
+
+            add_compute_pass(&mut encoder, &self.pipeline, &self.bind_group, workgroup_count);
+            
+            let now = SystemTime::now();
+            let should_generate_image = self.scene.render_config.render_image_strategy.should_generate_image(
+                sample,
+                samples_per_pixel,
+                now,
+                last_image_generated_time,
+            );
+
+            if should_generate_image {
+                add_buffer_copy(&mut encoder, &self.output_buffer, &self.download_buffer);
+            }
+
+            let command_buffer = encoder.finish();
+            queue.submit([command_buffer]);
+
+            if should_generate_image {
+                last_image_generated_time = now;
+                
+                // Read back
+                let result: Vec<[f32; 4]> = get_result_from_buffer(device, &self.download_buffer);
+                
+                if abort.try_recv().is_ok() {
+                     return Ok(());
+                }
+
+                // Convert to Image
+                let mut img = RgbImage::new(self.width, self.height);
+                for (i, pixel) in result.iter().enumerate() {
+                    let x = (i as u32) % self.width;
+                    let y = (i as u32) / self.width;
+                    if x < self.width && y < self.height {
+                         // Very simple accumulation visualization: divide by sample count
+                         // In future we should accumulate in f32 buffer on GPU
+                         let r = (pixel[0] * 255.0).clamp(0.0, 255.0) as u8;
+                         let g = (pixel[1] * 255.0).clamp(0.0, 255.0) as u8;
+                         let b = (pixel[2] * 255.0).clamp(0.0, 255.0) as u8;
+                         img.put_pixel(x, y, Rgb([r, g, b]));
+                    }
+                }
+
+                output.send(RenderProgress {
+                    progress: sample as f64 / samples_per_pixel as f64,
+                    fps: Some(sample as f64 / now.duration_since(render_start_time).unwrap_or(Duration::from_millis(1)).as_secs_f64()), 
+                    estimated_time_left: Duration::from_secs(0), // TODO calculate
+                    render_image: Some(img),
+                })?;
+            } else if sample == samples_per_pixel || sample % 10 == 0 {
+                 output.send(RenderProgress {
+                    progress: sample as f64 / samples_per_pixel as f64,
+                    fps: Some(sample as f64 / now.duration_since(render_start_time).unwrap_or(Duration::from_millis(1)).as_secs_f64()), 
+                    estimated_time_left: Duration::from_secs(0),
+                    render_image: None,
+                })?;
             }
         }
-        
-        let now = SystemTime::now();
-        let time_since_start = now
-            .duration_since(render_start_time)
-            .unwrap_or(Duration::from_millis(1));
-
-        output.send(RenderProgress {
-            progress: 1.0,
-            fps: Some(1.0 / time_since_start.as_secs_f64()), 
-            estimated_time_left: Duration::from_secs(0),
-            render_image: Some(img),
-        })?;
 
         Ok(())
     }

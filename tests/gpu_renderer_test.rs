@@ -204,4 +204,42 @@ mod tests {
         }
         assert!(received_hit);
     }
+
+    #[test]
+    fn test_gpu_renderer_rng_changes() {
+        use solstrale::renderer::{RenderConfig, RenderImageStrategy};
+        
+        let scene = Scene {
+            world: Hittables::Bvh(Bvh::new(vec![])),
+            camera: Default::default(),
+            background_color: Default::default(),
+            render_config: RenderConfig {
+                samples_per_pixel: 2,
+                render_image_strategy: RenderImageStrategy::EverySample,
+                ..Default::default()
+            },
+        };
+
+        let renderer = GpuRenderer::new(scene).unwrap();
+        let (tx, rx) = channel();
+        let (_abort_tx, abort_rx) = channel();
+        
+        renderer.render(&tx, &abort_rx).unwrap();
+
+        let mut first_pixel_val: Option<[u8; 3]> = None;
+        let mut count = 0;
+        
+        while let Ok(progress) = rx.recv_timeout(Duration::from_secs(5)) {
+            if let Some(image) = progress.render_image {
+                let p = image.get_pixel(0, 0).0;
+                if let Some(prev_p) = first_pixel_val {
+                    assert_ne!(p, prev_p, "RNG did not change pixel value between samples");
+                }
+                first_pixel_val = Some(p);
+                count += 1;
+            }
+            if progress.progress >= 1.0 { break; }
+        }
+        assert_eq!(count, 2);
+    }
 }

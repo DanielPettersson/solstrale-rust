@@ -53,6 +53,7 @@ struct Camera {
 struct RenderConfig {
     width: u32,
     height: u32,
+    sample_count: u32,
 }
 
 struct HitRecord {
@@ -86,6 +87,17 @@ var<uniform> camera: Camera;
 
 @group(0) @binding(7)
 var<uniform> config: RenderConfig;
+
+fn pcg_hash(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn rand_float(state: ptr<function, u32>) -> f32 {
+    *state = pcg_hash(*state);
+    return f32(*state) / 4294967296.0;
+}
 
 fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.origin + t * r.direction;
@@ -264,24 +276,9 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> b
                     return;
                 }
             
-                let x = f32(index % config.width);
-                let y = f32(index / config.width);
-            
-                let u = x / f32(config.width - 1u);
-                let v = y / f32(config.height - 1u);
-            
-                let ray_direction = normalize(camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin);
-                let r = Ray(camera.origin, ray_direction);
-            
-                var rec: HitRecord;
-                if (world_hit(r, 0.001, 10000.0, &rec)) {
-                    // Visualize normals
-                    output_buffer[index] = rec.normal * 0.5 + 0.5;
-                } else {
-                    // Visualize ray direction for testing
-                    output_buffer[index] = r.direction * 0.5 + 0.5;
-                }
+                var rng_state = index + config.sample_count * 712371u;
+                let r_val = rand_float(&rng_state);
+                output_buffer[index] = vec3<f32>(r_val, r_val, r_val);
             }
             
-
     

@@ -143,11 +143,27 @@ pub struct GpuCamera {
 }
 
 #[repr(C)]
+
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+
 /// Render configuration matching WGSL layout
+
 pub struct GpuRenderConfig {
+
     /// Width of the image
+
     pub width: u32,
+
     /// Height of the image
+
     pub height: u32,
+
+    /// Number of samples taken so far (used for RNG seed)
+
+    pub sample_count: u32,
+
+    /// Padding to align to 16 bytes
+
+    pub _pad: u32,
+
 }
