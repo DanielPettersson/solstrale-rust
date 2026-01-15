@@ -1,5 +1,4 @@
 //! Post-processor for applying bloom effect
-#![cfg(feature = "gpu")]
 
 use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;

@@ -25,8 +25,8 @@ Remove the CPU fallback for saturation and enforce the GPU implementation.
 ## Phase 3: Refactor Bloom Post-Processing
 Remove the CPU fallback for bloom and enforce the GPU implementation.
 - [x] Task: Remove `src/post/bloom_cpu.rs`. 8f136fa
-- [ ] Task: Update `src/post/bloom_gpu.rs`.
-    - [ ] Remove `#![cfg(feature = "gpu")]`.
+- [~] Task: Update `src/post/bloom_gpu.rs`.
+    - [x] Remove `#![cfg(feature = "gpu")]`.
 - [ ] Task: Update `src/post/mod.rs`.
     - [ ] Remove `cfg` attributes for bloom modules.
     - [ ] Unconditionally import and use the GPU bloom implementation.
