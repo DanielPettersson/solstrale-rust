@@ -20,6 +20,7 @@ use crate::renderer::shader::{AlbedoShader, NormalShader, PathTracingShader, Sha
 use crate::util::interval::RAY_INTERVAL;
 
 pub mod shader;
+pub mod gpu_renderer;
 
 ///Input to the ray tracer for how the image should be rendered
 #[derive(Clone)]
