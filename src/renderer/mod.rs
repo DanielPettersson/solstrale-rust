@@ -19,10 +19,10 @@ use crate::random::random_normal_float;
 use crate::renderer::shader::{AlbedoShader, NormalShader, PathTracingShader, Shader, Shaders};
 use crate::util::interval::RAY_INTERVAL;
 
-pub mod shader;
-pub mod gpu_renderer;
 pub mod gpu_data;
+pub mod gpu_renderer;
 pub mod scene_flattener;
+pub mod shader;
 
 ///Input to the ray tracer for how the image should be rendered
 #[derive(Clone)]
@@ -92,7 +92,7 @@ pub enum RenderImageStrategy {
     /// Every sample should contain an image
     EverySample,
     /// Only include an image if at least "duration" has elapsed since last time
-    /// Plus always include final image
+    /// Plus always include the final image
     Interval(Duration),
     /// Only include image in last rendered sample
     OnlyFinal,

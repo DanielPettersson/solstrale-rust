@@ -4,9 +4,8 @@ use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
 use crate::util::gaussian::create_gaussian_blur_weights;
 use crate::util::wgpu_util::{
-    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout,
-    compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
-    storage_binding,
+    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
+    get_result_from_buffer, get_wgpu_device_and_queue, storage_binding,
 };
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
@@ -81,10 +80,7 @@ impl BloomPostProcessor {
 
         let filter_bright_bind_group_layout = bind_group_layout(
             device,
-            &[
-                storage_binding(true, 16),
-                storage_binding(false, 16),
-            ],
+            &[storage_binding(true, 16), storage_binding(false, 16)],
         );
 
         let apply_bind_group_layout = bind_group_layout(

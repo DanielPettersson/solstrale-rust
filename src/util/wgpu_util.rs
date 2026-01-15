@@ -6,8 +6,13 @@ use std::error::Error;
 use std::num::NonZeroU64;
 
 pub(crate) enum BindingType {
-    Storage { read_only: bool, min_binding_size: u64 },
-    Uniform { min_binding_size: u64 },
+    Storage {
+        read_only: bool,
+        min_binding_size: u64,
+    },
+    Uniform {
+        min_binding_size: u64,
+    },
 }
 
 pub(crate) struct BindingInfo {
@@ -144,7 +149,10 @@ pub(crate) fn bind_group_layout(
 
 pub(crate) fn storage_binding(read_only: bool, min_binding_size: u64) -> BindingInfo {
     BindingInfo {
-        binding_type: BindingType::Storage { read_only, min_binding_size },
+        binding_type: BindingType::Storage {
+            read_only,
+            min_binding_size,
+        },
     }
 }
 
@@ -154,15 +162,13 @@ pub(crate) fn uniform_binding(min_binding_size: u64) -> BindingInfo {
     }
 }
 
-fn bind_group_layout_entry0(
-    binding: u32,
-    info: &BindingInfo,
-) -> wgpu::BindGroupLayoutEntry {
+fn bind_group_layout_entry0(binding: u32, info: &BindingInfo) -> wgpu::BindGroupLayoutEntry {
     let ty = match info.binding_type {
-        BindingType::Storage { read_only, min_binding_size } => wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage {
-                read_only,
-            },
+        BindingType::Storage {
+            read_only,
+            min_binding_size,
+        } => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
             min_binding_size: NonZeroU64::new(min_binding_size),
             has_dynamic_offset: false,
         },

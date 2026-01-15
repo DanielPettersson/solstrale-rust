@@ -1,15 +1,15 @@
 //! Utilities for flattening the scene graph into linear buffers for the GPU
 
+use crate::geo::Uv;
 use crate::geo::vec3::{Vec3, ZERO_VECTOR};
 use crate::hittable::{Bvh, BvhItem, Hittable, Hittables};
+use crate::material::Materials;
 use crate::material::texture::{Texture, Textures};
-use crate::material::{Materials};
+use crate::renderer::Scene;
 use crate::renderer::gpu_data::{
     BvhNode as GpuBvhNode, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
     Triangle as GpuTriangle,
 };
-use crate::renderer::Scene;
-use crate::geo::Uv;
 
 /// Container for all scene data flattened for the GPU
 pub struct SceneData {
@@ -34,34 +34,34 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         quads: Vec::new(),
         materials: Vec::new(),
     };
-    
+
     // Process world
     match &scene.world {
         Hittables::Bvh(bvh) => {
-             process_node(bvh, &mut data);
-        },
+            process_node(bvh, &mut data);
+        }
         _ => {
-             let (prim_index, prim_type) = add_primitive(&scene.world, &mut data);
-             let bbox = scene.world.bounding_box();
-             
-             let flag = 0x80000000;
-             data.nodes.push(GpuBvhNode {
+            let (prim_index, prim_type) = add_primitive(&scene.world, &mut data);
+            let bbox = scene.world.bounding_box();
+
+            let flag = 0x80000000;
+            data.nodes.push(GpuBvhNode {
                 min_and_left: [
-                    (bbox.x.min as f32).to_bits(), 
-                    (bbox.y.min as f32).to_bits(), 
-                    (bbox.z.min as f32).to_bits(), 
-                    prim_index
+                    (bbox.x.min as f32).to_bits(),
+                    (bbox.y.min as f32).to_bits(),
+                    (bbox.z.min as f32).to_bits(),
+                    prim_index,
                 ],
                 max_and_right: [
-                    (bbox.x.max as f32).to_bits(), 
-                    (bbox.y.max as f32).to_bits(), 
-                    (bbox.z.max as f32).to_bits(), 
-                    prim_type | flag
+                    (bbox.x.max as f32).to_bits(),
+                    (bbox.y.max as f32).to_bits(),
+                    (bbox.z.max as f32).to_bits(),
+                    prim_type | flag,
                 ],
-             });
+            });
         }
     }
-    
+
     data
 }
 
@@ -69,29 +69,30 @@ fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
     let index = data.nodes.len() as u32;
     // Reserve slot
     data.nodes.push(GpuBvhNode {
-        min_and_left: [0; 4], max_and_right: [0; 4]
+        min_and_left: [0; 4],
+        max_and_right: [0; 4],
     });
 
     let left_idx = process_item(&bvh.left, data);
     let right_idx = process_item(&bvh.right, data);
-    
+
     let bbox = bvh.bounding_box();
-    
+
     data.nodes[index as usize] = GpuBvhNode {
         min_and_left: [
-            (bbox.x.min as f32).to_bits(), 
-            (bbox.y.min as f32).to_bits(), 
-            (bbox.z.min as f32).to_bits(), 
-            left_idx
+            (bbox.x.min as f32).to_bits(),
+            (bbox.y.min as f32).to_bits(),
+            (bbox.z.min as f32).to_bits(),
+            left_idx,
         ],
         max_and_right: [
-            (bbox.x.max as f32).to_bits(), 
-            (bbox.y.max as f32).to_bits(), 
-            (bbox.z.max as f32).to_bits(), 
-            right_idx
+            (bbox.x.max as f32).to_bits(),
+            (bbox.y.max as f32).to_bits(),
+            (bbox.z.max as f32).to_bits(),
+            right_idx,
         ],
     };
-    
+
     index
 }
 
@@ -100,30 +101,30 @@ fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
         BvhItem::Node(bvh) => process_node(bvh, data),
         BvhItem::Leaf(hittable) => {
             let (prim_index, prim_type) = add_primitive(hittable, data);
-            
+
             let index = data.nodes.len() as u32;
             let bbox = hittable.bounding_box();
 
             let flag = 0x80000000;
-            
+
             data.nodes.push(GpuBvhNode {
                 min_and_left: [
-                    (bbox.x.min as f32).to_bits(), 
-                    (bbox.y.min as f32).to_bits(), 
-                    (bbox.z.min as f32).to_bits(), 
-                    prim_index
+                    (bbox.x.min as f32).to_bits(),
+                    (bbox.y.min as f32).to_bits(),
+                    (bbox.z.min as f32).to_bits(),
+                    prim_index,
                 ],
                 max_and_right: [
-                    (bbox.x.max as f32).to_bits(), 
-                    (bbox.y.max as f32).to_bits(), 
-                    (bbox.z.max as f32).to_bits(), 
-                    prim_type | flag
+                    (bbox.x.max as f32).to_bits(),
+                    (bbox.y.max as f32).to_bits(),
+                    (bbox.z.max as f32).to_bits(),
+                    prim_type | flag,
                 ],
             });
-            
+
             index
-        },
-        BvhItem::None => 0xFFFFFFFF, 
+        }
+        BvhItem::None => 0xFFFFFFFF,
     }
 }
 
@@ -133,12 +134,17 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
             let index = data.spheres.len() as u32;
             let mat_idx = add_material(&s.mat, data);
             data.spheres.push(GpuSphere {
-                center_and_radius: [s.center.x as f32, s.center.y as f32, s.center.z as f32, s.radius as f32],
+                center_and_radius: [
+                    s.center.x as f32,
+                    s.center.y as f32,
+                    s.center.z as f32,
+                    s.radius as f32,
+                ],
                 material_index: mat_idx,
                 _padding: [0; 3],
             });
             (index, 0) // Type 0 = Sphere
-        },
+        }
         Hittables::Triangle(t) => {
             let index = data.triangles.len() as u32;
             let mat_idx = add_material(&t.mat, data);
@@ -151,12 +157,12 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 _pad1: 0.0,
                 v2: to_array(v2),
                 _pad2: 0.0,
-                normal: to_array(t.normal), 
+                normal: to_array(t.normal),
                 material_index: mat_idx,
                 _pad3: [0; 3],
             });
             (index, 1) // Type 1 = Triangle
-        },
+        }
         Hittables::Quad(q) => {
             let index = data.quads.len() as u32;
             let mat_idx = add_material(&q.mat, data);
@@ -175,24 +181,36 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 _pad4: [0; 2],
             });
             (index, 2) // Type 2 = Quad
-        },
+        }
         Hittables::Bvh(_) => (0xFFFFFFFF, 0),
-        Hittables::ConstantMedium(_) => (0xFFFFFFFF, 0)
+        Hittables::ConstantMedium(_) => (0xFFFFFFFF, 0),
     }
 }
 
 fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
     let index = data.materials.len() as u32;
-    
+
     let (albedo, emission, fuzz, ref_idx, mat_type) = match material {
         Materials::Lambertian(m) => (sample_texture(&m.albedo), ZERO_VECTOR, 0.0, 0.0, 0),
-        Materials::Metal(m) => (sample_texture(&m.albedo), ZERO_VECTOR, m.fuzz as f32, 0.0, 1),
-        Materials::Dielectric(m) => (sample_texture(&m.albedo), ZERO_VECTOR, 0.0, m.index_of_refraction as f32, 2),
+        Materials::Metal(m) => (
+            sample_texture(&m.albedo),
+            ZERO_VECTOR,
+            m.fuzz as f32,
+            0.0,
+            1,
+        ),
+        Materials::Dielectric(m) => (
+            sample_texture(&m.albedo),
+            ZERO_VECTOR,
+            0.0,
+            m.index_of_refraction as f32,
+            2,
+        ),
         Materials::DiffuseLight(m) => (ZERO_VECTOR, sample_emission(m), 0.0, 0.0, 3),
         Materials::Isotropic(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0),
         Materials::Blend(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0),
     };
-    
+
     data.materials.push(GpuMaterial {
         albedo: to_array(albedo),
         _padding1: 0.0,
@@ -203,7 +221,7 @@ fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
         mat_type,
         _padding3: 0,
     });
-    
+
     index
 }
 
@@ -230,10 +248,8 @@ mod tests {
 
     #[test]
     fn test_flatten_scene_simple() {
-        let mat = Materials::Lambertian(Lambertian::new(
-            SolidColor::new(1.0, 0.0, 0.0).into(),
-            None
-        ));
+        let mat =
+            Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
         let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat);
         let scene = Scene {
             world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
@@ -247,12 +263,12 @@ mod tests {
         assert_eq!(data.spheres.len(), 1);
         assert_eq!(data.materials.len(), 1);
         assert_eq!(data.nodes.len(), 2);
-        
+
         // Check sphere data
         let s = &data.spheres[0];
         assert_eq!(s.center_and_radius, [0.0, 0.0, -2.0, 1.0]);
         assert_eq!(s.material_index, 0);
-        
+
         // Check root node (inner)
         let n0 = &data.nodes[0];
         assert_eq!(n0.min_and_left[3], 1);

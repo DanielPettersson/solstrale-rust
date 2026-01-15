@@ -3,9 +3,8 @@
 use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
 use crate::util::wgpu_util::{
-    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout,
-    compute_pipeline, get_result_from_buffer, get_wgpu_device_and_queue,
-    storage_binding,
+    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
+    get_result_from_buffer, get_wgpu_device_and_queue, storage_binding,
 };
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
@@ -44,10 +43,7 @@ impl SaturationPostProcessor {
 
         let bind_group_layout = bind_group_layout(
             device,
-            &[
-                storage_binding(true, 16),
-                storage_binding(false, 16),
-            ],
+            &[storage_binding(true, 16), storage_binding(false, 16)],
         );
 
         let pipeline = compute_pipeline(

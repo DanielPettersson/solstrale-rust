@@ -138,29 +138,29 @@ struct ScatterRecord {
 }
 
 fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
-    let mat = materials[rec.material_index];
+    let material = materials[rec.material_index];
     (*s_rec).emitted = vec3<f32>(0.0);
     (*s_rec).is_scattered = true;
 
-    if (mat.mat_type == 0u) { // Lambertian
+    if (material.mat_type == 0u) { // Lambertian
         var scatter_direction = rec.normal + random_unit_vector(state);
         // Catch degenerate scatter direction
         if (all(abs(scatter_direction) < vec3<f32>(1e-8))) {
             scatter_direction = rec.normal;
         }
         (*s_rec).scattered = Ray(rec.p, scatter_direction);
-        (*s_rec).attenuation = mat.albedo;
+        (*s_rec).attenuation = material.albedo;
         return true;
-    } else if (mat.mat_type == 1u) { // Metal
+    } else if (material.mat_type == 1u) { // Metal
         let reflected = reflect(normalize(r_in.direction), rec.normal);
-        (*s_rec).scattered = Ray(rec.p, reflected + mat.fuzz * random_in_unit_sphere(state));
-        (*s_rec).attenuation = mat.albedo;
+        (*s_rec).scattered = Ray(rec.p, reflected + material.fuzz * random_in_unit_sphere(state));
+        (*s_rec).attenuation = material.albedo;
         return dot((*s_rec).scattered.direction, rec.normal) > 0.0;
-    } else if (mat.mat_type == 2u) { // Dielectric
+    } else if (material.mat_type == 2u) { // Dielectric
         (*s_rec).attenuation = vec3<f32>(1.0, 1.0, 1.0);
-        var refraction_ratio = mat.refraction_index;
+        var refraction_ratio = material.refraction_index;
         if (rec.front_face) {
-            refraction_ratio = 1.0 / mat.refraction_index;
+            refraction_ratio = 1.0 / material.refraction_index;
         }
 
         let unit_direction = normalize(r_in.direction);
@@ -178,8 +178,8 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
 
         (*s_rec).scattered = Ray(rec.p, direction);
         return true;
-    } else if (mat.mat_type == 3u) { // DiffuseLight
-        (*s_rec).emitted = mat.emission;
+    } else if (material.mat_type == 3u) { // DiffuseLight
+        (*s_rec).emitted = material.emission;
         (*s_rec).is_scattered = false;
         return true;
     }
@@ -387,7 +387,7 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let y = f32(index / config.width);
 
     let u = x / f32(config.width - 1u);
-    let v = y / f32(config.height - 1u);
+    let v = 1 - y / f32(config.height - 1u);
 
     let ray_direction = normalize(camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin);
     let r = Ray(camera.origin, ray_direction);
