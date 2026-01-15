@@ -19,7 +19,7 @@ Establish the basic compute pipeline and implement the robust transfer of comple
     - [x] Test: Create a small mock scene, upload it, and read back the buffers to verify data integrity (staging buffer readback).
 - [x] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
 
-## Phase 2: Ray Generation & Intersection
+## Phase 2: Ray Generation & Intersection [checkpoint: bfb2f15]
 Implement the primary visibility rays. Instead of full path tracing, we will first render a "Normal Buffer" or "Depth Buffer" to visually verify that geometry and BVH traversal are working correctly.
 
 - [x] Task: Implement Camera Uniforms & Ray Generation 7c056d7
@@ -31,7 +31,7 @@ Implement the primary visibility rays. Instead of full path tracing, we will fir
     - [x] Implement intersection functions for Sphere, Triangle, and Quad in WGSL.
     - [x] Connect the traversal loop to the intersection tests.
     - [x] Test: Render a "Depth Map" (grayscale based on distance). Verify a simple scene with 1 sphere and 1 box.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
 
 ## Phase 3: Shading & Path Tracing Loop
 Implement the core Monte Carlo integration, material evaluation, and sample accumulation.
