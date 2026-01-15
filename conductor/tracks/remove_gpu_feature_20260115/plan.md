@@ -36,7 +36,7 @@ Remove the CPU fallback for bloom and enforce the GPU implementation.
 
 ## Phase 4: Final Cleanup & Verification
 Clean up any remaining feature flags and verify the entire system.
-- [ ] Task: Remove remaining feature guards.
+- [~] Task: Remove remaining feature guards.
     - [ ] Update `src/util/mod.rs` (unguard `wgpu_util`).
     - [ ] Search for and remove any other lingering `feature = "gpu"` checks.
 - [ ] Task: Run full integration suite.
