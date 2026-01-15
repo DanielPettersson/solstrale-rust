@@ -1,14 +1,14 @@
 # Plan: Remove `gpu` Feature Flag
 
-## Phase 1: Configuration & CI
+## Phase 1: Configuration & CI [checkpoint: f98b144]
 Update the project configuration to make WGPU standard and ensure CI verifies it.
-- [~] Task: Update `Cargo.toml`.
-    - [ ] Move `wgpu`, `pollster`, and `bytemuck` from optional to standard dependencies.
-    - [ ] Remove the `gpu` feature definition.
-    - [ ] Remove `gpu` from default features.
-- [ ] Task: Update `ci.yaml`.
-    - [ ] Remove `--no-default-features` flag from the coverage generation step to ensure all code is tested.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
+- [x] Task: Update `Cargo.toml`.
+    - [x] Move `wgpu`, `pollster`, and `bytemuck` from optional to standard dependencies.
+    - [x] Remove the `gpu` feature definition.
+    - [x] Remove `gpu` from default features.
+- [x] Task: Update `ci.yaml`.
+    - [x] Remove `--no-default-features` flag from the coverage generation step to ensure all code is tested.
+- [x] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
 
 ## Phase 2: Refactor Saturation Post-Processing
 Remove the CPU fallback for saturation and enforce the GPU implementation.
