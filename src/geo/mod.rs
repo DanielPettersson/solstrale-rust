@@ -72,7 +72,7 @@ impl Default for Aabb {
 /// assert_eq!(aabb.z, Interval::new(-3., 3.));
 #[macro_export]
 macro_rules! combine_aabbs {
-    ( $( $x:expr ),* ) => {
+    ( $( $x:expr_2021 ),* ) => {
         {
             let mut temp_aabb = Aabb::default();
             $(
