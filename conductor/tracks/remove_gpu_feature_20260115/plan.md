@@ -34,11 +34,11 @@ Remove the CPU fallback for bloom and enforce the GPU implementation.
     - [x] Ensure `post_processing_benchmark` and integration tests still pass.
 - [x] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
 
-## Phase 4: Final Cleanup & Verification
+## Phase 4: Final Cleanup & Verification [checkpoint: b4e46db]
 Clean up any remaining feature flags and verify the entire system.
-- [~] Task: Remove remaining feature guards.
-    - [ ] Update `src/util/mod.rs` (unguard `wgpu_util`).
-    - [ ] Search for and remove any other lingering `feature = "gpu"` checks.
-- [ ] Task: Run full integration suite.
-    - [ ] Execute `cargo test` to ensure stability.
-- [ ] Task: Conductor - User Manual Verification 'Phase 4' (Protocol in workflow.md)
+- [x] Task: Remove remaining feature guards.
+    - [x] Update `src/util/mod.rs` (unguard `wgpu_util`).
+    - [x] Search for and remove any other lingering `feature = "gpu"` checks.
+- [x] Task: Run full integration suite.
+    - [x] Execute `cargo test` to ensure stability.
+- [x] Task: Conductor - User Manual Verification 'Phase 4' (Protocol in workflow.md)
