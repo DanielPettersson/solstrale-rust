@@ -2,10 +2,10 @@
 
 This plan outlines the steps to upgrade the project from Rust edition 2021 to 2024, apply necessary changes, and verify the successful completion of the upgrade.
 
-## Phase 1: Preparation & Research
+## Phase 1: Preparation & Research [checkpoint: 5d66fe2]
 - [x] Task: Ensure the current project state is clean and committed to version control. 12e2deb
 - [x] Task: Research the official Rust 2024 Edition Migration Guide to identify potential breaking changes, new idioms, and best practices. 73748cf
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Preparation & Research' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Preparation & Research' (Protocol in workflow.md) 5d66fe2
 
 ## Phase 2: Edition Update & Automated Fixes
 - [ ] Task: Modify `Cargo.toml` to set the project-wide edition to `"2024"`.
