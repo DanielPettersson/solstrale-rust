@@ -16,6 +16,6 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate code coverage
-        run: cargo llvm-cov --workspace --no-default-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - name: Display coverage summary
         run: cargo llvm-cov report
