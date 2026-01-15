@@ -26,11 +26,11 @@ Implement the primary visibility rays. Instead of full path tracing, we will fir
     - [x] Map the `Camera` struct to a Uniform Buffer.
     - [x] Write the WGSL `ray_generation` function to spawn rays based on pixel coordinates.
     - [x] Test: Render a "UV map" image where pixel color corresponds to ray direction, verify against CPU equivalent.
-- [ ] Task: Implement Iterative BVH Traversal in WGSL
-    - [ ] Write the stack-based traversal algorithm in WGSL (replacing CPU recursion).
-    - [ ] Implement intersection functions for Sphere, Triangle, and Quad in WGSL.
-    - [ ] Connect the traversal loop to the intersection tests.
-    - [ ] Test: Render a "Depth Map" (grayscale based on distance). Verify a simple scene with 1 sphere and 1 box.
+- [x] Task: Implement Iterative BVH Traversal in WGSL f05d3ec
+    - [x] Write the stack-based traversal algorithm in WGSL (replacing CPU recursion).
+    - [x] Implement intersection functions for Sphere, Triangle, and Quad in WGSL.
+    - [x] Connect the traversal loop to the intersection tests.
+    - [x] Test: Render a "Depth Map" (grayscale based on distance). Verify a simple scene with 1 sphere and 1 box.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
 
 ## Phase 3: Shading & Path Tracing Loop
