@@ -48,7 +48,7 @@ Implement the core Monte Carlo integration, material evaluation, and sample accu
     - [ ] Write the iterative bounce loop (max depth limit).
     - [ ] Accumulate emitted light and attenuation at each bounce.
     - [ ] Implement progressive accumulation (blending new samples with the existing image buffer).
-    - [ ] Test: Render the standard `scenes::simple` scene and compare with `out_expected_simple.jpg`.
+    - [ ] Test: Use the existing test_gpu_scene_sphere test_gpu_scene_sphere2 test_gpu_scene_sphere_quad_and_triangle in gpu_renderer_test to verify correctness.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
 
 ## Phase 4: Integration & Cleanup

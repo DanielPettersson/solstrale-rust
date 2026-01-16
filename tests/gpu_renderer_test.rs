@@ -6,7 +6,7 @@ mod tests {
     use solstrale::camera::CameraConfig;
     use solstrale::geo::transformation::NopTransformer;
     use solstrale::geo::vec3::Vec3;
-    use solstrale::hittable::{Bvh, Hittables, Quad, Sphere};
+    use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
     use solstrale::material::texture::SolidColor;
     use solstrale::material::{DiffuseLight, Lambertian};
     use solstrale::renderer::gpu_renderer::GpuRenderer;
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_scene_sphere2_and_quad() {
+    fn test_gpu_scene_sphere_quad_and_triangle() {
         let render_config = RenderConfig {
             width: 400,
             height: 400,
@@ -315,7 +315,16 @@ mod tests {
         let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
 
         world.push(Sphere::new(Vec3::new(-4., 1., 0.), 2., blue.into()).into());
-        world.push(Sphere::new(Vec3::new(4., -1., 0.), 2., red.clone().into()).into());
+        world.push(
+            Triangle::new(
+                Vec3::new(4., 0., 0.),
+                Vec3::new(2., 2., 0.),
+                Vec3::new(2., 0., 0.),
+                red.into(),
+                &NopTransformer(),
+            )
+            .into(),
+        );
         world.push(
             Quad::new(
                 Vec3::new(-1., -1., 0.),
@@ -334,7 +343,7 @@ mod tests {
             render_config,
         };
 
-        render_and_compare_output(scene, "gpu_sphere2_and_quad");
+        render_and_compare_output(scene, "gpu_sphere_quad_and_triangle");
     }
 
     fn render_and_compare_output(scene: Scene, name: &str) {
