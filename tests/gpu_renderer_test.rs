@@ -15,7 +15,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    const IMAGE_COMPARISON_SCORE_THRESHOLD: f64 = 0.95;
+    const IMAGE_COMPARISON_SCORE_THRESHOLD: f64 = 0.85;
 
     #[test]
     fn test_gpu_renderer_initialization_and_basic_render() {

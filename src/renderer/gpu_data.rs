@@ -113,8 +113,8 @@ impl Debug for BvhNode {
 pub struct Material {
     /// Albedo color
     pub albedo: [f32; 3],
-    /// Padding
-    pub _padding1: f32,
+    /// Attenuation factor
+    pub attenuation_factor: f32,
     /// Emission color
     pub emission: [f32; 3],
     /// Padding
@@ -135,8 +135,8 @@ pub struct Material {
 pub struct GpuCamera {
     /// Origin of the camera
     pub origin: [f32; 3],
-    /// Padding
-    pub _pad0: f32,
+    /// lens radius
+    pub lens_radius: f32,
     /// Lower left corner of the viewport
     pub lower_left_corner: [f32; 3],
     /// Padding
@@ -147,8 +147,16 @@ pub struct GpuCamera {
     pub _pad2: f32,
     /// Vertical viewport vector
     pub vertical: [f32; 3],
-    /// lens radius
-    pub lens_radius: f32,
+    /// Padding
+    pub _pad3: f32,
+    /// Camera u vector
+    pub u: [f32; 3],
+    /// Padding
+    pub _pad4: f32,
+    /// Camera v vector
+    pub v: [f32; 3],
+    /// Padding
+    pub _pad5: f32,
 }
 
 #[repr(C)]
@@ -161,6 +169,10 @@ pub struct GpuRenderConfig {
     pub height: u32,
     /// Number of samples taken so far (used for RNG seed)
     pub sample_count: u32,
-    /// Padding to align to 16 bytes
+    /// Maximum number of ray bounces
+    pub max_depth: u32,
+    /// Background color
+    pub background_color: [f32; 3],
+    /// Padding
     pub _pad: u32,
 }

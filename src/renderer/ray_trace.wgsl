@@ -1,4 +1,3 @@
-// ... (structs same as before) ...
 struct Ray {
     origin: vec3<f32>,
     direction: vec3<f32>,
@@ -34,24 +33,31 @@ struct BvhNode {
 
 struct Material {
     albedo: vec3<f32>,
+    attenuation_factor: f32,
     emission: vec3<f32>,
+    _padding2: f32,
     fuzz: f32,
     refraction_index: f32,
     mat_type: u32,
+    _padding3: u32,
 }
 
 struct Camera {
     origin: vec3<f32>,
+    lens_radius: f32,
     lower_left_corner: vec3<f32>,
     horizontal: vec3<f32>,
     vertical: vec3<f32>,
-    lens_radius: f32,
+    u: vec3<f32>,
+    v: vec3<f32>,
 }
 
 struct RenderConfig {
     width: u32,
     height: u32,
     sample_count: u32,
+    max_depth: u32,
+    background_color: vec3<f32>,
 }
 
 struct HitRecord {
@@ -63,7 +69,7 @@ struct HitRecord {
 }
 
 @group(0) @binding(0)
-var<storage, read_write> output_buffer: array<vec3<f32>>;
+var<storage, read_write> output_buffer: array<vec4<f32>>;
 
 @group(0) @binding(1)
 var<storage, read> nodes: array<BvhNode>;
@@ -103,7 +109,15 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
 
 fn random_in_unit_sphere(state: ptr<function, u32>) -> vec3<f32> {
     for (var i = 0u; i < 100u; i++) {
-        let p = vec3<f32>(rand_float(state), rand_float(state), rand_float(state)) * 2.0 - 1.0;
+        let p = vec3<f32>(rand_float(state) * 2.0 - 1.0, rand_float(state) * 2.0 - 1.0, rand_float(state) * 2.0 - 1.0);
+        if (dot(p, p) < 1.0) { return p; }
+    }
+    return vec3<f32>(0.0);
+}
+
+fn random_in_unit_disk(state: ptr<function, u32>) -> vec3<f32> {
+    for (var i = 0u; i < 100u; i++) {
+        let p = vec3<f32>(rand_float(state) * 2.0 - 1.0, rand_float(state) * 2.0 - 1.0, 0.0);
         if (dot(p, p) < 1.0) { return p; }
     }
     return vec3<f32>(0.0);
@@ -134,6 +148,7 @@ struct ScatterRecord {
     attenuation: vec3<f32>,
     scattered: Ray,
     emitted: vec3<f32>,
+    attenuation_factor: f32,
     is_scattered: bool,
 }
 
@@ -141,10 +156,10 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     let material = materials[rec.material_index];
     (*s_rec).emitted = vec3<f32>(0.0);
     (*s_rec).is_scattered = true;
+    (*s_rec).attenuation_factor = 0.0;
 
     if (material.mat_type == 0u) { // Lambertian
         var scatter_direction = rec.normal + random_unit_vector(state);
-        // Catch degenerate scatter direction
         if (all(abs(scatter_direction) < vec3<f32>(1e-8))) {
             scatter_direction = rec.normal;
         }
@@ -179,8 +194,13 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
         (*s_rec).scattered = Ray(rec.p, direction);
         return true;
     } else if (material.mat_type == 3u) { // DiffuseLight
-        (*s_rec).emitted = material.emission;
+        if (rec.front_face) {
+            (*s_rec).emitted = material.emission;
+        } else {
+            (*s_rec).emitted = vec3<f32>(0.0);
+        }
         (*s_rec).is_scattered = false;
+        (*s_rec).attenuation_factor = material.attenuation_factor;
         return true;
     }
 
@@ -286,19 +306,15 @@ fn hit_aabb(r: Ray, min_val: vec3<f32>, max_val: vec3<f32>, t_min_in: f32, t_max
     var t_min = t_min_in;
     var t_max = t_max_in;
     
-    // Improved precision hit_aabb
-    let inv_dir = 1.0 / (r.direction + vec3<f32>(1e-6));
+    let inv_dir = 1.0 / (r.direction + vec3<f32>(1e-9));
     let t0 = (min_val - r.origin) * inv_dir;
     let t1 = (max_val - r.origin) * inv_dir;
     
-    let t_min_v = min(t0, t1);
-    let t_max_v = max(t0, t1);
+    let t_near = min(t0, t1);
+    let t_far = max(t0, t1);
     
-    let t_min_max = max(t_min_v.x, max(t_min_v.y, t_min_v.z));
-    let t_max_min = min(t_max_v.x, min(t_max_v.y, t_max_v.z));
-    
-    t_min = max(t_min, t_min_max);
-    t_max = min(t_max, t_max_min);
+    t_min = max(t_min, max(t_near.x, max(t_near.y, t_near.z)));
+    t_max = min(t_max, min(t_far.x, min(t_far.y, t_far.z)));
     
     return t_min < t_max;
 }
@@ -386,29 +402,60 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = f32(index % config.width);
     let y = f32(index / config.width);
 
-    let u = x / f32(config.width - 1u);
-    let v = 1 - y / f32(config.height - 1u);
+    let u = (x + rand_float(&rng_state)) / f32(config.width - 1u);
+    let v = 1.0 - (y + rand_float(&rng_state)) / f32(config.height - 1u);
 
-    let ray_direction = normalize(camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin);
-    let r = Ray(camera.origin, ray_direction);
+    var offset = vec3<f32>(0.0);
+    if (camera.lens_radius > 0.0) {
+        let rd = random_in_unit_disk(&rng_state) * camera.lens_radius;
+        offset = camera.u * rd.x + camera.v * rd.y;
+    }
 
-    var rec: HitRecord;
-    if (world_hit(r, 0.001, 10000.0, &rec)) {
-        var s_rec: ScatterRecord;
-        if (scatter(r, rec, &rng_state, &s_rec)) {
-            var color: vec3<f32>;
-            if (s_rec.is_scattered) {
-                color = s_rec.attenuation;
+    let ray_direction = camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin - offset;
+    var r = Ray(camera.origin + offset, ray_direction);
+
+    var accumulated_color = vec3<f32>(0.0);
+    var current_attenuation = vec3<f32>(1.0);
+    var accumulated_ray_length = 0.0;
+
+    for (var depth = 0u; depth < config.max_depth; depth++) {
+        var rec: HitRecord;
+        if (world_hit(r, 0.001, 10000.0, &rec)) {
+            var s_rec: ScatterRecord;
+            if (scatter(r, rec, &rng_state, &s_rec)) {
+                accumulated_ray_length += rec.t;
+                
+                var emitted = s_rec.emitted;
+                if (s_rec.attenuation_factor > 0.0) {
+                    emitted *= 1.0 / (1.0 + s_rec.attenuation_factor * accumulated_ray_length);
+                }
+                
+                accumulated_color += emitted * current_attenuation;
+                
+                if (s_rec.is_scattered) {
+                    current_attenuation *= s_rec.attenuation;
+                    r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
+                } else {
+                    break;
+                }
             } else {
-                color = s_rec.emitted;
+                break;
             }
-            output_buffer[index] = color + rand_float(&rng_state) * 0.001;
         } else {
-            output_buffer[index] = vec3<f32>(0.0, 0.0, 0.0);
+            accumulated_color += config.background_color * current_attenuation;
+            break;
         }
-        } else {
-            // Black miss color (standard)
-            output_buffer[index] = vec3<f32>(0.0, 0.0, 0.0);
+
+        if (max(current_attenuation.x, max(current_attenuation.y, current_attenuation.z)) < 0.0001) {
+            break;
         }
     }
-    
+
+    if (config.sample_count <= 1u) {
+        output_buffer[index] = vec4<f32>(accumulated_color, 1.0);
+    } else {
+        let weight = 1.0 / f32(config.sample_count);
+        let prev_color = output_buffer[index].xyz;
+        output_buffer[index] = vec4<f32>(prev_color * (1.0 - weight) + accumulated_color * weight, 1.0);
+    }
+}

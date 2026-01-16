@@ -190,14 +190,15 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
 fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
     let index = data.materials.len() as u32;
 
-    let (albedo, emission, fuzz, ref_idx, mat_type) = match material {
-        Materials::Lambertian(m) => (sample_texture(&m.albedo), ZERO_VECTOR, 0.0, 0.0, 0),
+    let (albedo, emission, fuzz, ref_idx, mat_type, attenuation_factor) = match material {
+        Materials::Lambertian(m) => (sample_texture(&m.albedo), ZERO_VECTOR, 0.0, 0.0, 0, 0.0),
         Materials::Metal(m) => (
             sample_texture(&m.albedo),
             ZERO_VECTOR,
             m.fuzz as f32,
             0.0,
             1,
+            0.0,
         ),
         Materials::Dielectric(m) => (
             sample_texture(&m.albedo),
@@ -205,15 +206,23 @@ fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
             0.0,
             m.index_of_refraction as f32,
             2,
+            0.0,
         ),
-        Materials::DiffuseLight(m) => (ZERO_VECTOR, sample_emission(m), 0.0, 0.0, 3),
-        Materials::Isotropic(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0),
-        Materials::Blend(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0),
+        Materials::DiffuseLight(m) => (
+            ZERO_VECTOR,
+            sample_emission(m),
+            0.0,
+            0.0,
+            3,
+            m.attenuation_factor.unwrap_or(0.0) as f32,
+        ),
+        Materials::Isotropic(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0, 0.0),
+        Materials::Blend(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0, 0.0),
     };
 
     data.materials.push(GpuMaterial {
         albedo: to_array(albedo),
-        _padding1: 0.0,
+        attenuation_factor,
         emission: to_array(emission),
         _padding2: 0.0,
         fuzz,

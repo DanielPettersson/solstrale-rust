@@ -46,7 +46,8 @@ pub enum Shaders {
 #[derive(Clone)]
 /// A full raytracing shader
 pub struct PathTracingShader {
-    max_depth: u32,
+    /// Maximum recursive depth of the path tracing
+    pub max_depth: u32,
 }
 
 impl PathTracingShader {

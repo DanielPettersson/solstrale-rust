@@ -99,7 +99,7 @@ impl GpuRenderer {
                 camera_inst.origin.y as f32,
                 camera_inst.origin.z as f32,
             ],
-            _pad0: 0.0,
+            lens_radius: camera_inst.lens_radius as f32,
             lower_left_corner: [
                 camera_inst.lower_left_corner.x as f32,
                 camera_inst.lower_left_corner.y as f32,
@@ -117,7 +117,19 @@ impl GpuRenderer {
                 camera_inst.vertical.y as f32,
                 camera_inst.vertical.z as f32,
             ],
-            lens_radius: camera_inst.lens_radius as f32,
+            _pad3: 0.0,
+            u: [
+                camera_inst.u.x as f32,
+                camera_inst.u.y as f32,
+                camera_inst.u.z as f32,
+            ],
+            _pad4: 0.0,
+            v: [
+                camera_inst.v.x as f32,
+                camera_inst.v.y as f32,
+                camera_inst.v.z as f32,
+            ],
+            _pad5: 0.0,
         };
         let camera_buffer = create_and_upload_buffer(
             device,
@@ -127,10 +139,21 @@ impl GpuRenderer {
             BufferUsages::UNIFORM,
         );
 
+        let max_depth = match &scene.render_config.shader {
+            crate::renderer::shader::Shaders::PathTracingShader(s) => s.max_depth,
+            _ => 1,
+        };
+
         let gpu_config = GpuRenderConfig {
             width,
             height,
             sample_count: 0,
+            max_depth,
+            background_color: [
+                scene.background_color.x as f32,
+                scene.background_color.y as f32,
+                scene.background_color.z as f32,
+            ],
             _pad: 0,
         };
         let config_buffer = create_and_upload_buffer(
@@ -224,11 +247,22 @@ impl GpuRenderer {
                 return Ok(());
             }
 
+            let max_depth = match &self.scene.render_config.shader {
+                crate::renderer::shader::Shaders::PathTracingShader(s) => s.max_depth,
+                _ => 1,
+            };
+
             // Update config buffer with current sample count
             let gpu_config = GpuRenderConfig {
                 width: self.width,
                 height: self.height,
-                sample_count: sample,
+                sample_count: sample as u32,
+                max_depth,
+                background_color: [
+                    self.scene.background_color.x as f32,
+                    self.scene.background_color.y as f32,
+                    self.scene.background_color.z as f32,
+                ],
                 _pad: 0,
             };
             queue.write_buffer(&self.config_buffer, 0, bytemuck::cast_slice(&[gpu_config]));
@@ -276,11 +310,10 @@ impl GpuRenderer {
                     let x = (i as u32) % self.width;
                     let y = (i as u32) / self.width;
                     if x < self.width && y < self.height {
-                        // Very simple accumulation visualization: divide by sample count
-                        // In future we should accumulate in f32 buffer on GPU
-                        let r = (pixel[0] * 255.0).clamp(0.0, 255.0) as u8;
-                        let g = (pixel[1] * 255.0).clamp(0.0, 255.0) as u8;
-                        let b = (pixel[2] * 255.0).clamp(0.0, 255.0) as u8;
+                        // Apply gamma correction (gamma = 2.0) and clamp to match CPU
+                        let r = (pixel[0].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+                        let g = (pixel[1].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+                        let b = (pixel[2].max(0.0).sqrt().min(0.999) * 256.0) as u8;
                         img.put_pixel(x, y, Rgb([r, g, b]));
                     }
                 }
