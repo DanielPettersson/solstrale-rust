@@ -54,7 +54,7 @@ Implement the core Monte Carlo integration, material evaluation, and sample accu
 ## Phase 4: Integration & Cleanup
 Finalize the replacement of the CPU renderer.
 
-- [ ] Task: Switch Main Entry Point
+- [~] Task: Switch Main Entry Point
     - [ ] Update `lib.rs` and the public API to use `GpuRenderer` by default.
     - [ ] Ensure all configuration options (samples per pixel, max depth) are respected.
     - [ ] Test: Run the full integration test suite (`tests/scenes.rs`).
