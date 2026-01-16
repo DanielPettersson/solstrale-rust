@@ -68,6 +68,7 @@
 //! ## Credits
 //! The ray tracing is inspired by the excellent [Ray Tracing in One Weekend Book Series](https://github.com/RayTracing/raytracing.github.io) by Peter Shirley
 
+use crate::renderer::gpu_renderer::GpuRenderer;
 use crate::renderer::{RenderProgress, Renderer, Scene};
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
@@ -95,5 +96,5 @@ pub fn ray_trace<'a>(
     output: &'a Sender<RenderProgress>,
     abort: &'a Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
-    Renderer::new(scene)?.render(output, abort)
+    GpuRenderer::new(scene)?.render(output, abort)
 }
