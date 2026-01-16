@@ -44,11 +44,11 @@ Implement the core Monte Carlo integration, material evaluation, and sample accu
     - [x] Implement `scatter` functions for Lambertian, Metal, and Dielectric materials in WGSL.
     - [x] Implement texture sampling for material properties.
     - [x] Test: Render a scene with one of each material type (no global illumination yet, just direct hit color).
-- [ ] Task: Implement the Path Tracing Loop
-    - [ ] Write the iterative bounce loop (max depth limit).
-    - [ ] Accumulate emitted light and attenuation at each bounce.
-    - [ ] Implement progressive accumulation (blending new samples with the existing image buffer).
-    - [ ] Test: Use the existing test_gpu_scene_sphere test_gpu_scene_sphere2 test_gpu_scene_sphere_quad_and_triangle in gpu_renderer_test to verify correctness.
+- [x] Task: Implement the Path Tracing Loop 2e7c2e3
+    - [x] Write the iterative bounce loop (max depth limit).
+    - [x] Accumulate emitted light and attenuation at each bounce.
+    - [x] Implement progressive accumulation (blending new samples with the existing image buffer).
+    - [x] Test: Use the existing test_gpu_scene_sphere test_gpu_scene_sphere2 test_gpu_scene_sphere_quad_and_triangle in gpu_renderer_test to verify correctness.
 - [ ] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
 
 ## Phase 4: Integration & Cleanup
