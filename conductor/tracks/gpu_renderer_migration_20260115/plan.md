@@ -33,7 +33,7 @@ Implement the primary visibility rays. Instead of full path tracing, we will fir
     - [x] Test: Render a "Depth Map" (grayscale based on distance). Verify a simple scene with 1 sphere and 1 box.
 - [x] Task: Conductor - User Manual Verification 'Phase 2' (Protocol in workflow.md)
 
-## Phase 3: Shading & Path Tracing Loop
+## Phase 3: Shading & Path Tracing Loop [checkpoint: 57bafd5]
 Implement the core Monte Carlo integration, material evaluation, and sample accumulation.
 
 - [x] Task: Implement Random Number Generation in WGSL fc681b1
@@ -49,7 +49,7 @@ Implement the core Monte Carlo integration, material evaluation, and sample accu
     - [x] Accumulate emitted light and attenuation at each bounce.
     - [x] Implement progressive accumulation (blending new samples with the existing image buffer).
     - [x] Test: Use the existing test_gpu_scene_sphere test_gpu_scene_sphere2 test_gpu_scene_sphere_quad_and_triangle in gpu_renderer_test to verify correctness.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3' (Protocol in workflow.md) 57bafd5
 
 ## Phase 4: Integration & Cleanup
 Finalize the replacement of the CPU renderer.
