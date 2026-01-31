@@ -100,6 +100,10 @@ fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
     match item {
         BvhItem::Node(bvh) => process_node(bvh, data),
         BvhItem::Leaf(hittable) => {
+            if let Hittables::Bvh(bvh) = &**hittable {
+                return process_node(bvh, data);
+            }
+
             let (prim_index, prim_type) = add_primitive(hittable, data);
 
             let index = data.nodes.len() as u32;
