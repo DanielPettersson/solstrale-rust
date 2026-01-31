@@ -9,5 +9,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Fix GpuRenderer Nested BVH Bug**
+- [x] **Track: Fix GpuRenderer Nested BVH Bug**
 *Link: [./tracks/gpu_nested_bvh_fix_20260131/](./tracks/gpu_nested_bvh_fix_20260131/)*
