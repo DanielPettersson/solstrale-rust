@@ -456,6 +456,48 @@ mod tests {
         render_and_compare_output(scene, "gpu_triangle3");
     }
 
+    #[test]
+    fn test_gpu_scene_nested_bvh() {
+        let render_config = RenderConfig {
+            width: 400,
+            height: 400,
+            samples_per_pixel: 100,
+            ..Default::default()
+        };
+
+        let camera = CameraConfig {
+            look_from: Vec3::new(0., 0., 10.),
+            look_at: Vec3::new(0., 0., 0.),
+            ..Default::default()
+        };
+
+        let mut world: Vec<Hittables> = Vec::new();
+        let light = DiffuseLight::new(45., 45., 45., None);
+        world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+        let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+        let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+        let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
+
+        world.push(Sphere::new(Vec3::new(-4., -1., 0.), 2., blue.into()).into());
+
+        let mut sub_world: Vec<Hittables> = Vec::new();
+        sub_world.push(Sphere::new(Vec3::new(0., -1., 0.), 2., red.into()).into());
+        sub_world.push(Sphere::new(Vec3::new(4., -1., 0.), 2., green.into()).into());
+
+        let bvh = Bvh::new(sub_world);
+        world.push(bvh.into());
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera,
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        render_and_compare_output(scene, "gpu_nested_bvh");
+    }
+
     fn render_and_compare_output(scene: Scene, name: &str) {
         let (output_sender, output_receiver) = channel();
         let (_, abort_receiver) = channel();
