@@ -12,4 +12,4 @@
     - [x] Run the new unit test `test_flatten_scene_nested_bvh` and ensure it passes.
     - [x] Run the existing integration test `test_gpu_scene_nested_bvh` in `tests/gpu_renderer_test.rs` and ensure it passes.
     - [x] Run all other tests to ensure no regressions.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
+- [~] Task: Conductor - User Manual Verification 'Phase 1' (Protocol in workflow.md)
