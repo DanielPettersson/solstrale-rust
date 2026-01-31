@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use image::RgbImage;
     use image::imageops::FilterType;
+    use image::RgbImage;
     use image_compare::Algorithm::RootMeanSquared;
     use solstrale::camera::CameraConfig;
-    use solstrale::geo::transformation::NopTransformer;
+    use solstrale::geo::transformation::{NopTransformer, RotationX, RotationY, Transformations};
     use solstrale::geo::vec3::Vec3;
     use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
     use solstrale::material::texture::SolidColor;
@@ -231,6 +231,7 @@ mod tests {
         let render_config = RenderConfig {
             width: 400,
             height: 400,
+            samples_per_pixel: 100,
             ..Default::default()
         };
 
@@ -259,10 +260,54 @@ mod tests {
     }
 
     #[test]
+    fn test_gpu_scene_box() {
+        let render_config = RenderConfig {
+            width: 400,
+            height: 400,
+            samples_per_pixel: 100,
+            ..Default::default()
+        };
+
+        let camera = CameraConfig {
+            look_from: Vec3::new(0., 0., 12.),
+            look_at: Vec3::new(0., 0., 0.),
+            ..Default::default()
+        };
+
+        let mut world: Vec<Hittables> = Vec::new();
+        let light = DiffuseLight::new(45., 45., 45., None);
+        world.push(Sphere::new(Vec3::new(-10., 20., 30.), 5., light.into()).into());
+
+        let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
+
+        let box_transformations = Transformations::new(vec![
+            Box::new(RotationY::new(25.)),
+            Box::new(RotationX::new(45.)),
+        ]);
+
+        world.append(&mut Quad::new_box(
+            Vec3::new(-2.5, -2.5, -2.5),
+            Vec3::new(2.5, 2.5, 2.5),
+            mat.into(),
+            &box_transformations,
+        ));
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera,
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        render_and_compare_output(scene, "gpu_box");
+    }
+
+    #[test]
     fn test_gpu_scene_sphere2() {
         let render_config = RenderConfig {
             width: 400,
             height: 400,
+            samples_per_pixel: 100,
             ..Default::default()
         };
 
@@ -297,6 +342,7 @@ mod tests {
         let render_config = RenderConfig {
             width: 400,
             height: 400,
+            samples_per_pixel: 100,
             ..Default::default()
         };
 
@@ -344,6 +390,70 @@ mod tests {
         };
 
         render_and_compare_output(scene, "gpu_sphere_quad_and_triangle");
+    }
+
+    #[test]
+    fn test_gpu_scene_triangle3() {
+        let render_config = RenderConfig {
+            width: 400,
+            height: 400,
+            samples_per_pixel: 100,
+            ..Default::default()
+        };
+
+        let camera = CameraConfig {
+            look_from: Vec3::new(0., 0., 10.),
+            look_at: Vec3::new(0., 0., 0.),
+            ..Default::default()
+        };
+
+        let mut world: Vec<Hittables> = Vec::new();
+        let light = DiffuseLight::new(45., 45., 45., None);
+        world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+        let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+        let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+        let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
+
+        world.push(
+            Triangle::new(
+                Vec3::new(4., 0., 0.),
+                Vec3::new(2., 2., 0.),
+                Vec3::new(2., 0., 0.),
+                red.into(),
+                &NopTransformer(),
+            )
+                .into(),
+        );
+        world.push(
+            Triangle::new(
+                Vec3::new(2., -2., 1.),
+                Vec3::new(0., 0., 1.),
+                Vec3::new(0., -2., 1.),
+                blue.into(),
+                &NopTransformer(),
+            )
+                .into(),
+        );
+        world.push(
+            Triangle::new(
+                Vec3::new(3., -1., 1.),
+                Vec3::new(1., 1., 1.),
+                Vec3::new(1., -1., 1.),
+                green.into(),
+                &NopTransformer(),
+            )
+                .into(),
+        );
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera,
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        render_and_compare_output(scene, "gpu_triangle3");
     }
 
     fn render_and_compare_output(scene: Scene, name: &str) {

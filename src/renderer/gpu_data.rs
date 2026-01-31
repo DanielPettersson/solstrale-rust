@@ -49,8 +49,6 @@ pub struct Triangle {
     pub normal: [f32; 3],
     /// Index of the material
     pub material_index: u32,
-    /// Padding to 80 bytes
-    pub _pad3: [u32; 3],
 }
 
 #[repr(C)]
@@ -79,8 +77,8 @@ pub struct Quad {
     pub d: f32,
     /// Index of the material
     pub material_index: u32,
-    /// Padding to 112 bytes
-    pub _pad4: [u32; 2],
+    /// Padding to 96 bytes
+    pub _pad4: [u32; 3],
 }
 
 #[repr(C)]
@@ -97,10 +95,18 @@ impl Debug for BvhNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let leaf = &self.max_and_right[3] & 0x80000000 != 0;
         let prim_type = self.max_and_right[3] & 0x7FFFFFFF;
+
+        let type_name = match prim_type {
+            0 => "Sphere",
+            1 => "Triangle",
+            2 => "Quad",
+            _ => ""
+        };
+
         f.debug_struct("BvhNode")
             .field("leaf", &leaf)
             .field("idx", if leaf { &self.min_and_left[3] } else { &-1 })
-            .field("type", if leaf { &prim_type } else { &-1 })
+            .field("type", if leaf { &type_name } else { &"" })
             .field("left_idx", if leaf { &-1 } else { &self.min_and_left[3] })
             .field("right_idx", if leaf { &-1 } else { &self.max_and_right[3] })
             .finish()

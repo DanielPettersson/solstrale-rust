@@ -159,7 +159,6 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 _pad2: 0.0,
                 normal: to_array(t.normal),
                 material_index: mat_idx,
-                _pad3: [0; 3],
             });
             (index, 1) // Type 1 = Triangle
         }
@@ -178,7 +177,7 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 w: to_array(q.w),
                 d: q.d as f32,
                 material_index: mat_idx,
-                _pad4: [0; 2],
+                _pad4: [0; 3],
             });
             (index, 2) // Type 2 = Quad
         }
