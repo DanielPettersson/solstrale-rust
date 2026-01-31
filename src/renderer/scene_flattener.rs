@@ -289,4 +289,34 @@ mod tests {
         // right_child_index should have flag set and type 0 (Sphere)
         assert_eq!(n1.max_and_right[3], 0x80000000 | 0);
     }
+
+    #[test]
+    fn test_flatten_scene_nested_bvh() {
+        let mat =
+            Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat.clone());
+        
+        let mut sub_world: Vec<Hittables> = Vec::new();
+        sub_world.push(Hittables::Sphere(sphere.clone()));
+        let bvh = Bvh::new(sub_world);
+
+        let scene = Scene {
+            world: Hittables::Bvh(Bvh::new(vec![Hittables::Bvh(bvh)])),
+            camera: Default::default(),
+            background_color: Default::default(),
+            render_config: RenderConfig::default(),
+        };
+
+        let data = flatten_scene(&scene);
+
+        // We expect:
+        // 1. Root Bvh Node
+        // 2. Nested Bvh Node
+        // 3. Leaf Bvh Node (containing the sphere)
+        // Total: 3 nodes
+        // Spheres: 1
+        
+        assert_eq!(data.spheres.len(), 1, "Should have 1 sphere");
+        assert_eq!(data.nodes.len(), 3, "Should have 3 nodes");
+    }
 }
