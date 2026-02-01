@@ -9,5 +9,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Implement support for imagemap textures on materials in the GPU renderer. There is an existing integration test test_texture_map that is currently failing for this.**
+- [x] **Track: Implement support for imagemap textures on materials in the GPU renderer. There is an existing integration test test_texture_map that is currently failing for this.**
 *Link: [./tracks/gpu_imagemap_textures_20260201/](./tracks/gpu_imagemap_textures_20260201/)*
