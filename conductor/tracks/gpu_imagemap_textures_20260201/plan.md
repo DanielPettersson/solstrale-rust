@@ -24,10 +24,10 @@ Goal: Update GPU data structures, shader, and host code to support texture mappi
 ## Phase 2: Scene Flattening Updates
 Goal: Connect the CPU scene representation to the new GPU structures.
 
-- [~] Task: Update Scene Flattener
-    - [ ] Modify `flatten_scene` in `src/renderer/scene_flattener.rs` to collect all unique `ImageMap` textures.
-    - [ ] Update `add_primitive` to populate per-vertex UVs for Triangles.
-    - [ ] Update `add_material` to assign the correct `texture_index` based on the collected textures.
+- [x] Task: Update Scene Flattener fbe194c
+    - [x] Modify `flatten_scene` in `src/renderer/scene_flattener.rs` to collect all unique `ImageMap` textures.
+    - [x] Update `add_primitive` to populate per-vertex UVs for Triangles.
+    - [x] Update `add_material` to assign the correct `texture_index` based on the collected textures.
 - [ ] Task: Conductor - User Manual Verification 'Scene Flattening Updates' (Protocol in workflow.md)
 
 ## Phase 3: Integration & Verification
