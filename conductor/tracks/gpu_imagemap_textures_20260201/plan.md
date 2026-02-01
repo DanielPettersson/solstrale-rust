@@ -30,13 +30,13 @@ Goal: Connect the CPU scene representation to the new GPU structures.
     - [x] Update `add_material` to assign the correct `texture_index` based on the collected textures.
 - [x] Task: Conductor - User Manual Verification 'Scene Flattening Updates' (Protocol in workflow.md) 67bb787
 
-## Phase 3: Integration & Verification
+## Phase 3: Integration & Verification [checkpoint: e50620c]
 Goal: Finalize implementation and ensure all tests pass.
 
-- [ ] Task: Verify Integration Tests
-    - [ ] Run `test_texture_map` and ensure it passes on the GPU.
-    - [ ] Run other GPU integration tests (`test_gpu_scene_sphere`, etc.) to ensure no regressions.
-- [ ] Task: Performance & Quality Check
-    - [ ] Verify visual parity between CPU and GPU renders.
-    - [ ] Check for any significant performance bottlenecks introduced by texture sampling.
-- [ ] Task: Conductor - User Manual Verification 'Integration & Verification' (Protocol in workflow.md)
+- [x] Task: Verify Integration Tests
+    - [x] Run `test_texture_map` and ensure it passes on the GPU.
+    - [x] Run other GPU integration tests (`test_gpu_scene_sphere`, etc.) to ensure no regressions.
+- [x] Task: Performance & Quality Check
+    - [x] Verify visual parity between CPU and GPU renders.
+    - [x] Check for any significant performance bottlenecks introduced by texture sampling.
+- [x] Task: Conductor - User Manual Verification 'Integration & Verification' (Protocol in workflow.md) e50620c
