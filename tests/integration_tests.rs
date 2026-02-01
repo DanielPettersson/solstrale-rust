@@ -78,12 +78,12 @@ fn test_render_obj_with_textures() {
     let render_config = RenderConfig {
         width: 200,
         height: 100,
-        samples_per_pixel: 20,
+        samples_per_pixel: 100,
         ..Default::default()
     };
     let scene = create_obj_scene(render_config);
 
-    render_and_compare_output(scene, "obj", false);
+    render_and_compare_output(scene, "obj", true);
 }
 
 #[test]
@@ -115,12 +115,12 @@ fn test_render_uv_mapping() {
     let render_config = RenderConfig {
         width: 200,
         height: 200,
-        samples_per_pixel: 5,
+        samples_per_pixel: 50,
         ..Default::default()
     };
     let scene = create_uv_scene(render_config);
 
-    render_and_compare_output(scene, "uv", false);
+    render_and_compare_output(scene, "uv", true);
 }
 
 #[test]
