@@ -6,9 +6,9 @@ Goal: Update GPU data structures and the compute shader to accommodate UV coordi
 - [x] Task: Update GPU Data Structures 1f8c052
     - [x] Update `Triangle` struct in `src/renderer/gpu_data.rs` to include `uv0`, `uv1`, `uv2` (each [f32; 2]).
     - [x] Update `Material` struct in `src/renderer/gpu_data.rs` to include `texture_index` (i32).
-- [ ] Task: Update Shader Structs & Bindings
-    - [ ] Update `Triangle` and `Material` structs in `src/renderer/ray_trace.wgsl` to match Rust changes.
-    - [ ] Add `texture_2d_array<f32>` and `sampler` bindings to `ray_trace.wgsl`.
+- [x] Task: Update Shader Structs & Bindings a7d6866
+    - [x] Update `Triangle` and `Material` structs in `src/renderer/ray_trace.wgsl` to match Rust changes.
+    - [x] Add `texture_2d_array<f32>` and `sampler` bindings to `ray_trace.wgsl`.
 - [ ] Task: Implement UV Calculation & Sampling in Shader
     - [ ] Update `Quad` hit logic in `ray_trace.wgsl` to calculate and return UVs.
     - [ ] Update `Sphere` hit logic in `ray_trace.wgsl` to calculate and return UVs.
