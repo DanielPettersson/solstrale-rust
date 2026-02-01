@@ -16,9 +16,9 @@ Goal: Update GPU data structures, shader, and host code to support texture mappi
     - [x] Modify `scatter` function in `ray_trace.wgsl` to sample the texture array if `texture_index >= 0`.
 - [x] Task: Implement Texture Processing Utility d3861cf
     - [x] Create a utility to resize an `RgbImage` to 1024x1024 using a high-quality filter.
-- [ ] Task: Update GPU Renderer for Texture Bindings
-    - [ ] Update `GpuRenderer` in `src/renderer/gpu_renderer.rs` to create the `texture_2d_array` and `sampler`.
-    - [ ] Update bind group creation to include the new texture array and sampler.
+- [x] Task: Update GPU Renderer for Texture Bindings e86883a
+    - [x] Update `GpuRenderer` in `src/renderer/gpu_renderer.rs` to create the `texture_2d_array` and `sampler`.
+    - [x] Update bind group creation to include the new texture array and sampler.
 - [ ] Task: Conductor - User Manual Verification 'Core Implementation' (Protocol in workflow.md)
 
 ## Phase 2: Scene Flattening Updates
