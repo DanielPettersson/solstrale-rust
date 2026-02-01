@@ -21,14 +21,14 @@ Goal: Update GPU data structures, shader, and host code to support texture mappi
     - [x] Update bind group creation to include the new texture array and sampler.
 - [x] Task: Conductor - User Manual Verification 'Core Implementation' (Protocol in workflow.md) 20c5d7d
 
-## Phase 2: Scene Flattening Updates
+## Phase 2: Scene Flattening Updates [checkpoint: 67bb787]
 Goal: Connect the CPU scene representation to the new GPU structures.
 
 - [x] Task: Update Scene Flattener fbe194c
     - [x] Modify `flatten_scene` in `src/renderer/scene_flattener.rs` to collect all unique `ImageMap` textures.
     - [x] Update `add_primitive` to populate per-vertex UVs for Triangles.
     - [x] Update `add_material` to assign the correct `texture_index` based on the collected textures.
-- [ ] Task: Conductor - User Manual Verification 'Scene Flattening Updates' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Scene Flattening Updates' (Protocol in workflow.md) 67bb787
 
 ## Phase 3: Integration & Verification
 Goal: Finalize implementation and ensure all tests pass.
