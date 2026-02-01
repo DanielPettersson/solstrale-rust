@@ -7,8 +7,8 @@ mod tests {
     fn test_struct_sizes() {
         assert_eq!(size_of::<Ray>(), 32);
         assert_eq!(size_of::<Sphere>(), 32);
-        assert_eq!(size_of::<Material>(), 48);
-        assert_eq!(size_of::<Triangle>(), 64);
+        assert_eq!(size_of::<Material>(), 64);
+        assert_eq!(size_of::<Triangle>(), 96);
         assert_eq!(size_of::<Quad>(), 96);
         assert_eq!(size_of::<BvhNode>(), 32);
     }

@@ -163,6 +163,10 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 _pad2: 0.0,
                 normal: to_array(t.normal),
                 material_index: mat_idx,
+                uv0: [0.0; 2],
+                uv1: [0.0; 2],
+                uv2: [0.0; 2],
+                _pad3: [0.0; 2],
             });
             (index, 1) // Type 1 = Triangle
         }
@@ -232,6 +236,8 @@ fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
         refraction_index: ref_idx,
         mat_type,
         _padding3: 0,
+        texture_index: -1,
+        _padding4: [0; 3],
     });
 
     index

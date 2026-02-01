@@ -49,6 +49,14 @@ pub struct Triangle {
     pub normal: [f32; 3],
     /// Index of the material
     pub material_index: u32,
+    /// UV coordinate for v0
+    pub uv0: [f32; 2],
+    /// UV coordinate for v1
+    pub uv1: [f32; 2],
+    /// UV coordinate for v2
+    pub uv2: [f32; 2],
+    /// Padding to 96 bytes
+    pub _pad3: [f32; 2],
 }
 
 #[repr(C)]
@@ -133,6 +141,10 @@ pub struct Material {
     pub mat_type: u32,
     /// Padding
     pub _padding3: u32,
+    /// Texture index (-1 for none)
+    pub texture_index: i32,
+    /// Padding to 64 bytes
+    pub _padding4: [u32; 3],
 }
 
 #[repr(C)]
