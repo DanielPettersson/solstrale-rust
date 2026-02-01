@@ -102,7 +102,10 @@ impl PostProcessor for SaturationPostProcessor {
         let bind_group = bind_group(
             device,
             &self.bind_group_layout,
-            &[&input_pixels_buffer, &output_pixels_buffer],
+            &[
+                wgpu::BindingResource::Buffer(input_pixels_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(output_pixels_buffer.as_entire_buffer_binding()),
+            ],
         );
 
         self.input_pixels_buffer = Some(input_pixels_buffer);

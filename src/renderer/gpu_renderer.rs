@@ -6,9 +6,10 @@ use crate::renderer::scene_flattener::flatten_scene;
 use crate::renderer::{RenderProgress, Scene};
 use crate::util::wgpu_util::{
     add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
-    get_result_from_buffer, get_wgpu_device_and_queue, storage_binding, uniform_binding,
+    get_result_from_buffer, get_wgpu_device_and_queue, sampler_binding, storage_binding,
+    texture_binding, uniform_binding,
 };
-use image::{Rgb, RgbImage};
+use image::{DynamicImage, Rgb, RgbImage};
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, SystemTime};
@@ -90,6 +91,76 @@ impl GpuRenderer {
             &scene_data.materials,
             BufferUsages::STORAGE,
         );
+
+        // Create texture array
+        let texture_list: Vec<RgbImage> = if scene_data.textures.is_empty() {
+            vec![RgbImage::new(1024, 1024)]
+        } else {
+            scene_data
+                .textures
+                .iter()
+                .map(|t| crate::util::texture_processing::standardize_texture(t))
+                .collect()
+        };
+
+        let texture_extent = wgpu::Extent3d {
+            width: 1024,
+            height: 1024,
+            depth_or_array_layers: texture_list.len() as u32,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture Array"),
+            size: texture_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for (i, img) in texture_list.iter().enumerate() {
+            let rgba = DynamicImage::ImageRgb8(img.clone()).to_rgba8();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: i as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * 1024),
+                    rows_per_image: Some(1024),
+                },
+                wgpu::Extent3d {
+                    width: 1024,
+                    height: 1024,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
         let camera_inst = Camera::new(width as usize, height as usize, &scene.camera);
 
@@ -175,6 +246,8 @@ impl GpuRenderer {
                 storage_binding(true, 0),  // 5: materials
                 uniform_binding(std::mem::size_of::<GpuCamera>() as u64), // 6: camera
                 uniform_binding(std::mem::size_of::<GpuRenderConfig>() as u64), // 7: config
+                texture_binding(wgpu::TextureViewDimension::D2Array), // 8: texture array
+                sampler_binding(),         // 9: sampler
             ],
         );
 
@@ -200,14 +273,16 @@ impl GpuRenderer {
             device,
             &bind_group_layout,
             &[
-                &output_buffer,
-                &nodes_buffer,
-                &spheres_buffer,
-                &triangles_buffer,
-                &quads_buffer,
-                &materials_buffer,
-                &camera_buffer,
-                &config_buffer,
+                wgpu::BindingResource::Buffer(output_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(nodes_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(spheres_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(triangles_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(quads_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(materials_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(camera_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(config_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::TextureView(&texture_view),
+                wgpu::BindingResource::Sampler(&sampler),
             ],
         );
 

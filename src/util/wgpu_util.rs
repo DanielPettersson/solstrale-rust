@@ -13,6 +13,10 @@ pub(crate) enum BindingType {
     Uniform {
         min_binding_size: u64,
     },
+    Texture {
+        view_dimension: wgpu::TextureViewDimension,
+    },
+    Sampler,
 }
 
 pub(crate) struct BindingInfo {
@@ -44,7 +48,8 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
 
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
-        required_features: wgpu::Features::empty(),
+        required_features: wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
         required_limits: wgpu::Limits::default(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -113,14 +118,14 @@ pub(crate) fn compute_pipeline<'a>(
 pub(crate) fn bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    buffers: &[&wgpu::Buffer],
+    resources: &[wgpu::BindingResource],
 ) -> wgpu::BindGroup {
-    let entries = buffers
+    let entries = resources
         .iter()
         .enumerate()
-        .map(|(i, b)| wgpu::BindGroupEntry {
+        .map(|(i, r)| wgpu::BindGroupEntry {
             binding: i as u32,
-            resource: b.as_entire_binding(),
+            resource: r.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -162,6 +167,18 @@ pub(crate) fn uniform_binding(min_binding_size: u64) -> BindingInfo {
     }
 }
 
+pub(crate) fn texture_binding(view_dimension: wgpu::TextureViewDimension) -> BindingInfo {
+    BindingInfo {
+        binding_type: BindingType::Texture { view_dimension },
+    }
+}
+
+pub(crate) fn sampler_binding() -> BindingInfo {
+    BindingInfo {
+        binding_type: BindingType::Sampler,
+    }
+}
+
 fn bind_group_layout_entry0(binding: u32, info: &BindingInfo) -> wgpu::BindGroupLayoutEntry {
     let ty = match info.binding_type {
         BindingType::Storage {
@@ -177,6 +194,12 @@ fn bind_group_layout_entry0(binding: u32, info: &BindingInfo) -> wgpu::BindGroup
             min_binding_size: NonZeroU64::new(min_binding_size),
             has_dynamic_offset: false,
         },
+        BindingType::Texture { view_dimension } => wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension,
+            multisampled: false,
+        },
+        BindingType::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
     };
 
     wgpu::BindGroupLayoutEntry {

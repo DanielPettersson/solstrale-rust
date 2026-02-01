@@ -204,16 +204,19 @@ impl PostProcessor for BloomPostProcessor {
         let filter_bright_bind_group = bind_group(
             device,
             &self.filter_bright_bind_group_layout,
-            &[&input_pixels_buffer, &intermediate_buffer1],
+            &[
+                wgpu::BindingResource::Buffer(input_pixels_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(intermediate_buffer1.as_entire_buffer_binding()),
+            ],
         );
 
         let apply_bind_group_x = bind_group(
             device,
             &self.apply_bind_group_layout,
             &[
-                &weights_buffer,
-                &intermediate_buffer1,
-                &intermediate_buffer2,
+                wgpu::BindingResource::Buffer(weights_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(intermediate_buffer1.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(intermediate_buffer2.as_entire_buffer_binding()),
             ],
         );
 
@@ -221,9 +224,9 @@ impl PostProcessor for BloomPostProcessor {
             device,
             &self.apply_bind_group_layout,
             &[
-                &weights_buffer,
-                &intermediate_buffer2,
-                &intermediate_buffer1,
+                wgpu::BindingResource::Buffer(weights_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(intermediate_buffer2.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(intermediate_buffer1.as_entire_buffer_binding()),
             ],
         );
 
@@ -231,9 +234,9 @@ impl PostProcessor for BloomPostProcessor {
             device,
             &self.add_bind_group_layout,
             &[
-                &input_pixels_buffer,
-                &intermediate_buffer1,
-                &output_pixels_buffer,
+                wgpu::BindingResource::Buffer(input_pixels_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(intermediate_buffer1.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(output_pixels_buffer.as_entire_buffer_binding()),
             ],
         );
 

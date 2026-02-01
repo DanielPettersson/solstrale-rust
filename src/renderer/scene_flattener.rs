@@ -10,6 +10,7 @@ use crate::renderer::gpu_data::{
     BvhNode as GpuBvhNode, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
     Triangle as GpuTriangle,
 };
+use image::RgbImage;
 
 /// Container for all scene data flattened for the GPU
 pub struct SceneData {
@@ -23,6 +24,8 @@ pub struct SceneData {
     pub quads: Vec<GpuQuad>,
     /// Materials
     pub materials: Vec<GpuMaterial>,
+    /// Textures
+    pub textures: Vec<RgbImage>,
 }
 
 /// Flattens the scene into linear buffers
@@ -33,6 +36,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         triangles: Vec::new(),
         quads: Vec::new(),
         materials: Vec::new(),
+        textures: Vec::new(),
     };
 
     // Process world
