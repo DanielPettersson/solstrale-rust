@@ -14,6 +14,9 @@ struct Triangle {
     v2: vec3<f32>,
     normal: vec3<f32>,
     material_index: u32,
+    uv0: vec2<f32>,
+    uv1: vec2<f32>,
+    uv2: vec2<f32>,
 }
 
 struct Quad {
@@ -40,6 +43,7 @@ struct Material {
     refraction_index: f32,
     mat_type: u32,
     _padding3: u32,
+    texture_index: i32,
 }
 
 struct Camera {
@@ -91,6 +95,12 @@ var<uniform> camera: Camera;
 
 @group(0) @binding(7)
 var<uniform> config: RenderConfig;
+
+@group(0) @binding(8)
+var texture_array: texture_2d_array<f32>;
+
+@group(0) @binding(9)
+var texture_sampler: sampler;
 
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
