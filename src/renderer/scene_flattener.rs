@@ -11,6 +11,7 @@ use crate::renderer::gpu_data::{
     Triangle as GpuTriangle,
 };
 use image::RgbImage;
+use std::sync::Arc;
 
 /// Container for all scene data flattened for the GPU
 pub struct SceneData {
@@ -39,13 +40,15 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         textures: Vec::new(),
     };
 
+    let mut unique_textures: Vec<Arc<RgbImage>> = Vec::new();
+
     // Process world
     match &scene.world {
         Hittables::Bvh(bvh) => {
-            process_node(bvh, &mut data);
+            process_node(bvh, &mut data, &mut unique_textures);
         }
         _ => {
-            let (prim_index, prim_type) = add_primitive(&scene.world, &mut data);
+            let (prim_index, prim_type) = add_primitive(&scene.world, &mut data, &mut unique_textures);
             let bbox = scene.world.bounding_box();
 
             let flag = 0x80000000;
@@ -69,7 +72,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     data
 }
 
-fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
+fn process_node(bvh: &Bvh, data: &mut SceneData, unique_textures: &mut Vec<Arc<RgbImage>>) -> u32 {
     let index = data.nodes.len() as u32;
     // Reserve slot
     data.nodes.push(GpuBvhNode {
@@ -77,8 +80,8 @@ fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
         max_and_right: [0; 4],
     });
 
-    let left_idx = process_item(&bvh.left, data);
-    let right_idx = process_item(&bvh.right, data);
+    let left_idx = process_item(&bvh.left, data, unique_textures);
+    let right_idx = process_item(&bvh.right, data, unique_textures);
 
     let bbox = bvh.bounding_box();
 
@@ -100,15 +103,15 @@ fn process_node(bvh: &Bvh, data: &mut SceneData) -> u32 {
     index
 }
 
-fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
+fn process_item(item: &BvhItem, data: &mut SceneData, unique_textures: &mut Vec<Arc<RgbImage>>) -> u32 {
     match item {
-        BvhItem::Node(bvh) => process_node(bvh, data),
+        BvhItem::Node(bvh) => process_node(bvh, data, unique_textures),
         BvhItem::Leaf(hittable) => {
             if let Hittables::Bvh(bvh) = &**hittable {
-                return process_node(bvh, data);
+                return process_node(bvh, data, unique_textures);
             }
 
-            let (prim_index, prim_type) = add_primitive(hittable, data);
+            let (prim_index, prim_type) = add_primitive(hittable, data, unique_textures);
 
             let index = data.nodes.len() as u32;
             let bbox = hittable.bounding_box();
@@ -136,11 +139,15 @@ fn process_item(item: &BvhItem, data: &mut SceneData) -> u32 {
     }
 }
 
-fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
+fn add_primitive(
+    hittable: &Hittables,
+    data: &mut SceneData,
+    unique_textures: &mut Vec<Arc<RgbImage>>,
+) -> (u32, u32) {
     match hittable {
         Hittables::Sphere(s) => {
             let index = data.spheres.len() as u32;
-            let mat_idx = add_material(&s.mat, data);
+            let mat_idx = add_material(&s.mat, data, unique_textures);
             data.spheres.push(GpuSphere {
                 center_and_radius: [
                     s.center.x as f32,
@@ -155,7 +162,7 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
         }
         Hittables::Triangle(t) => {
             let index = data.triangles.len() as u32;
-            let mat_idx = add_material(&t.mat, data);
+            let mat_idx = add_material(&t.mat, data, unique_textures);
             let v1 = t.v0 + t.v0v1;
             let v2 = t.v0 + t.v0v2;
             data.triangles.push(GpuTriangle {
@@ -167,16 +174,16 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
                 _pad2: 0.0,
                 normal: to_array(t.normal),
                 material_index: mat_idx,
-                uv0: [0.0; 2],
-                uv1: [0.0; 2],
-                uv2: [0.0; 2],
+                uv0: [t.uv0.u, t.uv0.v],
+                uv1: [t.uv1.u, t.uv1.v],
+                uv2: [t.uv2.u, t.uv2.v],
                 _pad3: [0.0; 2],
             });
             (index, 1) // Type 1 = Triangle
         }
         Hittables::Quad(q) => {
             let index = data.quads.len() as u32;
-            let mat_idx = add_material(&q.mat, data);
+            let mat_idx = add_material(&q.mat, data, unique_textures);
             data.quads.push(GpuQuad {
                 q: to_array(q.q),
                 _pad0: 0.0,
@@ -198,38 +205,43 @@ fn add_primitive(hittable: &Hittables, data: &mut SceneData) -> (u32, u32) {
     }
 }
 
-fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
+fn add_material(
+    material: &Materials,
+    data: &mut SceneData,
+    unique_textures: &mut Vec<Arc<RgbImage>>,
+) -> u32 {
     let index = data.materials.len() as u32;
 
-    let (albedo, emission, fuzz, ref_idx, mat_type, attenuation_factor) = match material {
-        Materials::Lambertian(m) => (sample_texture(&m.albedo), ZERO_VECTOR, 0.0, 0.0, 0, 0.0),
-        Materials::Metal(m) => (
-            sample_texture(&m.albedo),
-            ZERO_VECTOR,
-            m.fuzz as f32,
-            0.0,
-            1,
-            0.0,
-        ),
+    let (albedo_tex, emission_tex, fuzz, ref_idx, mat_type, attenuation_factor) = match material {
+        Materials::Lambertian(m) => (Some(&m.albedo), None, 0.0, 0.0, 0, 0.0),
+        Materials::Metal(m) => (Some(&m.albedo), None, m.fuzz as f32, 0.0, 1, 0.0),
         Materials::Dielectric(m) => (
-            sample_texture(&m.albedo),
-            ZERO_VECTOR,
+            Some(&m.albedo),
+            None,
             0.0,
             m.index_of_refraction as f32,
             2,
             0.0,
         ),
         Materials::DiffuseLight(m) => (
-            ZERO_VECTOR,
-            sample_emission(m),
+            None,
+            Some(&m.tex),
             0.0,
             0.0,
             3,
             m.attenuation_factor.unwrap_or(0.0) as f32,
         ),
-        Materials::Isotropic(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0, 0.0),
-        Materials::Blend(_) => (ZERO_VECTOR, ZERO_VECTOR, 0.0, 0.0, 0, 0.0),
+        Materials::Isotropic(_) => (None, None, 0.0, 0.0, 0, 0.0),
+        Materials::Blend(_) => (None, None, 0.0, 0.0, 0, 0.0),
     };
+
+    let albedo = albedo_tex.map(|t| sample_texture(t)).unwrap_or(ZERO_VECTOR);
+    let emission = emission_tex.map(|t| sample_texture(t)).unwrap_or(ZERO_VECTOR);
+
+    let texture_index = albedo_tex
+        .or(emission_tex)
+        .map(|t| get_texture_index(t, data, unique_textures))
+        .unwrap_or(-1);
 
     data.materials.push(GpuMaterial {
         albedo: to_array(albedo),
@@ -240,19 +252,35 @@ fn add_material(material: &Materials, data: &mut SceneData) -> u32 {
         refraction_index: ref_idx,
         mat_type,
         _padding3: 0,
-        texture_index: -1,
+        texture_index,
         _padding4: [0; 3],
     });
 
     index
 }
 
-fn sample_texture(tex: &Textures) -> Vec3 {
-    tex.color(Uv::default())
+fn get_texture_index(
+    tex: &Textures,
+    data: &mut SceneData,
+    unique_textures: &mut Vec<Arc<RgbImage>>,
+) -> i32 {
+    if let Textures::ImageMap(im) = tex {
+        let img = im.get_image();
+        for (i, existing) in unique_textures.iter().enumerate() {
+            if Arc::ptr_eq(existing, &img) {
+                return i as i32;
+            }
+        }
+        let index = unique_textures.len() as i32;
+        unique_textures.push(img.clone());
+        data.textures.push((*img).clone());
+        return index;
+    }
+    -1
 }
 
-fn sample_emission(mat: &crate::material::DiffuseLight) -> Vec3 {
-    mat.tex.color(Uv::default())
+fn sample_texture(tex: &Textures) -> Vec3 {
+    tex.color(Uv::default())
 }
 
 fn to_array(v: Vec3) -> [f32; 3] {

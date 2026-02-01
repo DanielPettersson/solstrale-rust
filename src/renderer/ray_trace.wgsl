@@ -171,7 +171,8 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
 
     var albedo = material.albedo;
     if (material.texture_index >= 0) {
-        albedo = textureSampleLevel(texture_array, texture_sampler, rec.uv, material.texture_index, 0.0).rgb;
+        let uv = vec2<f32>(rec.uv.x, 1.0 - rec.uv.y);
+        albedo = textureSampleLevel(texture_array, texture_sampler, uv, material.texture_index, 0.0).rgb;
     }
 
     if (material.mat_type == 0u) { // Lambertian
