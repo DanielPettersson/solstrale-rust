@@ -5,7 +5,7 @@
 
 ## Graphics & Rendering
 - **Path Tracing Engine:** Custom-built Monte Carlo path tracer.
-- **WGPU:** Used for GPU-accelerated post-processing effects (Bloom, Saturation) via compute shaders.
+- **WGPU:** Used for GPU-accelerated path tracing and post-processing effects (Bloom, Saturation) via compute shaders.
 - **Open Image Denoise (OIDN):** Integration for high-quality AI denoising of rendered frames.
 
 ## Performance & Concurrency
