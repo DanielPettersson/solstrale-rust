@@ -70,6 +70,7 @@ struct HitRecord {
     normal: vec3<f32>,
     material_index: u32,
     front_face: bool,
+    uv: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -168,18 +169,23 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     (*s_rec).is_scattered = true;
     (*s_rec).attenuation_factor = 0.0;
 
+    var albedo = material.albedo;
+    if (material.texture_index >= 0) {
+        albedo = textureSampleLevel(texture_array, texture_sampler, rec.uv, material.texture_index, 0.0).rgb;
+    }
+
     if (material.mat_type == 0u) { // Lambertian
         var scatter_direction = rec.normal + random_unit_vector(state);
         if (all(abs(scatter_direction) < vec3<f32>(1e-8))) {
             scatter_direction = rec.normal;
         }
         (*s_rec).scattered = Ray(rec.p, scatter_direction);
-        (*s_rec).attenuation = material.albedo;
+        (*s_rec).attenuation = albedo;
         return true;
     } else if (material.mat_type == 1u) { // Metal
         let reflected = reflect(normalize(r_in.direction), rec.normal);
         (*s_rec).scattered = Ray(rec.p, reflected + material.fuzz * random_in_unit_sphere(state));
-        (*s_rec).attenuation = material.albedo;
+        (*s_rec).attenuation = albedo;
         return dot((*s_rec).scattered.direction, rec.normal) > 0.0;
     } else if (material.mat_type == 2u) { // Dielectric
         (*s_rec).attenuation = vec3<f32>(1.0, 1.0, 1.0);
@@ -249,6 +255,12 @@ fn hit_sphere(r: Ray, s: Sphere, t_min: f32, t_max: f32, rec: ptr<function, HitR
     }
     (*rec).material_index = s.material_index;
 
+    let theta = acos(-outward_normal.y);
+    let phi = atan2(-outward_normal.z, outward_normal.x) + 3.14159265359;
+    let u = phi / (2.0 * 3.14159265359);
+    let v = theta / 3.14159265359;
+    (*rec).uv = vec2<f32>(u, v);
+
     return true;
 }
 
@@ -282,6 +294,9 @@ fn hit_triangle(r: Ray, t: Triangle, t_min: f32, t_max: f32, rec: ptr<function, 
     }
     (*rec).material_index = t.material_index;
 
+    let w = 1.0 - u - v;
+    (*rec).uv = w * t.uv0 + u * t.uv1 + v * t.uv2;
+
     return true;
 }
 
@@ -308,6 +323,7 @@ fn hit_quad(r: Ray, q: Quad, t_min: f32, t_max: f32, rec: ptr<function, HitRecor
         (*rec).normal = -q.normal;
     }
     (*rec).material_index = q.material_index;
+    (*rec).uv = vec2<f32>(alpha, beta);
 
     return true;
 }

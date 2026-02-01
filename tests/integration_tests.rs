@@ -338,6 +338,7 @@ fn test_texture_map() {
     let scene = create_texture_mapping_scene(RenderConfig {
         width: 300,
         height: 300,
+        samples_per_pixel: 400,
         ..RenderConfig::default()
     });
 
