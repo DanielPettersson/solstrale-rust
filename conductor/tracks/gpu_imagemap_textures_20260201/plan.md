@@ -1,6 +1,6 @@
 # Plan: GPU Imagemap Texture Support
 
-## Phase 1: Core Implementation
+## Phase 1: Core Implementation [checkpoint: 20c5d7d]
 Goal: Update GPU data structures, shader, and host code to support texture mapping.
 
 - [x] Task: Update GPU Data Structures 1f8c052
@@ -19,7 +19,7 @@ Goal: Update GPU data structures, shader, and host code to support texture mappi
 - [x] Task: Update GPU Renderer for Texture Bindings e86883a
     - [x] Update `GpuRenderer` in `src/renderer/gpu_renderer.rs` to create the `texture_2d_array` and `sampler`.
     - [x] Update bind group creation to include the new texture array and sampler.
-- [ ] Task: Conductor - User Manual Verification 'Core Implementation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Core Implementation' (Protocol in workflow.md) 20c5d7d
 
 ## Phase 2: Scene Flattening Updates
 Goal: Connect the CPU scene representation to the new GPU structures.
