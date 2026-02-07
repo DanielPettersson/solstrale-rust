@@ -34,8 +34,6 @@ use crate::scenes::{
 
 mod scenes;
 
-const IMAGE_COMPARISON_SCORE_THRESHOLD: f64 = 0.95;
-
 #[test]
 fn test_render_scene() {
     let shaders: HashMap<&str, Shaders> = HashMap::from([
@@ -53,7 +51,7 @@ fn test_render_scene() {
         };
         let scene = create_test_scene(render_config);
 
-        render_and_compare_output(scene, shader_name, false)
+        render_and_compare_output(scene, shader_name, 0.95, false)
     }
 }
 
@@ -82,7 +80,7 @@ fn test_render_obj_with_textures() {
     };
     let scene = create_obj_scene(render_config);
 
-    render_and_compare_output(scene, "obj", true);
+    render_and_compare_output(scene, "obj", 0.95, true);
 }
 
 #[test]
@@ -94,7 +92,7 @@ fn test_render_obj_with_default_material() {
     };
     let scene = create_obj_with_box(render_config, "resources/obj/", "box.obj");
 
-    render_and_compare_output(scene, "obj_default", true);
+    render_and_compare_output(scene, "obj_default", 0.95, true);
 }
 
 #[test]
@@ -106,7 +104,7 @@ fn test_render_obj_with_diffuse_material() {
     };
     let scene = create_obj_with_box(render_config, "resources/obj/", "boxWithMat.obj");
 
-    render_and_compare_output(scene, "obj_diffuse", true);
+    render_and_compare_output(scene, "obj_diffuse", 0.95, true);
 }
 
 #[test]
@@ -118,7 +116,7 @@ fn test_render_uv_mapping() {
     };
     let scene = create_uv_scene(render_config);
 
-    render_and_compare_output(scene, "uv", true);
+    render_and_compare_output(scene, "uv", 0.95, true);
 }
 
 #[test]
@@ -131,7 +129,7 @@ fn test_render_normal_mapping_disabled() {
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), false);
-    render_and_compare_output(scene, "normal_mapping_disabled", true);
+    render_and_compare_output(scene, "normal_mapping_disabled", 0.95, true);
 }
 
 #[test]
@@ -144,7 +142,7 @@ fn test_render_normal_mapping_1() {
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), true);
-    render_and_compare_output(scene, "normal_mapping_1", false);
+    render_and_compare_output(scene, "normal_mapping_1", 0.95, true);
 }
 
 #[test]
@@ -157,7 +155,7 @@ fn test_render_normal_mapping_2() {
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(-30., 30., 30.), true);
-    render_and_compare_output(scene, "normal_mapping_2", false);
+    render_and_compare_output(scene, "normal_mapping_2", 0.95, true);
 }
 
 #[test]
@@ -168,7 +166,7 @@ fn test_render_normal_mapping_sphere_1() {
         ..Default::default()
     };
     let scene = create_normal_mapping_sphere_scene(render_config, Vec3::new(-30., 30., 30.));
-    render_and_compare_output(scene, "normal_mapping_sphere_1", false);
+    render_and_compare_output(scene, "normal_mapping_sphere_1", 0.97, true);
 }
 
 #[test]
@@ -179,7 +177,7 @@ fn test_render_normal_mapping_sphere_2() {
         ..Default::default()
     };
     let scene = create_normal_mapping_sphere_scene(render_config, Vec3::new(30., 30., 30.));
-    render_and_compare_output(scene, "normal_mapping_sphere_2", false);
+    render_and_compare_output(scene, "normal_mapping_sphere_2", 0.97, true);
 }
 
 #[test]
@@ -211,7 +209,7 @@ fn test_render_obj_with_normal_map() {
     };
     let scene = create_obj_with_triangle(render_config, "resources/obj/", "triWithNormalMap.obj");
 
-    render_and_compare_output(scene, "obj_normal_map", false);
+    render_and_compare_output(scene, "obj_normal_map", 0.95, true);
 }
 
 #[test]
@@ -223,7 +221,7 @@ fn test_render_obj_with_height_map() {
     };
     let scene = create_obj_with_triangle(render_config, "resources/obj/", "triWithHeightMap.obj");
 
-    render_and_compare_output(scene, "obj_height_map", false);
+    render_and_compare_output(scene, "obj_height_map", 0.95, true);
 }
 
 #[test]
@@ -241,7 +239,7 @@ fn test_render_light_attenuation() {
             &format!(
                 "light_attenuation_{}",
                 attenuation_half_length.map_or(-1., |a| a)
-            ),
+            ), 0.95,
             true,
         );
     }
@@ -259,11 +257,11 @@ fn test_bloom() -> Result<(), Box<dyn Error>> {
 
     let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
-    compare_output("bloom", &res);
+    compare_output("bloom", &res, 0.95);
 
     let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
-    compare_output("bloom", &res);
+    compare_output("bloom", &res, 0.95);
 
     Ok(())
 }
@@ -281,11 +279,11 @@ fn test_saturation() -> Result<(), Box<dyn Error>> {
 
         let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
-        compare_output(&format!("saturation_{}", saturation_factor), &res);
+        compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
 
         let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
 
-        compare_output(&format!("saturation_{}", saturation_factor), &res);
+        compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
     }
 
     Ok(())
@@ -308,7 +306,7 @@ fn test_aabb_of_rotated_quad() {
             rotation.deref(),
         );
 
-        render_and_compare_output(scene, &format!("quad_rotated{}", i), true);
+        render_and_compare_output(scene, &format!("quad_rotated{}", i), 0.95, true);
     }
 }
 
@@ -324,7 +322,7 @@ fn test_blended_materials() {
             blend_factor,
         );
 
-        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), false);
+        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), 0.95, false);
     }
 }
 
@@ -336,7 +334,7 @@ fn test_texture_map() {
         ..RenderConfig::default()
     });
 
-    render_and_compare_output(scene, "texture_map", true);
+    render_and_compare_output(scene, "texture_map", 0.95, true);
 }
 
 #[test]
@@ -368,7 +366,7 @@ fn test_gpu_scene_sphere() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_sphere", true);
+    render_and_compare_output(scene, "gpu_sphere", 0.95, true);
 }
 
 #[test]
@@ -410,7 +408,7 @@ fn test_gpu_scene_box() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_box", true);
+    render_and_compare_output(scene, "gpu_box", 0.95, true);
 }
 
 #[test]
@@ -444,7 +442,7 @@ fn test_gpu_scene_sphere2() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_sphere2", true);
+    render_and_compare_output(scene, "gpu_sphere2", 0.95, true);
 }
 
 #[test]
@@ -498,7 +496,7 @@ fn test_gpu_scene_sphere_quad_and_triangle() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_sphere_quad_and_triangle", true);
+    render_and_compare_output(scene, "gpu_sphere_quad_and_triangle", 0.95, true);
 }
 
 #[test]
@@ -561,7 +559,7 @@ fn test_gpu_scene_triangle3() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_triangle3", true);
+    render_and_compare_output(scene, "gpu_triangle3", 0.95, true);
 }
 
 #[test]
@@ -602,7 +600,7 @@ fn test_gpu_scene_nested_bvh() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_nested_bvh", true);
+    render_and_compare_output(scene, "gpu_nested_bvh", 0.95, true);
 }
 
 fn image_to_vec3(image: RgbImage) -> Vec<Vec3> {
@@ -615,7 +613,7 @@ fn image_to_vec3(image: RgbImage) -> Vec<Vec3> {
     ret
 }
 
-fn render_and_compare_output(scene: Scene, name: &str, gpu: bool) {
+fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64,  gpu: bool) {
     let (output_sender, output_receiver) = channel();
     let (_, abort_receiver) = channel();
 
@@ -643,10 +641,10 @@ fn render_and_compare_output(scene: Scene, name: &str, gpu: bool) {
         }
     }
 
-    compare_output(name, &image);
+    compare_output(name, &image, comparison_threshold);
 }
 
-fn compare_output(name: &str, actual_image: &RgbImage) {
+fn compare_output(name: &str, actual_image: &RgbImage, comparison_threshold: f64) {
     actual_image
         .save(format!("tests/output/out_actual_{}.jpg", name))
         .unwrap();
@@ -665,7 +663,7 @@ fn compare_output(name: &str, actual_image: &RgbImage) {
             .score;
 
     assert!(
-        score > IMAGE_COMPARISON_SCORE_THRESHOLD,
+        score > comparison_threshold,
         "Comparison score for {} is: {}",
         name,
         score
