@@ -2,7 +2,7 @@
 
 This plan outlines the steps to implement importance sampling for Lambertian materials in the GPU renderer, matching the CPU's mixture PDF approach.
 
-## Phase 1: Preparation and Analysis
+## Phase 1: Preparation and Analysis [checkpoint: 6235bcf]
 Understand the current CPU implementation and prepare the GPU environment.
 
 - [x] Task: Analyze CPU PDF implementation. Study `src/pdf.rs`, `src/material/mod.rs` (Lambertian scattering), and how lights are collected. 82b4292
