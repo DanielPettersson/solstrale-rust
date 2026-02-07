@@ -78,7 +78,6 @@ fn test_render_obj_with_textures() {
     let render_config = RenderConfig {
         width: 200,
         height: 100,
-        samples_per_pixel: 100,
         ..Default::default()
     };
     let scene = create_obj_scene(render_config);
@@ -115,7 +114,6 @@ fn test_render_uv_mapping() {
     let render_config = RenderConfig {
         width: 200,
         height: 200,
-        samples_per_pixel: 50,
         ..Default::default()
     };
     let scene = create_uv_scene(render_config);
@@ -128,7 +126,6 @@ fn test_render_normal_mapping_disabled() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        samples_per_pixel: 400,
         post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
@@ -190,7 +187,6 @@ fn test_render_scene_without_light() {
     let render_config = RenderConfig {
         width: 20,
         height: 10,
-        samples_per_pixel: 100,
         ..Default::default()
     };
     let scene = create_simple_test_scene(render_config, false);
@@ -246,7 +242,7 @@ fn test_render_light_attenuation() {
                 "light_attenuation_{}",
                 attenuation_half_length.map_or(-1., |a| a)
             ),
-            false,
+            true,
         );
     }
 }
@@ -307,14 +303,12 @@ fn test_aabb_of_rotated_quad() {
             RenderConfig {
                 width: 300,
                 height: 300,
-                shader: SimpleShader::new().into(),
-                samples_per_pixel: 1,
                 ..RenderConfig::default()
             },
             rotation.deref(),
         );
 
-        render_and_compare_output(scene, &format!("quad_rotated{}", i), false);
+        render_and_compare_output(scene, &format!("quad_rotated{}", i), true);
     }
 }
 
@@ -339,7 +333,6 @@ fn test_texture_map() {
     let scene = create_texture_mapping_scene(RenderConfig {
         width: 300,
         height: 300,
-        samples_per_pixel: 300,
         ..RenderConfig::default()
     });
 
@@ -351,7 +344,6 @@ fn test_gpu_scene_sphere() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 300,
         ..Default::default()
     };
 
@@ -384,7 +376,6 @@ fn test_gpu_scene_box() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -427,7 +418,6 @@ fn test_gpu_scene_sphere2() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -462,7 +452,6 @@ fn test_gpu_scene_sphere_quad_and_triangle() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -517,7 +506,6 @@ fn test_gpu_scene_triangle3() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -581,7 +569,6 @@ fn test_gpu_scene_nested_bvh() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 30,
         ..Default::default()
     };
 

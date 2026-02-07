@@ -325,6 +325,7 @@ struct ScatterRecord {
     emitted: vec3<f32>,
     attenuation_factor: f32,
     is_scattered: bool,
+    pdf_value: f32,
 }
 
 fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
@@ -332,6 +333,7 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     (*s_rec).emitted = vec3<f32>(0.0);
     (*s_rec).is_scattered = true;
     (*s_rec).attenuation_factor = 0.0;
+    (*s_rec).pdf_value = 1.0;
 
     var albedo = material.albedo;
     if (material.texture_index >= 0) {
@@ -340,12 +342,12 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     }
 
     if (material.mat_type == 0u) { // Lambertian
-        var scatter_direction = rec.normal + random_unit_vector(state);
-        if (all(abs(scatter_direction) < vec3<f32>(1e-8))) {
-            scatter_direction = rec.normal;
-        }
-        (*s_rec).scattered = Ray(rec.p, scatter_direction);
+        let direction = mixture_pdf_generate(rec.p, rec.normal, state);
+        (*s_rec).scattered = Ray(rec.p, direction);
         (*s_rec).attenuation = albedo;
+        let scattering_pdf = cosine_pdf_value(rec.normal, direction);
+        let pdf_val = mixture_pdf_value(rec.p, rec.normal, direction);
+        (*s_rec).pdf_value = scattering_pdf / pdf_val;
         return true;
     } else if (material.mat_type == 1u) { // Metal
         let reflected = reflect(normalize(r_in.direction), rec.normal);
@@ -624,7 +626,7 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 accumulated_color += emitted * current_attenuation;
                 
                 if (s_rec.is_scattered) {
-                    current_attenuation *= s_rec.attenuation;
+                    current_attenuation *= s_rec.attenuation * s_rec.pdf_value;
                     r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
                 } else {
                     break;
