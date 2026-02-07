@@ -24,7 +24,7 @@ pub struct Quad {
     pub(crate) w: Vec3,
     pub(crate) mat: Materials,
     b_box: Aabb,
-    area: f64,
+    pub(crate) area: f64,
 }
 
 impl Quad {

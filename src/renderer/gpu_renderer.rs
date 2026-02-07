@@ -1,6 +1,7 @@
 //! GPU-based renderer implementation using WGPU
 
 use crate::camera::Camera;
+use crate::hittable::Hittable;
 use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
 use crate::renderer::{RenderProgress, Scene};
@@ -41,6 +42,8 @@ pub struct GpuRenderer {
     camera_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     config_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    lights_buffer: wgpu::Buffer,
 }
 
 impl GpuRenderer {
@@ -89,6 +92,13 @@ impl GpuRenderer {
             queue,
             "Materials Buffer",
             &scene_data.materials,
+            BufferUsages::STORAGE,
+        );
+        let lights_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Lights Buffer",
+            &scene_data.lights,
             BufferUsages::STORAGE,
         );
 
@@ -225,7 +235,7 @@ impl GpuRenderer {
                 scene.background_color.y as f32,
                 scene.background_color.z as f32,
             ],
-            _pad: 0,
+            light_count: scene_data.lights.len() as u32,
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -248,6 +258,7 @@ impl GpuRenderer {
                 uniform_binding(std::mem::size_of::<GpuRenderConfig>() as u64), // 7: config
                 texture_binding(wgpu::TextureViewDimension::D2Array), // 8: texture array
                 sampler_binding(),         // 9: sampler
+                storage_binding(true, 0),  // 10: lights
             ],
         );
 
@@ -283,6 +294,7 @@ impl GpuRenderer {
                 wgpu::BindingResource::Buffer(config_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::TextureView(&texture_view),
                 wgpu::BindingResource::Sampler(&sampler),
+                wgpu::BindingResource::Buffer(lights_buffer.as_entire_buffer_binding()),
             ],
         );
 
@@ -302,6 +314,7 @@ impl GpuRenderer {
             materials_buffer,
             camera_buffer,
             config_buffer,
+            lights_buffer,
         })
     }
 
@@ -338,7 +351,7 @@ impl GpuRenderer {
                     self.scene.background_color.y as f32,
                     self.scene.background_color.z as f32,
                 ],
-                _pad: 0,
+                light_count: self.scene.world.get_lights().len() as u32,
             };
             queue.write_buffer(&self.config_buffer, 0, bytemuck::cast_slice(&[gpu_config]));
 
