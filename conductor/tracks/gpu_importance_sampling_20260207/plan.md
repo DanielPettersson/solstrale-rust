@@ -19,7 +19,7 @@ Implement the necessary PDF functions and data structures in the WGSL shader.
 - [x] Task: Implement `MixturePdf` logic in WGSL to combine material and light sampling. dda8bc3
 - [ ] Task: Conductor - User Manual Verification 'Shader Infrastructure for PDFs' (Protocol in workflow.md)
 
-## Phase 3: Integration and Rendering [checkpoint: 9d6bc1f]
+## Phase 3: Integration and Rendering [checkpoint: 588da58]
 Integrate the PDF logic into the main rendering loop and verify results.
 
 - [x] Task: Update `SceneData` and `GpuRenderer` to collect and pass a list of light indices to the GPU. 12873a4
