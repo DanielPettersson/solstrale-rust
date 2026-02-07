@@ -1,8 +1,0 @@
-{
-  "track_id": "fix_triangle_uv_mapping_20260207",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-02-07T12:00:00Z",
-  "updated_at": "2026-02-07T12:00:00Z",
-  "description": "There is a bug in the triangle uv mapping for the GPU renderer. The result is not consistent with the CPU renderer. This is demonstrated by the failing test_render_uv_mapping test case"
-}
