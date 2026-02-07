@@ -3,11 +3,11 @@
 use crate::geo::Uv;
 use crate::geo::vec3::{Vec3, ZERO_VECTOR};
 use crate::hittable::{Bvh, BvhItem, Hittable, Hittables};
-use crate::material::Materials;
+use crate::material::{Material, Materials};
 use crate::material::texture::{Texture, Textures};
 use crate::renderer::Scene;
 use crate::renderer::gpu_data::{
-    BvhNode as GpuBvhNode, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
+    BvhNode as GpuBvhNode, LightRef, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
     Triangle as GpuTriangle,
 };
 use image::RgbImage;
@@ -27,6 +27,8 @@ pub struct SceneData {
     pub materials: Vec<GpuMaterial>,
     /// Textures
     pub textures: Vec<RgbImage>,
+    /// Light sources
+    pub lights: Vec<LightRef>,
 }
 
 /// Flattens the scene into linear buffers
@@ -38,6 +40,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         quads: Vec::new(),
         materials: Vec::new(),
         textures: Vec::new(),
+        lights: Vec::new(),
     };
 
     let mut unique_textures: Vec<Arc<RgbImage>> = Vec::new();
@@ -158,6 +161,12 @@ fn add_primitive(
                 material_index: mat_idx,
                 _padding: [0; 3],
             });
+            if s.mat.is_light() {
+                data.lights.push(LightRef {
+                    prim_type: 0,
+                    prim_index: index,
+                });
+            }
             (index, 0) // Type 0 = Sphere
         }
         Hittables::Triangle(t) => {
@@ -167,7 +176,7 @@ fn add_primitive(
             let v2 = t.v0 + t.v0v2;
             data.triangles.push(GpuTriangle {
                 v0: to_array(t.v0),
-                _pad0: 0.0,
+                area: t.area as f32,
                 v1: to_array(v1),
                 _pad1: 0.0,
                 v2: to_array(v2),
@@ -179,6 +188,12 @@ fn add_primitive(
                 uv2: [t.uv2.u, t.uv2.v],
                 _pad3: [0.0; 2],
             });
+            if t.mat.is_light() {
+                data.lights.push(LightRef {
+                    prim_type: 1,
+                    prim_index: index,
+                });
+            }
             (index, 1) // Type 1 = Triangle
         }
         Hittables::Quad(q) => {
@@ -186,7 +201,7 @@ fn add_primitive(
             let mat_idx = add_material(&q.mat, data, unique_textures);
             data.quads.push(GpuQuad {
                 q: to_array(q.q),
-                _pad0: 0.0,
+                area: q.area as f32,
                 u: to_array(q.u),
                 _pad1: 0.0,
                 v: to_array(q.v),
@@ -198,6 +213,12 @@ fn add_primitive(
                 material_index: mat_idx,
                 _pad4: [0; 3],
             });
+            if q.mat.is_light() {
+                data.lights.push(LightRef {
+                    prim_type: 2,
+                    prim_index: index,
+                });
+            }
             (index, 2) // Type 2 = Quad
         }
         Hittables::Bvh(_) => (0xFFFFFFFF, 0),

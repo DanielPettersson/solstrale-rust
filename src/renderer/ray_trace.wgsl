@@ -10,23 +10,34 @@ struct Sphere {
 
 struct Triangle {
     v0: vec3<f32>,
+    area: f32,
     v1: vec3<f32>,
+    _pad1: f32,
     v2: vec3<f32>,
+    _pad2: f32,
     normal: vec3<f32>,
     material_index: u32,
     uv0: vec2<f32>,
     uv1: vec2<f32>,
     uv2: vec2<f32>,
+    _pad3: vec2<f32>,
 }
 
 struct Quad {
     Q: vec3<f32>,
+    area: f32,
     u: vec3<f32>,
+    _pad1: f32,
     v: vec3<f32>,
+    _pad2: f32,
     normal: vec3<f32>,
+    _pad3: f32,
     w: vec3<f32>,
     d: f32,
     material_index: u32,
+    _pad4: u32,
+    _pad5: u32,
+    _pad6: u32,
 }
 
 struct BvhNode {
@@ -62,6 +73,12 @@ struct RenderConfig {
     sample_count: u32,
     max_depth: u32,
     background_color: vec3<f32>,
+    light_count: u32,
+}
+
+struct LightRef {
+    prim_type: u32,
+    prim_index: u32,
 }
 
 struct HitRecord {
@@ -103,6 +120,9 @@ var texture_array: texture_2d_array<f32>;
 @group(0) @binding(9)
 var texture_sampler: sampler;
 
+@group(0) @binding(10)
+var<storage, read> lights: array<LightRef>;
+
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -138,6 +158,150 @@ fn random_unit_vector(state: ptr<function, u32>) -> vec3<f32> {
     return normalize(random_in_unit_sphere(state));
 }
 
+struct ONB {
+    u: vec3<f32>,
+    v: vec3<f32>,
+    w: vec3<f32>,
+}
+
+fn onb_from_w(n: vec3<f32>) -> ONB {
+    var onb: ONB;
+    onb.w = normalize(n);
+    var a: vec3<f32>;
+    if (abs(onb.w.x) > 0.9) {
+        a = vec3<f32>(0.0, 1.0, 0.0);
+    } else {
+        a = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    onb.v = normalize(cross(onb.w, a));
+    onb.u = cross(onb.w, onb.v);
+    return onb;
+}
+
+fn onb_local(onb: ONB, a: vec3<f32>) -> vec3<f32> {
+    return a.x * onb.u + a.y * onb.v + a.z * onb.w;
+}
+
+fn random_cosine_direction(state: ptr<function, u32>) -> vec3<f32> {
+    let r1 = rand_float(state);
+    let r2 = rand_float(state);
+
+    let phi = 2.0 * 3.14159265359 * r1;
+    let x = cos(phi) * sqrt(r2);
+    let y = sin(phi) * sqrt(r2);
+    let z = sqrt(1.0 - r2);
+
+    return vec3<f32>(x, y, z);
+}
+
+fn random_to_sphere(radius: f32, distance_squared: f32, state: ptr<function, u32>) -> vec3<f32> {
+    let r1 = rand_float(state);
+    let r2 = rand_float(state);
+    let z = 1.0 + r2 * (sqrt(abs(1.0 - radius * radius / distance_squared)) - 1.0);
+
+    let phi = 2.0 * 3.14159265359 * r1;
+    let zz = sqrt(abs(1.0 - z * z));
+    let x = cos(phi) * zz;
+    let y = sin(phi) * zz;
+
+    return vec3<f32>(x, y, z);
+}
+
+fn triangle_random_direction(t: Triangle, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+    var a = rand_float(state);
+    var b = rand_float(state);
+    if (a + b > 1.0) {
+        a = 1.0 - a;
+        b = 1.0 - b;
+    }
+    let p = t.v0 + a * (t.v1 - t.v0) + b * (t.v2 - t.v0);
+    return p - origin;
+}
+
+fn quad_random_direction(q: Quad, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+    let p = q.Q + q.u * rand_float(state) + q.v * rand_float(state);
+    return p - origin;
+}
+
+fn sphere_random_direction(s: Sphere, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+    let center = s.center_and_radius.xyz;
+    let radius = s.center_and_radius.w;
+    let direction = center - origin;
+    let uvw = onb_from_w(direction);
+    return onb_local(uvw, random_to_sphere(radius, dot(direction, direction), state));
+}
+
+fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
+    if (config.light_count == 0u) { return 0.0; }
+
+    var sum = 0.0;
+    for (var i = 0u; i < config.light_count; i++) {
+        let light = lights[i];
+        let r = Ray(origin, direction);
+        var rec: HitRecord;
+
+        if (light.prim_type == 0u) { // Sphere
+            if (hit_sphere(r, spheres[light.prim_index], 0.001, 1e20, &rec)) {
+                let s = spheres[light.prim_index];
+                let center = s.center_and_radius.xyz;
+                let radius = s.center_and_radius.w;
+                let dist_sq = dot(center - origin, center - origin);
+                let cos_theta_max = sqrt(abs(1.0 - radius * radius / dist_sq));
+                let solid_angle = 2.0 * 3.14159265359 * (1.0 - cos_theta_max);
+                sum += 1.0 / solid_angle;
+            }
+        } else if (light.prim_type == 1u) { // Triangle
+            if (hit_triangle(r, triangles[light.prim_index], 0.001, 1e20, &rec)) {
+                let tri = triangles[light.prim_index];
+                let dist_sq = rec.t * rec.t * dot(direction, direction);
+                let cosine = abs(dot(direction, rec.normal) / length(direction));
+                sum += dist_sq / (cosine * tri.area);
+            }
+        } else if (light.prim_type == 2u) { // Quad
+            if (hit_quad(r, quads[light.prim_index], 0.001, 1e20, &rec)) {
+                let q = quads[light.prim_index];
+                let dist_sq = rec.t * rec.t * dot(direction, direction);
+                let cosine = abs(dot(direction, rec.normal) / length(direction));
+                sum += dist_sq / (cosine * q.area);
+            }
+        }
+    }
+    return sum / f32(config.light_count);
+}
+
+fn light_random_direction(origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+    if (config.light_count == 0u) { return vec3<f32>(1.0, 0.0, 0.0); }
+    let idx = u32(rand_float(state) * f32(config.light_count));
+    let light = lights[min(idx, config.light_count - 1u)];
+
+    if (light.prim_type == 0u) {
+        return sphere_random_direction(spheres[light.prim_index], origin, state);
+    } else if (light.prim_type == 1u) {
+        return triangle_random_direction(triangles[light.prim_index], origin, state);
+    } else if (light.prim_type == 2u) {
+        return quad_random_direction(quads[light.prim_index], origin, state);
+    }
+    return vec3<f32>(1.0, 0.0, 0.0);
+}
+
+fn cosine_pdf_value(normal: vec3<f32>, direction: vec3<f32>) -> f32 {
+    let cos_theta = dot(normalize(direction), normal);
+    return max(0.0, cos_theta / 3.14159265359);
+}
+
+fn mixture_pdf_value(origin: vec3<f32>, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
+    return 0.5 * cosine_pdf_value(normal, direction) + 0.5 * light_pdf_value(origin, direction);
+}
+
+fn mixture_pdf_generate(origin: vec3<f32>, normal: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+    if (rand_float(state) < 0.5) {
+        return light_random_direction(origin, state);
+    } else {
+        let uvw = onb_from_w(normal);
+        return onb_local(uvw, random_cosine_direction(state));
+    }
+}
+
 fn reflect(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return v - 2.0 * dot(v, n) * n;
 }
@@ -161,6 +325,7 @@ struct ScatterRecord {
     emitted: vec3<f32>,
     attenuation_factor: f32,
     is_scattered: bool,
+    pdf_value: f32,
 }
 
 fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
@@ -168,6 +333,7 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     (*s_rec).emitted = vec3<f32>(0.0);
     (*s_rec).is_scattered = true;
     (*s_rec).attenuation_factor = 0.0;
+    (*s_rec).pdf_value = 1.0;
 
     var albedo = material.albedo;
     if (material.texture_index >= 0) {
@@ -176,12 +342,12 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     }
 
     if (material.mat_type == 0u) { // Lambertian
-        var scatter_direction = rec.normal + random_unit_vector(state);
-        if (all(abs(scatter_direction) < vec3<f32>(1e-8))) {
-            scatter_direction = rec.normal;
-        }
-        (*s_rec).scattered = Ray(rec.p, scatter_direction);
+        let direction = mixture_pdf_generate(rec.p, rec.normal, state);
+        (*s_rec).scattered = Ray(rec.p, direction);
         (*s_rec).attenuation = albedo;
+        let scattering_pdf = cosine_pdf_value(rec.normal, direction);
+        let pdf_val = mixture_pdf_value(rec.p, rec.normal, direction);
+        (*s_rec).pdf_value = scattering_pdf / pdf_val;
         return true;
     } else if (material.mat_type == 1u) { // Metal
         let reflected = reflect(normalize(r_in.direction), rec.normal);
@@ -460,7 +626,7 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 accumulated_color += emitted * current_attenuation;
                 
                 if (s_rec.is_scattered) {
-                    current_attenuation *= s_rec.attenuation;
+                    current_attenuation *= s_rec.attenuation * s_rec.pdf_value;
                     r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
                 } else {
                     break;

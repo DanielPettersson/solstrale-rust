@@ -35,8 +35,8 @@ pub struct Sphere {
 pub struct Triangle {
     /// First vertex
     pub v0: [f32; 3],
-    /// Padding
-    pub _pad0: f32,
+    /// Area of the triangle
+    pub area: f32,
     /// Second vertex
     pub v1: [f32; 3],
     /// Padding
@@ -65,8 +65,8 @@ pub struct Triangle {
 pub struct Quad {
     /// Starting corner
     pub q: [f32; 3],
-    /// Padding
-    pub _pad0: f32,
+    /// Area of the quad
+    pub area: f32,
     /// U vector
     pub u: [f32; 3],
     /// Padding
@@ -179,6 +179,16 @@ pub struct GpuCamera {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+/// Reference to a light source
+pub struct LightRef {
+    /// Type of the primitive (0=Sphere, 1=Triangle, 2=Quad)
+    pub prim_type: u32,
+    /// Index of the primitive in its respective buffer
+    pub prim_index: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Render configuration matching WGSL layout
 pub struct GpuRenderConfig {
     /// Width of the image
@@ -191,6 +201,6 @@ pub struct GpuRenderConfig {
     pub max_depth: u32,
     /// Background color
     pub background_color: [f32; 3],
-    /// Padding
-    pub _pad: u32,
+    /// Number of light sources in the scene
+    pub light_count: u32,
 }
