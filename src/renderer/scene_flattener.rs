@@ -186,7 +186,12 @@ fn add_primitive(
                 uv0: [t.uv0.u, t.uv0.v],
                 uv1: [t.uv1.u, t.uv1.v],
                 uv2: [t.uv2.u, t.uv2.v],
-                _pad3: [0.0; 2],
+                _pad_align_tangent: [0.0; 2],
+                tangent: to_array(t.tangent),
+                _pad3: 0.0,
+                bi_tangent: to_array(t.bi_tangent),
+                _pad4: 0.0,
+                _pad5: [0.0; 4],
             });
             if t.mat.is_light() {
                 data.lights.push(LightRef {
@@ -211,7 +216,12 @@ fn add_primitive(
                 w: to_array(q.w),
                 d: q.d as f32,
                 material_index: mat_idx,
-                _pad4: [0; 3],
+                _pad_align_tangent: [0.0; 3],
+                tangent: to_array(q.u.unit()),
+                _pad_align_bitangent: 0.0,
+                bi_tangent: to_array(q.v.unit()),
+                _pad_end: 0.0,
+                _pad4: [0; 4],
             });
             if q.mat.is_light() {
                 data.lights.push(LightRef {
@@ -233,34 +243,59 @@ fn add_material(
 ) -> u32 {
     let index = data.materials.len() as u32;
 
-    let (albedo_tex, emission_tex, fuzz, ref_idx, mat_type, attenuation_factor) = match material {
-        Materials::Lambertian(m) => (Some(&m.albedo), None, 0.0, 0.0, 0, 0.0),
-        Materials::Metal(m) => (Some(&m.albedo), None, m.fuzz as f32, 0.0, 1, 0.0),
-        Materials::Dielectric(m) => (
-            Some(&m.albedo),
-            None,
-            0.0,
-            m.index_of_refraction as f32,
-            2,
-            0.0,
-        ),
-        Materials::DiffuseLight(m) => (
-            None,
-            Some(&m.tex),
-            0.0,
-            0.0,
-            3,
-            m.attenuation_factor.unwrap_or(0.0) as f32,
-        ),
-        Materials::Isotropic(_) => (None, None, 0.0, 0.0, 0, 0.0),
-        Materials::Blend(_) => (None, None, 0.0, 0.0, 0, 0.0),
-    };
+    let (albedo_tex, emission_tex, normal_tex, fuzz, ref_idx, mat_type, attenuation_factor) =
+        match material {
+            Materials::Lambertian(m) => (
+                Some(&m.albedo),
+                None,
+                m.normal.as_ref(),
+                0.0,
+                0.0,
+                0,
+                0.0,
+            ),
+            Materials::Metal(m) => (
+                Some(&m.albedo),
+                None,
+                m.normal.as_ref(),
+                m.fuzz as f32,
+                0.0,
+                1,
+                0.0,
+            ),
+            Materials::Dielectric(m) => (
+                Some(&m.albedo),
+                None,
+                m.normal.as_ref(),
+                0.0,
+                m.index_of_refraction as f32,
+                2,
+                0.0,
+            ),
+            Materials::DiffuseLight(m) => (
+                None,
+                Some(&m.tex),
+                None,
+                0.0,
+                0.0,
+                3,
+                m.attenuation_factor.unwrap_or(0.0) as f32,
+            ),
+            Materials::Isotropic(_) => (None, None, None, 0.0, 0.0, 0, 0.0),
+            Materials::Blend(_) => (None, None, None, 0.0, 0.0, 0, 0.0),
+        };
 
     let albedo = albedo_tex.map(|t| sample_texture(t)).unwrap_or(ZERO_VECTOR);
-    let emission = emission_tex.map(|t| sample_texture(t)).unwrap_or(ZERO_VECTOR);
+    let emission = emission_tex
+        .map(|t| sample_texture(t))
+        .unwrap_or(ZERO_VECTOR);
 
     let texture_index = albedo_tex
         .or(emission_tex)
+        .map(|t| get_texture_index(t, data, unique_textures))
+        .unwrap_or(-1);
+
+    let normal_texture_index = normal_tex
         .map(|t| get_texture_index(t, data, unique_textures))
         .unwrap_or(-1);
 
@@ -274,7 +309,8 @@ fn add_material(
         mat_type,
         _padding3: 0,
         texture_index,
-        _padding4: [0; 3],
+        normal_texture_index,
+        _padding4: [0; 2],
     });
 
     index
