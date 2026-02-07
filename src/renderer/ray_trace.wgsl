@@ -20,7 +20,11 @@ struct Triangle {
     uv0: vec2<f32>,
     uv1: vec2<f32>,
     uv2: vec2<f32>,
-    _pad3: vec2<f32>,
+    tangent: vec3<f32>,
+    _pad3: f32,
+    bi_tangent: vec3<f32>,
+    _pad4: f32,
+    _pad5: vec4<f32>,
 }
 
 struct Quad {
@@ -35,9 +39,11 @@ struct Quad {
     w: vec3<f32>,
     d: f32,
     material_index: u32,
-    _pad4: u32,
-    _pad5: u32,
-    _pad6: u32,
+    tangent: vec3<f32>,
+    _pad_align_bitangent: f32,
+    bi_tangent: vec3<f32>,
+    _pad_end: f32,
+    _pad4: vec4<u32>,
 }
 
 struct BvhNode {
@@ -55,6 +61,8 @@ struct Material {
     mat_type: u32,
     _padding3: u32,
     texture_index: i32,
+    normal_texture_index: i32,
+    _padding4: vec2<u32>,
 }
 
 struct Camera {
@@ -85,6 +93,8 @@ struct HitRecord {
     t: f32,
     p: vec3<f32>,
     normal: vec3<f32>,
+    tangent: vec3<f32>,
+    bi_tangent: vec3<f32>,
     material_index: u32,
     front_face: bool,
     uv: vec2<f32>,
@@ -341,19 +351,27 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
         albedo = textureSampleLevel(texture_array, texture_sampler, uv, material.texture_index, 0.0).rgb;
     }
 
+    var normal = rec.normal;
+    if (material.normal_texture_index >= 0) {
+         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
+         let map_color = textureSampleLevel(texture_array, texture_sampler, uv, material.normal_texture_index, 0.0).rgb;
+         let map_n = map_color * 2.0 - 1.0;
+         normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
+    }
+
     if (material.mat_type == 0u) { // Lambertian
-        let direction = mixture_pdf_generate(rec.p, rec.normal, state);
+        let direction = mixture_pdf_generate(rec.p, normal, state);
         (*s_rec).scattered = Ray(rec.p, direction);
         (*s_rec).attenuation = albedo;
-        let scattering_pdf = cosine_pdf_value(rec.normal, direction);
-        let pdf_val = mixture_pdf_value(rec.p, rec.normal, direction);
+        let scattering_pdf = cosine_pdf_value(normal, direction);
+        let pdf_val = mixture_pdf_value(rec.p, normal, direction);
         (*s_rec).pdf_value = scattering_pdf / pdf_val;
         return true;
     } else if (material.mat_type == 1u) { // Metal
-        let reflected = reflect(normalize(r_in.direction), rec.normal);
+        let reflected = reflect(normalize(r_in.direction), normal);
         (*s_rec).scattered = Ray(rec.p, reflected + material.fuzz * random_in_unit_sphere(state));
         (*s_rec).attenuation = albedo;
-        return dot((*s_rec).scattered.direction, rec.normal) > 0.0;
+        return dot((*s_rec).scattered.direction, normal) > 0.0;
     } else if (material.mat_type == 2u) { // Dielectric
         (*s_rec).attenuation = vec3<f32>(1.0, 1.0, 1.0);
         var refraction_ratio = material.refraction_index;
@@ -362,16 +380,16 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
         }
 
         let unit_direction = normalize(r_in.direction);
-        let cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+        let cos_theta = min(dot(-unit_direction, normal), 1.0);
         let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 
         let cannot_refract = refraction_ratio * sin_theta > 1.0;
         var direction: vec3<f32>;
 
         if (cannot_refract || reflectance(cos_theta, refraction_ratio) > rand_float(state)) {
-            direction = reflect(unit_direction, rec.normal);
+            direction = reflect(unit_direction, normal);
         } else {
-            direction = refract(unit_direction, rec.normal, refraction_ratio);
+            direction = refract(unit_direction, normal, refraction_ratio);
         }
 
         (*s_rec).scattered = Ray(rec.p, direction);
@@ -428,6 +446,9 @@ fn hit_sphere(r: Ray, s: Sphere, t_min: f32, t_max: f32, rec: ptr<function, HitR
     let v = theta / 3.14159265359;
     (*rec).uv = vec2<f32>(u, v);
 
+    (*rec).tangent = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), outward_normal));
+    (*rec).bi_tangent = cross(outward_normal, (*rec).tangent);
+
     return true;
 }
 
@@ -464,6 +485,9 @@ fn hit_triangle(r: Ray, t: Triangle, t_min: f32, t_max: f32, rec: ptr<function, 
     let w = 1.0 - u - v;
     (*rec).uv = w * t.uv0 + u * t.uv1 + v * t.uv2;
 
+    (*rec).tangent = t.tangent;
+    (*rec).bi_tangent = t.bi_tangent;
+
     return true;
 }
 
@@ -491,6 +515,9 @@ fn hit_quad(r: Ray, q: Quad, t_min: f32, t_max: f32, rec: ptr<function, HitRecor
     }
     (*rec).material_index = q.material_index;
     (*rec).uv = vec2<f32>(alpha, beta);
+
+    (*rec).tangent = q.tangent;
+    (*rec).bi_tangent = q.bi_tangent;
 
     return true;
 }

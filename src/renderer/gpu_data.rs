@@ -55,8 +55,18 @@ pub struct Triangle {
     pub uv1: [f32; 2],
     /// UV coordinate for v2
     pub uv2: [f32; 2],
-    /// Padding to 96 bytes
-    pub _pad3: [f32; 2],
+    /// Padding to align tangent to 16 bytes (88->96)
+    pub _pad_align_tangent: [f32; 2],
+    /// Tangent vector
+    pub tangent: [f32; 3],
+    /// Padding
+    pub _pad3: f32,
+    /// Bi-tangent vector
+    pub bi_tangent: [f32; 3],
+    /// Padding
+    pub _pad4: f32,
+    /// Padding to 144 bytes
+    pub _pad5: [f32; 4],
 }
 
 #[repr(C)]
@@ -85,8 +95,18 @@ pub struct Quad {
     pub d: f32,
     /// Index of the material
     pub material_index: u32,
-    /// Padding to 96 bytes
-    pub _pad4: [u32; 3],
+    /// Padding to align tangent to 16 bytes (84->96)
+    pub _pad_align_tangent: [f32; 3],
+    /// Tangent vector
+    pub tangent: [f32; 3],
+    /// Padding
+    pub _pad_align_bitangent: f32,
+    /// Bi-tangent vector
+    pub bi_tangent: [f32; 3],
+    /// Padding
+    pub _pad_end: f32,
+    /// Padding to 144 bytes
+    pub _pad4: [u32; 4],
 }
 
 #[repr(C)]
@@ -143,8 +163,10 @@ pub struct Material {
     pub _padding3: u32,
     /// Texture index (-1 for none)
     pub texture_index: i32,
+    /// Normal map texture index (-1 for none)
+    pub normal_texture_index: i32,
     /// Padding to 64 bytes
-    pub _padding4: [u32; 3],
+    pub _padding4: [u32; 2],
 }
 
 #[repr(C)]
