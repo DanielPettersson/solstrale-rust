@@ -9,5 +9,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: GPU Importance Sampling for Lambertian Material**
+- [x] **Track: GPU Importance Sampling for Lambertian Material**
 *Link: [./tracks/gpu_importance_sampling_20260207/](./tracks/gpu_importance_sampling_20260207/)*
