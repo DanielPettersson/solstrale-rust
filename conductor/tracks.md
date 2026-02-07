@@ -8,5 +8,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./tracks/gpu_renderer_migration_20260115/](./tracks/gpu_renderer_migration_20260115/)*
 ---
 
-- [~] **Track: Fix Triangle UV Mapping in GPU Renderer**
+- [x] **Track: Fix Triangle UV Mapping in GPU Renderer**
 *Link: [./tracks/fix_triangle_uv_mapping_20260207/](./tracks/fix_triangle_uv_mapping_20260207/)*
