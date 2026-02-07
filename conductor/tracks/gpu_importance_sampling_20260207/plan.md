@@ -10,7 +10,7 @@ Understand the current CPU implementation and prepare the GPU environment.
 - [x] Task: Plan WGSL data structures. Determine how to pass light indices (for the light PDF) to the GPU. 82b4292
 - [ ] Task: Conductor - User Manual Verification 'Preparation and Analysis' (Protocol in workflow.md)
 
-## Phase 2: Shader Infrastructure for PDFs [checkpoint: dda8bc3]
+## Phase 2: Shader Infrastructure for PDFs [checkpoint: 12873a4]
 Implement the necessary PDF functions and data structures in the WGSL shader.
 
 - [x] Task: Implement `OrthonormalBasis` struct and functions in `src/renderer/ray_trace.wgsl` (if not already present) for Cosine PDF. dda8bc3
