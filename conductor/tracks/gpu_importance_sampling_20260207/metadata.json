@@ -1,0 +1,8 @@
+{
+  "track_id": "gpu_importance_sampling_20260207",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-02-07T14:30:00Z",
+  "updated_at": "2026-02-07T14:30:00Z",
+  "description": "Implement importance sampling in the lambertian material for the GPU renderer using Pdfs. Same as in the CPU renderer. The failing tests in integration_tests.rs should pass when this is done"
+}
