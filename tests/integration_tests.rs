@@ -128,12 +128,13 @@ fn test_render_normal_mapping_disabled() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
+        samples_per_pixel: 400,
         post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), false);
-    render_and_compare_output(scene, "normal_mapping_disabled", false);
+    render_and_compare_output(scene, "normal_mapping_disabled", true);
 }
 
 #[test]
@@ -383,7 +384,7 @@ fn test_gpu_scene_box() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 300,
+        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -426,7 +427,7 @@ fn test_gpu_scene_sphere2() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 200,
+        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -461,7 +462,7 @@ fn test_gpu_scene_sphere_quad_and_triangle() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 200,
+        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -516,7 +517,7 @@ fn test_gpu_scene_triangle3() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 200,
+        samples_per_pixel: 30,
         ..Default::default()
     };
 
@@ -580,7 +581,7 @@ fn test_gpu_scene_nested_bvh() {
     let render_config = RenderConfig {
         width: 400,
         height: 400,
-        samples_per_pixel: 200,
+        samples_per_pixel: 30,
         ..Default::default()
     };
 
