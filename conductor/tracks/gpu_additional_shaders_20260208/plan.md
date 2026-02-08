@@ -10,7 +10,7 @@ Implement `SimpleShader`, `NormalShader`, and `AlbedoShader` in the GPU renderer
 - [x] Task: Conductor - User Manual Verification 'Phase 1: GPU Data and Renderer Infrastructure' (Protocol in workflow.md) 3e431a3
 
 ## Phase 2: WGSL Shader Implementation
-- [ ] Task: Add shader functions and dispatch logic to `ray_trace.wgsl`
+- [x] Task: Add shader functions and dispatch logic to `ray_trace.wgsl` 3fef898
     - [ ] Implement `shade_albedo` function in `src/renderer/ray_trace.wgsl`
     - [ ] Implement `shade_normal` function in `src/renderer/ray_trace.wgsl`
     - [ ] Implement `shade_simple` function in `src/renderer/ray_trace.wgsl`
