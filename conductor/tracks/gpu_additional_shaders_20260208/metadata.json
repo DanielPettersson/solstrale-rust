@@ -1,0 +1,8 @@
+{
+  "track_id": "gpu_additional_shaders_20260208",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-02-08T11:45:00Z",
+  "updated_at": "2026-02-08T11:45:00Z",
+  "description": "Implement the different types of shaders SimpleShader, NormalShader and AlbedoShader for the GPU renderer"
+}
