@@ -18,6 +18,6 @@ Implement `SimpleShader`, `NormalShader`, and `AlbedoShader` in the GPU renderer
 - [x] Task: Conductor - User Manual Verification 'Phase 2: WGSL Shader Implementation' (Protocol in workflow.md) ad0ce10
 
 ## Phase 3: Integration and Verification
-- [ ] Task: Verify implementation with `test_shaders`
+- [x] Task: Verify implementation with `test_shaders` d4ab6ee
     - [ ] Run `cargo test --test integration_tests test_shaders` and confirm all shaders pass comparison
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration and Verification' (Protocol in workflow.md)
