@@ -151,8 +151,8 @@ pub struct Material {
     pub attenuation_factor: f32,
     /// Emission color
     pub emission: [f32; 3],
-    /// Padding
-    pub _padding2: f32,
+    /// Blend factor (0.0 - 1.0)
+    pub blend_factor: f32,
     /// Fuzziness (for metal)
     pub fuzz: f32,
     /// Refraction index (for dielectric)
@@ -165,8 +165,8 @@ pub struct Material {
     pub texture_index: i32,
     /// Normal map texture index (-1 for none)
     pub normal_texture_index: i32,
-    /// Padding to 64 bytes
-    pub _padding4: [u32; 2],
+    /// Indices of the two materials to blend
+    pub blend_indices: [u32; 2],
 }
 
 #[repr(C)]

@@ -388,9 +388,9 @@ impl Material for Isotropic {
 /// A blend of two underlying materials
 #[derive(Clone, Debug)]
 pub struct Blend {
-    material_1: Box<Materials>,
-    material_2: Box<Materials>,
-    blend_factor: f64,
+    pub(crate) material_1: Box<Materials>,
+    pub(crate) material_2: Box<Materials>,
+    pub(crate) blend_factor: f64,
 }
 
 impl Blend {

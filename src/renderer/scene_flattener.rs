@@ -241,49 +241,78 @@ fn add_material(
     data: &mut SceneData,
     unique_textures: &mut Vec<Arc<RgbImage>>,
 ) -> u32 {
-    let index = data.materials.len() as u32;
-
-    let (albedo_tex, emission_tex, normal_tex, fuzz, ref_idx, mat_type, attenuation_factor) =
-        match material {
-            Materials::Lambertian(m) => (
-                Some(&m.albedo),
+    let (
+        albedo_tex,
+        emission_tex,
+        normal_tex,
+        fuzz,
+        ref_idx,
+        mat_type,
+        attenuation_factor,
+        blend_indices,
+        blend_factor,
+    ) = match material {
+        Materials::Lambertian(m) => (
+            Some(&m.albedo),
+            None,
+            m.normal.as_ref(),
+            0.0,
+            0.0,
+            0,
+            0.0,
+            [0, 0],
+            0.0,
+        ),
+        Materials::Metal(m) => (
+            Some(&m.albedo),
+            None,
+            m.normal.as_ref(),
+            m.fuzz as f32,
+            0.0,
+            1,
+            0.0,
+            [0, 0],
+            0.0,
+        ),
+        Materials::Dielectric(m) => (
+            Some(&m.albedo),
+            None,
+            m.normal.as_ref(),
+            0.0,
+            m.index_of_refraction as f32,
+            2,
+            0.0,
+            [0, 0],
+            0.0,
+        ),
+        Materials::DiffuseLight(m) => (
+            None,
+            Some(&m.tex),
+            None,
+            0.0,
+            0.0,
+            3,
+            m.attenuation_factor.unwrap_or(0.0) as f32,
+            [0, 0],
+            0.0,
+        ),
+        Materials::Isotropic(_) => (None, None, None, 0.0, 0.0, 0, 0.0, [0, 0], 0.0),
+        Materials::Blend(b) => {
+            let idx1 = add_material(&b.material_1, data, unique_textures);
+            let idx2 = add_material(&b.material_2, data, unique_textures);
+            (
                 None,
-                m.normal.as_ref(),
-                0.0,
-                0.0,
-                0,
-                0.0,
-            ),
-            Materials::Metal(m) => (
-                Some(&m.albedo),
                 None,
-                m.normal.as_ref(),
-                m.fuzz as f32,
-                0.0,
-                1,
-                0.0,
-            ),
-            Materials::Dielectric(m) => (
-                Some(&m.albedo),
-                None,
-                m.normal.as_ref(),
-                0.0,
-                m.index_of_refraction as f32,
-                2,
-                0.0,
-            ),
-            Materials::DiffuseLight(m) => (
-                None,
-                Some(&m.tex),
                 None,
                 0.0,
                 0.0,
-                3,
-                m.attenuation_factor.unwrap_or(0.0) as f32,
-            ),
-            Materials::Isotropic(_) => (None, None, None, 0.0, 0.0, 0, 0.0),
-            Materials::Blend(_) => (None, None, None, 0.0, 0.0, 0, 0.0),
-        };
+                4,
+                0.0,
+                [idx1, idx2],
+                b.blend_factor as f32,
+            )
+        }
+    };
 
     let albedo = albedo_tex.map(|t| sample_texture(t)).unwrap_or(ZERO_VECTOR);
     let emission = emission_tex
@@ -299,18 +328,19 @@ fn add_material(
         .map(|t| get_texture_index(t, data, unique_textures))
         .unwrap_or(-1);
 
+    let index = data.materials.len() as u32;
     data.materials.push(GpuMaterial {
         albedo: to_array(albedo),
         attenuation_factor,
         emission: to_array(emission),
-        _padding2: 0.0,
+        blend_factor,
         fuzz,
         refraction_index: ref_idx,
         mat_type,
         _padding3: 0,
         texture_index,
         normal_texture_index,
-        _padding4: [0; 2],
+        blend_indices,
     });
 
     index
@@ -417,5 +447,53 @@ mod tests {
         
         assert_eq!(data.spheres.len(), 1, "Should have 1 sphere");
         assert_eq!(data.nodes.len(), 3, "Should have 3 nodes");
+    }
+
+    #[test]
+    fn test_flatten_scene_blend() {
+        use crate::material::Blend;
+        
+        let mat1 = Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
+        let mat2 = Materials::Lambertian(Lambertian::new(SolidColor::new(0.0, 0.0, 1.0).into(), None));
+        let blend_mat = Materials::Blend(Blend::new(mat1, mat2, 0.5));
+        
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, blend_mat);
+        let scene = Scene {
+            world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
+            camera: Default::default(),
+            background_color: Default::default(),
+            render_config: RenderConfig::default(),
+        };
+
+        let data = flatten_scene(&scene);
+
+        // We expect:
+        // 1 Sphere
+        // 3 Materials: Blend, Mat1, Mat2 (order depends on implementation, but Blend is the root)
+        
+        assert_eq!(data.spheres.len(), 1);
+        
+        // Ensure we have at least 3 materials
+        assert!(data.materials.len() >= 3);
+        
+        // The sphere points to the blend material. 
+        // NOTE: In current implementation add_material returns the index of the added material.
+        // If recursive, children added first? 
+        let sphere_mat_idx = data.spheres[0].material_index as usize;
+        let blend_gpu_mat = &data.materials[sphere_mat_idx];
+        
+        // Check properties
+        assert_eq!(blend_gpu_mat.mat_type, 4, "Blend material type should be 4"); // 4 is new type for Blend
+        assert_eq!(blend_gpu_mat.blend_factor, 0.5);
+        
+        let child1_idx = blend_gpu_mat.blend_indices[0];
+        let child2_idx = blend_gpu_mat.blend_indices[1];
+        
+        // Verify children are valid indices
+        assert!(child1_idx < data.materials.len() as u32);
+        assert!(child2_idx < data.materials.len() as u32);
+        assert_ne!(child1_idx, child2_idx);
+        assert_ne!(child1_idx, sphere_mat_idx as u32);
+        assert_ne!(child2_idx, sphere_mat_idx as u32);
     }
 }
