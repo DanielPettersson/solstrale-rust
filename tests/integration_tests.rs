@@ -327,6 +327,22 @@ fn test_blended_materials() {
 }
 
 #[test]
+fn test_gpu_blended_materials() {
+    for blend_factor in [0., 0.5, 1.] {
+        let scene = create_blend_material_scene(
+            RenderConfig {
+                width: 300,
+                height: 300,
+                ..RenderConfig::default()
+            },
+            blend_factor,
+        );
+
+        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), 0.95, true);
+    }
+}
+
+#[test]
 fn test_texture_map() {
     let scene = create_texture_mapping_scene(RenderConfig {
         width: 300,

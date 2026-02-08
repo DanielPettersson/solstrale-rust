@@ -55,15 +55,21 @@ struct Material {
     albedo: vec3<f32>,
     attenuation_factor: f32,
     emission: vec3<f32>,
-    _padding2: f32,
+    blend_factor: f32,
     fuzz: f32,
     refraction_index: f32,
     mat_type: u32,
     _padding3: u32,
     texture_index: i32,
     normal_texture_index: i32,
-    _padding4: vec2<u32>,
+    blend_indices: vec2<u32>,
 }
+
+const MAT_LAMBERTIAN = 0u;
+const MAT_METAL = 1u;
+const MAT_DIELECTRIC = 2u;
+const MAT_DIFFUSE_LIGHT = 3u;
+const MAT_BLEND = 4u;
 
 struct Camera {
     origin: vec3<f32>,
@@ -339,7 +345,21 @@ struct ScatterRecord {
 }
 
 fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
-    let material = materials[rec.material_index];
+    var mat_idx = rec.material_index;
+    for (var i = 0u; i < 10u; i++) {
+        let material = materials[mat_idx];
+        if (material.mat_type == MAT_BLEND) {
+            if (rand_float(state) > material.blend_factor) {
+                mat_idx = material.blend_indices.x;
+            } else {
+                mat_idx = material.blend_indices.y;
+            }
+        } else {
+            break;
+        }
+    }
+
+    let material = materials[mat_idx];
     (*s_rec).emitted = vec3<f32>(0.0);
     (*s_rec).is_scattered = true;
     (*s_rec).attenuation_factor = 0.0;
@@ -359,7 +379,7 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
          normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
     }
 
-    if (material.mat_type == 0u) { // Lambertian
+    if (material.mat_type == MAT_LAMBERTIAN) { // Lambertian
         let direction = mixture_pdf_generate(rec.p, normal, state);
         (*s_rec).scattered = Ray(rec.p, direction);
         (*s_rec).attenuation = albedo;
@@ -367,12 +387,12 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
         let pdf_val = mixture_pdf_value(rec.p, normal, direction);
         (*s_rec).pdf_value = scattering_pdf / pdf_val;
         return true;
-    } else if (material.mat_type == 1u) { // Metal
+    } else if (material.mat_type == MAT_METAL) { // Metal
         let reflected = reflect(normalize(r_in.direction), normal);
         (*s_rec).scattered = Ray(rec.p, reflected + material.fuzz * random_in_unit_sphere(state));
         (*s_rec).attenuation = albedo;
         return dot((*s_rec).scattered.direction, normal) > 0.0;
-    } else if (material.mat_type == 2u) { // Dielectric
+    } else if (material.mat_type == MAT_DIELECTRIC) { // Dielectric
         (*s_rec).attenuation = vec3<f32>(1.0, 1.0, 1.0);
         var refraction_ratio = material.refraction_index;
         if (rec.front_face) {
@@ -394,7 +414,7 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
 
         (*s_rec).scattered = Ray(rec.p, direction);
         return true;
-    } else if (material.mat_type == 3u) { // DiffuseLight
+    } else if (material.mat_type == MAT_DIFFUSE_LIGHT) { // DiffuseLight
         if (rec.front_face) {
             (*s_rec).emitted = material.emission;
         } else {

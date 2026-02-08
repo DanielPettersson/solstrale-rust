@@ -21,9 +21,9 @@ In this phase, we update the material data structures shared between the CPU and
 
 In this phase, we update the WGSL shader to recognize the `Blend` material type and implement the probabilistic resolution loop.
 
-- [ ] Task: Update `Material` struct in `src/renderer/ray_trace.wgsl`
-    - [ ] Match the field changes made in Phase 1
-- [ ] Task: Implement material resolution logic in `ray_trace.wgsl`
+- [x] Task: Update `Material` struct in `src/renderer/ray_trace.wgsl`
+    - [x] Match the field changes made in Phase 1
+- [~] Task: Implement material resolution logic in `ray_trace.wgsl`
     - [ ] Define `mat_type` constant for `Blend` (e.g., 4u)
     - [ ] Update `compute` or `scatter` to resolve the final material index by looping while the material type is `Blend`
 - [ ] Task: Update `scatter` function in `ray_trace.wgsl` to handle the resolved material
