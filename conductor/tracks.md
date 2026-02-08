@@ -9,7 +9,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Implement the different types of shaders SimpleShader, NormalShader and AlbedoShader for the GPU renderer**
+- [x] **Track: Implement the different types of shaders SimpleShader, NormalShader and AlbedoShader for the GPU renderer**
 *Link: [./tracks/gpu_additional_shaders_20260208/](./tracks/gpu_additional_shaders_20260208/)*
 
 
