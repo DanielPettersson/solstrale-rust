@@ -44,6 +44,57 @@ fn test_scene() {
 }
 
 #[test]
+fn test_scene_bloom() {
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 100,
+        post_processors: vec![
+            BloomPostProcessor::new(0.1, None, Some(3.0))
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    let scene = create_test_scene(render_config);
+
+    render_and_compare_output(scene, "test_scene_bloom", 0.9, true)
+}
+
+#[test]
+fn test_scene_saturation() {
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 100,
+        post_processors: vec![SaturationPostProcessor::new(-0.7).unwrap().into()],
+        ..Default::default()
+    };
+    let scene = create_test_scene(render_config);
+
+    render_and_compare_output(scene, "test_scene_sat", 0.9, true)
+}
+
+#[test]
+fn test_scene_bloom_and_saturation() {
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 100,
+        post_processors: vec![
+            SaturationPostProcessor::new(-0.7).unwrap().into(),
+            BloomPostProcessor::new(0.1, None, Some(3.0))
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    let scene = create_test_scene(render_config);
+
+    render_and_compare_output(scene, "test_scene_bloom_sat", 0.9, true)
+}
+
+#[test]
 fn test_render_obj_with_textures() {
     let render_config = RenderConfig {
         width: 200,

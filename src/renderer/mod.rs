@@ -214,6 +214,7 @@ impl Renderer {
                         let mut row_pixel_colors: Vec<Vec3> = vec![ZERO_VECTOR; image_width];
 
                         let yi = ((image_height - 1) - y) * image_width;
+                        #[allow(clippy::needless_range_loop)]
                         for x in 0..image_width {
                             let u = (x as f64 + random_normal_float()) / (image_width - 1) as f64;
                             let v = (y as f64 + random_normal_float()) / (image_height - 1) as f64;
