@@ -9,13 +9,13 @@ Implement `SimpleShader`, `NormalShader`, and `AlbedoShader` in the GPU renderer
     - [ ] Update `GpuRenderer::render` in `src/renderer/gpu_renderer.rs` to update `GpuRenderConfig` with correct `max_depth` and `shader_type` during the render loop
 - [x] Task: Conductor - User Manual Verification 'Phase 1: GPU Data and Renderer Infrastructure' (Protocol in workflow.md) 3e431a3
 
-## Phase 2: WGSL Shader Implementation
+## Phase 2: WGSL Shader Implementation [checkpoint: ad0ce10]
 - [x] Task: Add shader functions and dispatch logic to `ray_trace.wgsl` 3fef898
     - [ ] Implement `shade_albedo` function in `src/renderer/ray_trace.wgsl`
     - [ ] Implement `shade_normal` function in `src/renderer/ray_trace.wgsl`
     - [ ] Implement `shade_simple` function in `src/renderer/ray_trace.wgsl`
     - [ ] Update `compute` function in `src/renderer/ray_trace.wgsl` to use `switch` for shader selection and enforce 1-sample limit for non-path-tracing shaders
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: WGSL Shader Implementation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: WGSL Shader Implementation' (Protocol in workflow.md) ad0ce10
 
 ## Phase 3: Integration and Verification
 - [ ] Task: Verify implementation with `test_shaders`
