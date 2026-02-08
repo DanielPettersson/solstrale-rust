@@ -17,23 +17,23 @@ In this phase, we update the material data structures shared between the CPU and
 - [x] Task: Implement flattener changes to pass the test (Green Phase) 321ecfd
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Host Data Structures and Scene Flattening' (Protocol in workflow.md) 321ecfd
 
-## Phase 2: Shader Implementation
+## Phase 2: Shader Implementation [checkpoint: ae3b2da]
 
 In this phase, we update the WGSL shader to recognize the `Blend` material type and implement the probabilistic resolution loop.
 
-- [x] Task: Update `Material` struct in `src/renderer/ray_trace.wgsl`
+- [x] Task: Update `Material` struct in `src/renderer/ray_trace.wgsl` ae3b2da
     - [x] Match the field changes made in Phase 1
-- [~] Task: Implement material resolution logic in `ray_trace.wgsl`
-    - [ ] Define `mat_type` constant for `Blend` (e.g., 4u)
-    - [ ] Update `compute` or `scatter` to resolve the final material index by looping while the material type is `Blend`
-- [ ] Task: Update `scatter` function in `ray_trace.wgsl` to handle the resolved material
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Shader Implementation' (Protocol in workflow.md)
+- [x] Task: Implement material resolution logic in `ray_trace.wgsl` ae3b2da
+    - [x] Define `mat_type` constant for `Blend` (e.g., 4u)
+    - [x] Update `compute` or `scatter` to resolve the final material index by looping while the material type is `Blend`
+- [x] Task: Update `scatter` function in `ray_trace.wgsl` to handle the resolved material ae3b2da
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Shader Implementation' (Protocol in workflow.md) ae3b2da
 
-## Phase 3: Integration and Final Verification
+## Phase 3: Integration and Final Verification [checkpoint: ae3b2da]
 
 Final phase to verify the end-to-end rendering of blended materials on the GPU.
 
-- [ ] Task: Run integration tests for `Blend` material on GPU
-    - [ ] Execute `cargo test --test integration_tests test_blended_materials`
-    - [ ] Verify that GPU output matches expected images in `tests/output/`
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration and Final Verification' (Protocol in workflow.md)
+- [x] Task: Run integration tests for `Blend` material on GPU ae3b2da
+    - [x] Execute `cargo test --test integration_tests test_blended_materials`
+    - [x] Verify that GPU output matches expected images in `tests/output/`
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Integration and Final Verification' (Protocol in workflow.md) ae3b2da
