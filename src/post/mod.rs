@@ -2,7 +2,6 @@
 
 mod bloom;
 mod nop;
-mod oidn;
 mod saturation;
 
 use std::error::Error;
@@ -12,29 +11,21 @@ use enum_dispatch::enum_dispatch;
 use crate::geo::vec3::Vec3;
 pub use crate::post::bloom::BloomPostProcessor;
 pub use crate::post::nop::NopPostProcessor;
-pub use crate::post::oidn::OidnPostProcessor;
 pub use crate::post::saturation::SaturationPostProcessor;
 
 /// Responsible for taking the rendered image and transforming it
 #[enum_dispatch]
 pub trait PostProcessor {
-    /// Do post-construct initialization for the post-processor when with and height it known
+    /// Does post-construct initialization for the post-processor when with and height are known
     fn initialize(&mut self, width: u32, height: u32);
 
     /// Execute final postprocessing of the rendered image
     fn post_process(
         &self,
         pixel_colors: &[Vec3],
-        albedo_colors: &[Vec3],
-        normal_colors: &[Vec3],
         num_samples: u32,
     ) -> Result<image::RgbImage, Box<dyn Error>> {
-        let pixel_colors = self.intermediate_post_process(
-            pixel_colors,
-            albedo_colors,
-            normal_colors,
-            num_samples,
-        )?;
+        let pixel_colors = self.intermediate_post_process(pixel_colors, num_samples)?;
         Ok(pixel_colors_to_rgb_image(
             &pixel_colors,
             self.width(),
@@ -47,15 +38,8 @@ pub trait PostProcessor {
     fn intermediate_post_process(
         &self,
         pixel_colors: &[Vec3],
-        albedo_colors: &[Vec3],
-        normal_colors: &[Vec3],
         num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>>;
-
-    /// Does this post-processor need albedo or normal colors?
-    fn needs_albedo_and_normal_colors(&self) -> bool {
-        false
-    }
 
     /// Returns the width of the image
     fn width(&self) -> u32;
@@ -68,8 +52,6 @@ pub trait PostProcessor {
 #[derive(Clone)]
 /// An enum of available post-processors
 pub enum PostProcessors {
-    /// [`PostProcessor`] of type [`OidnPostProcessor`]
-    OidnPostProcessor,
     /// [`PostProcessor`] of type [`BloomPostProcessor`]
     BloomPostProcessor,
     /// [`PostProcessor`] of type [`SaturationPostProcessor`]

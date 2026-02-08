@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
 use std::ops::Deref;
@@ -12,18 +11,13 @@ use solstrale::camera::CameraConfig;
 use solstrale::geo::transformation::{
     NopTransformer, RotationX, RotationY, RotationZ, Transformations, Transformer,
 };
-use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
+use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
-use solstrale::post::{
-    BloomPostProcessor, OidnPostProcessor, PostProcessor, SaturationPostProcessor,
-};
+use solstrale::post::{BloomPostProcessor, PostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::gpu_renderer::GpuRenderer;
-use solstrale::renderer::shader::{
-    AlbedoShader, NormalShader, PathTracingShader, Shaders, SimpleShader,
-};
 use solstrale::renderer::{RenderConfig, Renderer, Scene};
 use solstrale::util::rgb_color::rgb_to_vec3;
 
@@ -37,42 +31,16 @@ use crate::scenes::{
 mod scenes;
 
 #[test]
-fn test_shaders() {
-    let shaders: HashMap<&str, Shaders> = HashMap::from([
-        ("pathTracing", PathTracingShader::new(50).into()),
-        ("simple", SimpleShader::new().into()),
-        ("normal", NormalShader::new().into()),
-        ("albedo", AlbedoShader::new().into()),
-    ]);
-
-    for (shader_name, shader) in shaders {
-        let render_config = RenderConfig {
-            width: 200,
-            height: 100,
-            samples_per_pixel: 100,
-            shader,
-            ..Default::default()
-        };
-        let scene = create_test_scene(render_config);
-
-        render_and_compare_output(scene, shader_name, 0.9, true)
-    }
-}
-
-#[test]
-#[cfg(feature = "oidn-postprocessor")]
-fn test_render_scene_with_oidn() {
+fn test_scene() {
     let render_config = RenderConfig {
         width: 200,
         height: 100,
-        samples_per_pixel: 20,
-        shader: PathTracingShader::new(50),
-        post_processors: vec![OidnPostProcessor::new()],
+        samples_per_pixel: 100,
         ..Default::default()
     };
+    let scene = create_test_scene(render_config);
 
-    let scene = create_simple_test_scene(render_config, true);
-    render_and_compare_output(scene, "oidn", true)
+    render_and_compare_output(scene, "test_scene", 0.9, true)
 }
 
 #[test]
@@ -128,7 +96,6 @@ fn test_render_normal_mapping_disabled() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
@@ -141,7 +108,6 @@ fn test_render_normal_mapping_1() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
@@ -154,7 +120,6 @@ fn test_render_normal_mapping_2() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
@@ -260,11 +225,11 @@ fn test_bloom() -> Result<(), Box<dyn Error>> {
 
     post.initialize(w, h);
 
-    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+    let res = post.post_process(&pixel_colors, 1)?;
 
     compare_output("bloom", &res, 0.95);
 
-    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+    let res = post.post_process(&pixel_colors, 1)?;
 
     compare_output("bloom", &res, 0.95);
 
@@ -282,11 +247,11 @@ fn test_saturation() -> Result<(), Box<dyn Error>> {
 
         post.initialize(w, h);
 
-        let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+        let res = post.post_process(&pixel_colors, 1)?;
 
         compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
 
-        let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
+        let res = post.post_process(&pixel_colors, 1)?;
 
         compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
     }

@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use solstrale::renderer::gpu_data::{BvhNode, GpuRenderConfig, Material, Quad, Ray, Sphere, Triangle};
+    use solstrale::renderer::gpu_data::{
+        BvhNode, GpuRenderConfig, Material, Quad, Ray, Sphere, Triangle,
+    };
     use std::mem::size_of;
 
     #[test]
@@ -11,6 +13,6 @@ mod tests {
         assert_eq!(size_of::<Triangle>(), 144);
         assert_eq!(size_of::<Quad>(), 144);
         assert_eq!(size_of::<BvhNode>(), 32);
-        assert_eq!(size_of::<GpuRenderConfig>(), 48);
+        assert_eq!(size_of::<GpuRenderConfig>(), 32);
     }
 }

@@ -128,7 +128,7 @@ impl Debug for BvhNode {
             0 => "Sphere",
             1 => "Triangle",
             2 => "Quad",
-            _ => ""
+            _ => "",
         };
 
         f.debug_struct("BvhNode")
@@ -225,8 +225,4 @@ pub struct GpuRenderConfig {
     pub background_color: [f32; 3],
     /// Number of light sources in the scene
     pub light_count: u32,
-    /// Type of shader to use (0=PathTracing, 1=Albedo, 2=Normal, 3=Simple)
-    pub shader_type: u32,
-    /// Padding to align to 16 bytes
-    pub _padding: [u32; 3],
 }

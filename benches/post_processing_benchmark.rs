@@ -7,8 +7,6 @@ pub fn bloom_benchmark(c: &mut Criterion) {
     let width = 800;
     let height = 600;
     let pixel_colors = vec![Vec3::new(0.5, 0.5, 0.5); (width * height) as usize];
-    let albedo_colors = vec![Vec3::new(0., 0., 0.); 0];
-    let normal_colors = vec![Vec3::new(0., 0., 0.); 0];
 
     c.bench_function("bloom_post_process", |b| {
         b.iter_with_setup(
@@ -18,13 +16,8 @@ pub fn bloom_benchmark(c: &mut Criterion) {
                 post
             },
             |post| {
-                post.intermediate_post_process(
-                    black_box(&pixel_colors),
-                    black_box(&albedo_colors),
-                    black_box(&normal_colors),
-                    1,
-                )
-                .unwrap();
+                post.intermediate_post_process(black_box(&pixel_colors), 1)
+                    .unwrap();
             },
         )
     });
@@ -34,8 +27,6 @@ pub fn saturation_benchmark(c: &mut Criterion) {
     let width = 800;
     let height = 600;
     let pixel_colors = vec![Vec3::new(0.5, 0.5, 0.5); (width * height) as usize];
-    let albedo_colors = vec![Vec3::new(0., 0., 0.); 0];
-    let normal_colors = vec![Vec3::new(0., 0., 0.); 0];
 
     c.bench_function("saturation_post_process", |b| {
         b.iter_with_setup(
@@ -45,13 +36,8 @@ pub fn saturation_benchmark(c: &mut Criterion) {
                 post
             },
             |post| {
-                post.intermediate_post_process(
-                    black_box(&pixel_colors),
-                    black_box(&albedo_colors),
-                    black_box(&normal_colors),
-                    1,
-                )
-                .unwrap();
+                post.intermediate_post_process(black_box(&pixel_colors), 1)
+                    .unwrap();
             },
         )
     });

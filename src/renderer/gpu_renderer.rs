@@ -220,26 +220,17 @@ impl GpuRenderer {
             BufferUsages::UNIFORM,
         );
 
-        let (max_depth, shader_type) = match &scene.render_config.shader {
-            crate::renderer::shader::Shaders::PathTracingShader(s) => (s.max_depth, 0),
-            crate::renderer::shader::Shaders::AlbedoShader(_) => (1, 1),
-            crate::renderer::shader::Shaders::NormalShader(_) => (1, 2),
-            crate::renderer::shader::Shaders::SimpleShader(_) => (1, 3),
-        };
-
         let gpu_config = GpuRenderConfig {
             width,
             height,
             sample_count: 0,
-            max_depth,
+            max_depth: 50,
             background_color: [
                 scene.background_color.x as f32,
                 scene.background_color.y as f32,
                 scene.background_color.z as f32,
             ],
             light_count: scene_data.lights.len() as u32,
-            shader_type,
-            _padding: [0; 3],
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -339,27 +330,18 @@ impl GpuRenderer {
                 return Ok(());
             }
 
-            let (max_depth, shader_type) = match &self.scene.render_config.shader {
-                crate::renderer::shader::Shaders::PathTracingShader(s) => (s.max_depth, 0),
-                crate::renderer::shader::Shaders::AlbedoShader(_) => (1, 1),
-                crate::renderer::shader::Shaders::NormalShader(_) => (1, 2),
-                crate::renderer::shader::Shaders::SimpleShader(_) => (1, 3),
-            };
-
             // Update config buffer with current sample count
             let gpu_config = GpuRenderConfig {
                 width: self.width,
                 height: self.height,
                 sample_count: sample,
-                max_depth,
+                max_depth: 50,
                 background_color: [
                     self.scene.background_color.x as f32,
                     self.scene.background_color.y as f32,
                     self.scene.background_color.z as f32,
                 ],
                 light_count: self.scene.world.get_lights().len() as u32,
-                shader_type,
-                _padding: [0; 3],
             };
             queue.write_buffer(&self.config_buffer, 0, bytemuck::cast_slice(&[gpu_config]));
 

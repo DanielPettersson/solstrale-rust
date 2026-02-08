@@ -25,8 +25,6 @@ impl PostProcessor for NopPostProcessor {
     fn intermediate_post_process(
         &self,
         pixel_colors: &[Vec3],
-        _albedo_colors: &[Vec3],
-        _normal_colors: &[Vec3],
         _num_samples: u32,
     ) -> Result<Vec<Vec3>, Box<dyn Error>> {
         Ok(Vec::from(pixel_colors))

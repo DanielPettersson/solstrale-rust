@@ -1,7 +1,6 @@
 //! The renderer takes a [`Scene`] as input, renders it and reports [`RenderProgress`]
 
 use std::error::Error;
-use std::ops::Deref;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -16,7 +15,7 @@ use crate::hittable::{Hittable, Hittables};
 use crate::material::AttenuatedColor;
 use crate::post::{NopPostProcessor, PostProcessor, PostProcessors};
 use crate::random::random_normal_float;
-use crate::renderer::shader::{AlbedoShader, NormalShader, PathTracingShader, Shader, Shaders};
+use crate::renderer::shader::PathTracingShader;
 use crate::util::interval::RAY_INTERVAL;
 
 pub mod gpu_data;
@@ -33,8 +32,6 @@ pub struct RenderConfig {
     pub height: usize,
     /// Number of times each pixel should be sampled
     pub samples_per_pixel: u32,
-    /// Shader to use when rendering the image
-    pub shader: Shaders,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
     /// Describes at which points in time the render progress should contain an image
@@ -47,18 +44,9 @@ impl Default for RenderConfig {
             width: 300,
             height: 200,
             samples_per_pixel: 50,
-            shader: PathTracingShader::new(50).into(),
             post_processors: vec![],
             render_image_strategy: RenderImageStrategy::OnlyFinal,
         }
-    }
-}
-
-impl RenderConfig {
-    fn needs_albedo_and_normal_colors(&self) -> bool {
-        self.post_processors
-            .iter()
-            .any(|p| p.needs_albedo_and_normal_colors())
     }
 }
 
@@ -125,17 +113,14 @@ impl RenderImageStrategy {
 /// process reporting back progress to the caller
 pub struct Renderer {
     scene: Scene,
+    shader: PathTracingShader,
     /// All the light hittables in the world
     pub lights: Vec<Hittables>,
-    albedo_shader: AlbedoShader,
-    normal_shader: NormalShader,
 }
 
 /// Result of calculating color for a ray
 pub(crate) struct RayColorResult {
     pixel_color: AttenuatedColor,
-    albedo_color: Vec3,
-    normal_color: Vec3,
 }
 
 impl Renderer {
@@ -168,43 +153,20 @@ impl Renderer {
 
         Ok(Renderer {
             scene,
+            shader: PathTracingShader::new(50),
             lights: light_list,
-            albedo_shader: AlbedoShader {},
-            normal_shader: NormalShader {},
         })
     }
 
     fn ray_color(&self, ray: &Ray, depth: u32, accumulated_ray_length: f64) -> RayColorResult {
         match self.scene.world.hit(ray, &RAY_INTERVAL) {
             Some(rec) => {
-                let attenuated_color = self.scene.render_config.shader.shade(
-                    self,
-                    &rec,
-                    ray,
-                    depth,
-                    accumulated_ray_length,
-                );
-
-                if depth == 0 && self.scene.render_config.needs_albedo_and_normal_colors() {
-                    let albedo_color = self
-                        .albedo_shader
-                        .shade(self, &rec, ray, depth, accumulated_ray_length)
-                        .color;
-                    let normal_color = self
-                        .normal_shader
-                        .shade(self, &rec, ray, depth, accumulated_ray_length)
-                        .color;
-                    return RayColorResult {
-                        pixel_color: attenuated_color,
-                        albedo_color,
-                        normal_color,
-                    };
-                }
+                let attenuated_color =
+                    self.shader
+                        .shade(self, &rec, ray, depth, accumulated_ray_length);
 
                 RayColorResult {
                     pixel_color: attenuated_color,
-                    albedo_color: ZERO_VECTOR,
-                    normal_color: ZERO_VECTOR,
                 }
             }
             None => RayColorResult {
@@ -212,8 +174,6 @@ impl Renderer {
                     color: self.scene.background_color,
                     ..AttenuatedColor::default()
                 },
-                albedo_color: self.scene.background_color,
-                normal_color: ZERO_VECTOR,
             },
         }
     }
@@ -230,14 +190,8 @@ impl Renderer {
         let image_height = self.scene.render_config.height;
         let pixel_count = image_width * image_height;
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
-        let needs_albedo_and_normal_colors =
-            !self.scene.render_config.needs_albedo_and_normal_colors();
 
         let pixel_colors: Arc<Mutex<Vec<Vec3>>> =
-            Arc::new(Mutex::new(vec![ZERO_VECTOR; pixel_count]));
-        let albedo_colors: Arc<Mutex<Vec<Vec3>>> =
-            Arc::new(Mutex::new(vec![ZERO_VECTOR; pixel_count]));
-        let normal_colors: Arc<Mutex<Vec<Vec3>>> =
             Arc::new(Mutex::new(vec![ZERO_VECTOR; pixel_count]));
 
         let camera = Arc::new(Camera::new(image_width, image_height, &self.scene.camera));
@@ -255,21 +209,9 @@ impl Renderer {
                 for y in 0..image_height {
                     let camera = camera.clone();
                     let pixel_colors = pixel_colors.clone();
-                    let albedo_colors = albedo_colors.clone();
-                    let normal_colors = normal_colors.clone();
 
                     s.spawn(move |_| {
                         let mut row_pixel_colors: Vec<Vec3> = vec![ZERO_VECTOR; image_width];
-                        let mut row_albedo_colors: Vec<Vec3> = if needs_albedo_and_normal_colors {
-                            vec![ZERO_VECTOR; image_width]
-                        } else {
-                            Vec::new()
-                        };
-                        let mut row_normal_colors: Vec<Vec3> = if needs_albedo_and_normal_colors {
-                            vec![ZERO_VECTOR; image_width]
-                        } else {
-                            Vec::new()
-                        };
 
                         let yi = ((image_height - 1) - y) * image_width;
                         for x in 0..image_width {
@@ -279,26 +221,9 @@ impl Renderer {
                             let ray_color_res = self.ray_color(&ray, 0, 0.);
 
                             row_pixel_colors[x] = ray_color_res.pixel_color.get_attenuated_color();
-
-                            if needs_albedo_and_normal_colors {
-                                row_albedo_colors[x] = ray_color_res.albedo_color;
-                                row_normal_colors[x] = ray_color_res.normal_color;
-                            }
                         }
 
                         add_row_data(yi, &mut pixel_colors.lock().unwrap(), &row_pixel_colors);
-                        if needs_albedo_and_normal_colors {
-                            add_row_data(
-                                yi,
-                                &mut albedo_colors.lock().unwrap(),
-                                &row_albedo_colors,
-                            );
-                            add_row_data(
-                                yi,
-                                &mut normal_colors.lock().unwrap(),
-                                &row_normal_colors,
-                            );
-                        }
                     });
                 }
             });
@@ -327,22 +252,13 @@ impl Renderer {
                         let mut intermediate_pixel_colors = pixel_colors.lock().unwrap().clone();
 
                         for ipp in intermediate_post_processors {
-                            let processed_pixel_colors = ipp.intermediate_post_process(
-                                &intermediate_pixel_colors,
-                                albedo_colors.lock().unwrap().deref(),
-                                normal_colors.lock().unwrap().deref(),
-                                sample,
-                            )?;
+                            let processed_pixel_colors =
+                                ipp.intermediate_post_process(&intermediate_pixel_colors, sample)?;
 
                             intermediate_pixel_colors = processed_pixel_colors;
                         }
 
-                        Some(last_post_processor.post_process(
-                            &intermediate_pixel_colors,
-                            albedo_colors.lock().unwrap().deref(),
-                            normal_colors.lock().unwrap().deref(),
-                            sample,
-                        )?)
+                        Some(last_post_processor.post_process(&intermediate_pixel_colors, sample)?)
                     } else {
                         None
                     }
