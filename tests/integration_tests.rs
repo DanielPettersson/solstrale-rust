@@ -13,7 +13,7 @@ use solstrale::geo::transformation::{
     NopTransformer, RotationX, RotationY, RotationZ, Transformations, Transformer,
 };
 use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
-use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
+use solstrale::hittable::{Bvh, ConstantMedium, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{
@@ -239,7 +239,8 @@ fn test_render_light_attenuation() {
             &format!(
                 "light_attenuation_{}",
                 attenuation_half_length.map_or(-1., |a| a)
-            ), 0.95,
+            ),
+            0.95,
             true,
         );
     }
@@ -322,23 +323,12 @@ fn test_blended_materials() {
             blend_factor,
         );
 
-        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), 0.95, false);
-    }
-}
-
-#[test]
-fn test_gpu_blended_materials() {
-    for blend_factor in [0., 0.5, 1.] {
-        let scene = create_blend_material_scene(
-            RenderConfig {
-                width: 300,
-                height: 300,
-                ..RenderConfig::default()
-            },
-            blend_factor,
+        render_and_compare_output(
+            scene,
+            &format!("blended_materials_{}", blend_factor),
+            0.95,
+            true,
         );
-
-        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), 0.95, true);
     }
 }
 
@@ -459,6 +449,49 @@ fn test_gpu_scene_sphere2() {
     };
 
     render_and_compare_output(scene, "gpu_sphere2", 0.95, true);
+}
+
+#[test]
+fn test_gpu_scene_spheres_and_fog() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        samples_per_pixel: 200,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 20.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 10., light.into()).into());
+
+    let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+    let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+
+    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 4., blue.into()).into());
+    world.push(Sphere::new(Vec3::new(4., 1., 0.), 2., red.clone().into()).into());
+    world.push(
+        ConstantMedium::new(
+            Sphere::new(Vec3::new(4., 1., 0.), 8., red.into()).into(),
+            0.03,
+            Vec3::new(1.0, 1.0, 1.0),
+        )
+        .into(),
+    );
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_spheres_and_fog", 0.95, true);
 }
 
 #[test]
@@ -629,7 +662,7 @@ fn image_to_vec3(image: RgbImage) -> Vec<Vec3> {
     ret
 }
 
-fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64,  gpu: bool) {
+fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64, gpu: bool) {
     let (output_sender, output_receiver) = channel();
     let (_, abort_receiver) = channel();
 
