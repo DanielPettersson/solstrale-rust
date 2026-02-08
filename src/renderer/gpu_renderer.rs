@@ -102,14 +102,14 @@ impl GpuRenderer {
             BufferUsages::STORAGE,
         );
 
-        // Create texture array
+        // Create texture-array
         let texture_list: Vec<RgbImage> = if scene_data.textures.is_empty() {
             vec![RgbImage::new(1024, 1024)]
         } else {
             scene_data
                 .textures
                 .iter()
-                .map(|t| crate::util::texture_processing::standardize_texture(t))
+                .map(crate::util::texture_processing::standardize_texture)
                 .collect()
         };
 
@@ -350,7 +350,7 @@ impl GpuRenderer {
             let gpu_config = GpuRenderConfig {
                 width: self.width,
                 height: self.height,
-                sample_count: sample as u32,
+                sample_count: sample,
                 max_depth,
                 background_color: [
                     self.scene.background_color.x as f32,
@@ -453,11 +453,11 @@ fn create_and_upload_buffer<T: bytemuck::Pod>(
     data: &[T],
     usage: BufferUsages,
 ) -> wgpu::Buffer {
-    let size_bytes = (data.len() * std::mem::size_of::<T>()) as u64;
+    let size_bytes = size_of_val(data) as u64;
 
     // Ensure minimum size for valid buffer and pad to 16 bytes for WGSL array compatibility
     let mut effective_size = if size_bytes == 0 {
-        std::mem::size_of::<T>() as u64
+        size_of::<T>() as u64
     } else {
         size_bytes
     };

@@ -317,10 +317,8 @@ fn add_material(
         }
     };
 
-    let albedo = albedo_tex.map(|t| sample_texture(t)).unwrap_or(ZERO_VECTOR);
-    let emission = emission_tex
-        .map(|t| sample_texture(t))
-        .unwrap_or(ZERO_VECTOR);
+    let albedo = albedo_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
+    let emission = emission_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
 
     let texture_index = albedo_tex
         .or(emission_tex)
