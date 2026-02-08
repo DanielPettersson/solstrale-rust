@@ -2,20 +2,20 @@
 
 This plan covers the implementation of the `Blend` material for the GPU renderer, ensuring parity with the CPU's probabilistic selection logic and supporting nested materials.
 
-## Phase 1: Host Data Structures and Scene Flattening
+## Phase 1: Host Data Structures and Scene Flattening [checkpoint: 321ecfd]
 
 In this phase, we update the material data structures shared between the CPU and GPU and extend the scene flattener to support `Blend` materials.
 
-- [~] Task: Update `GpuMaterial` struct in `src/renderer/gpu_data.rs`
-    - [ ] Rename `_padding2` to `blend_factor`
-    - [ ] Rename `_padding4` to `blend_indices`
-- [ ] Task: Update `add_material` in `src/renderer/scene_flattener.rs`
-    - [ ] Add `Materials::Blend` to the match arm in `add_material`
-    - [ ] Implement recursive addition of child materials and population of `blend_factor` and `blend_indices`
-- [~] Task: Write failing unit test for `flatten_scene` with `Blend` material (Red Phase)
-    - [ ] Create a test in `src/renderer/scene_flattener.rs` (or update existing) that flattens a scene with nested `Blend` materials
-- [~] Task: Implement flattener changes to pass the test (Green Phase)
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Host Data Structures and Scene Flattening' (Protocol in workflow.md)
+- [x] Task: Update `GpuMaterial` struct in `src/renderer/gpu_data.rs` 321ecfd
+    - [x] Rename `_padding2` to `blend_factor`
+    - [x] Rename `_padding4` to `blend_indices`
+- [x] Task: Update `add_material` in `src/renderer/scene_flattener.rs` 321ecfd
+    - [x] Add `Materials::Blend` to the match arm in `add_material`
+    - [x] Implement recursive addition of child materials and population of `blend_factor` and `blend_indices`
+- [x] Task: Write failing unit test for `flatten_scene` with `Blend` material (Red Phase) 321ecfd
+    - [x] Create a test in `src/renderer/scene_flattener.rs` (or update existing) that flattens a scene with nested `Blend` materials
+- [x] Task: Implement flattener changes to pass the test (Green Phase) 321ecfd
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Host Data Structures and Scene Flattening' (Protocol in workflow.md) 321ecfd
 
 ## Phase 2: Shader Implementation
 
