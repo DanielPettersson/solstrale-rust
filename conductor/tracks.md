@@ -9,9 +9,4 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [x] **Track: Implement the Blend material for the GPU renderer**
-*Link: [./tracks/gpu_blend_material_20260208/](./tracks/gpu_blend_material_20260208/)*
-
----
-
 
