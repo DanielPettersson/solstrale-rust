@@ -17,7 +17,7 @@ Implement `SimpleShader`, `NormalShader`, and `AlbedoShader` in the GPU renderer
     - [ ] Update `compute` function in `src/renderer/ray_trace.wgsl` to use `switch` for shader selection and enforce 1-sample limit for non-path-tracing shaders
 - [x] Task: Conductor - User Manual Verification 'Phase 2: WGSL Shader Implementation' (Protocol in workflow.md) ad0ce10
 
-## Phase 3: Integration and Verification
+## Phase 3: Integration and Verification [checkpoint: 8df3336]
 - [x] Task: Verify implementation with `test_shaders` d4ab6ee
     - [ ] Run `cargo test --test integration_tests test_shaders` and confirm all shaders pass comparison
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Integration and Verification' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Integration and Verification' (Protocol in workflow.md) 8df3336
