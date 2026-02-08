@@ -4,10 +4,10 @@ use solstrale::geo::transformation::{
     NopTransformer, RotationY, Transformations, Transformer, Translation,
 };
 use solstrale::geo::vec3::Vec3;
+use solstrale::hittable::Hittables;
 use solstrale::hittable::Sphere;
 use solstrale::hittable::Triangle;
 use solstrale::hittable::{Bvh, Quad};
-use solstrale::hittable::{ConstantMedium, Hittables};
 use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
 use solstrale::material::texture::{ImageMap, SolidColor, Textures, load_normal_texture};
@@ -49,20 +49,6 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
         red_mat.clone().into(),
         &RotationY::new(15.),
     ));
-    world.push(
-        ConstantMedium::new(
-            Bvh::new(Quad::new_box(
-                Vec3::new(0., 0., -0.5),
-                Vec3::new(1., 2., 0.5),
-                red_mat.clone().into(),
-                &Translation::new(Vec3::new(0., 0., 1.)),
-            ))
-            .into(),
-            0.1,
-            Vec3::new(1., 1., 1.),
-        )
-        .into(),
-    );
     world.append(&mut Quad::new_box(
         Vec3::new(-1., 2., 0.),
         Vec3::new(-0.5, 2.5, 0.5),

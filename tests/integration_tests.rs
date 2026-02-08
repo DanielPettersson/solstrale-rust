@@ -13,7 +13,7 @@ use solstrale::geo::transformation::{
     NopTransformer, RotationX, RotationY, RotationZ, Transformations, Transformer,
 };
 use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
-use solstrale::hittable::{Bvh, ConstantMedium, Hittables, Quad, Sphere, Triangle};
+use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{
@@ -21,7 +21,9 @@ use solstrale::post::{
 };
 use solstrale::ray_trace;
 use solstrale::renderer::gpu_renderer::GpuRenderer;
-use solstrale::renderer::shader::{PathTracingShader, Shaders, SimpleShader};
+use solstrale::renderer::shader::{
+    AlbedoShader, NormalShader, PathTracingShader, Shaders, SimpleShader,
+};
 use solstrale::renderer::{RenderConfig, Renderer, Scene};
 use solstrale::util::rgb_color::rgb_to_vec3;
 
@@ -39,13 +41,15 @@ fn test_render_scene() {
     let shaders: HashMap<&str, Shaders> = HashMap::from([
         ("pathTracing", PathTracingShader::new(50).into()),
         ("simple", SimpleShader::new().into()),
+        ("normal", NormalShader::new().into()),
+        ("albedo", AlbedoShader::new().into()),
     ]);
 
     for (shader_name, shader) in shaders {
         let render_config = RenderConfig {
             width: 200,
             height: 100,
-            samples_per_pixel: 25,
+            samples_per_pixel: 100,
             shader,
             ..Default::default()
         };
@@ -449,49 +453,6 @@ fn test_gpu_scene_sphere2() {
     };
 
     render_and_compare_output(scene, "gpu_sphere2", 0.95, true);
-}
-
-#[test]
-fn test_gpu_scene_spheres_and_fog() {
-    let render_config = RenderConfig {
-        width: 400,
-        height: 400,
-        samples_per_pixel: 200,
-        ..Default::default()
-    };
-
-    let camera = CameraConfig {
-        look_from: Vec3::new(0., 0., 20.),
-        look_at: Vec3::new(0., 0., 0.),
-        ..Default::default()
-    };
-
-    let mut world: Vec<Hittables> = Vec::new();
-    let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 10., light.into()).into());
-
-    let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
-    let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
-
-    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 4., blue.into()).into());
-    world.push(Sphere::new(Vec3::new(4., 1., 0.), 2., red.clone().into()).into());
-    world.push(
-        ConstantMedium::new(
-            Sphere::new(Vec3::new(4., 1., 0.), 8., red.into()).into(),
-            0.03,
-            Vec3::new(1.0, 1.0, 1.0),
-        )
-        .into(),
-    );
-
-    let scene = Scene {
-        world: Bvh::new(world).into(),
-        camera,
-        background_color: Vec3::new(0., 0., 0.),
-        render_config,
-    };
-
-    render_and_compare_output(scene, "gpu_spheres_and_fog", 0.95, true);
 }
 
 #[test]
