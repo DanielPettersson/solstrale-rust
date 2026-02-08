@@ -5,11 +5,9 @@ use std::f64::consts::PI;
 use enum_dispatch::enum_dispatch;
 
 use crate::geo::Onb;
-use crate::geo::vec3::{Vec3, random_cosine_direction, random_unit_vector};
+use crate::geo::vec3::{Vec3, random_cosine_direction};
 use crate::hittable::{Hittable, Hittables};
 use crate::random::{random_element_index, random_normal_float};
-
-const SPHERE_PDF_VALUE: f64 = 1. / (4. * PI);
 
 #[enum_dispatch]
 /// Probability density function
@@ -27,8 +25,6 @@ pub enum Pdfs<'a> {
     CosinePdfType(CosinePdf),
     /// [`Pdf`] of type [`ContainerPdf`]
     ContainerPdfType(ContainerPdf<'a>),
-    /// [`Pdf`] of type [`SpherePdf`]
-    SpherePdfType(SpherePdf),
 }
 
 /// Returns the pdf value for a given vector for the pdfs.
@@ -96,28 +92,5 @@ impl Pdf for ContainerPdf<'_> {
     fn generate(&self) -> Vec3 {
         let idx = random_element_index(self.objects);
         self.objects[idx].random_direction(self.origin)
-    }
-}
-
-/// A probability density functions with a sphere distribution
-#[derive(Default)]
-pub struct SpherePdf();
-
-impl SpherePdf {
-    /// Creates a new instance of SpherePdf
-    pub fn new() -> Self {
-        SpherePdf::default()
-    }
-}
-
-impl Pdf for SpherePdf {
-    /// returns the pdf value for a given vector for the SpherePdf
-    fn value(&self, _: Vec3) -> f64 {
-        SPHERE_PDF_VALUE
-    }
-
-    /// Generate a random direction for the SpherePdf shape
-    fn generate(&self) -> Vec3 {
-        random_unit_vector()
     }
 }

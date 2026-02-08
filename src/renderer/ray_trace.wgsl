@@ -88,6 +88,7 @@ struct RenderConfig {
     max_depth: u32,
     background_color: vec3<f32>,
     light_count: u32,
+    shader_type: u32,
 }
 
 struct LightRef {
@@ -344,8 +345,8 @@ struct ScatterRecord {
     pdf_value: f32,
 }
 
-fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
-    var mat_idx = rec.material_index;
+fn get_active_material_index(initial_idx: u32, state: ptr<function, u32>) -> u32 {
+    var mat_idx = initial_idx;
     for (var i = 0u; i < 10u; i++) {
         let material = materials[mat_idx];
         if (material.mat_type == MAT_BLEND) {
@@ -358,7 +359,22 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
             break;
         }
     }
+    return mat_idx;
+}
 
+fn get_transformed_normal(rec: HitRecord, material: Material) -> vec3<f32> {
+    var normal = rec.normal;
+    if (material.normal_texture_index >= 0) {
+         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
+         let map_color = textureSampleLevel(texture_array, texture_sampler, uv, material.normal_texture_index, 0.0).rgb;
+         let map_n = map_color * 2.0 - 1.0;
+         normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
+    }
+    return normal;
+}
+
+fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
+    let mat_idx = get_active_material_index(rec.material_index, state);
     let material = materials[mat_idx];
     (*s_rec).emitted = vec3<f32>(0.0);
     (*s_rec).is_scattered = true;
@@ -371,13 +387,7 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
         albedo = textureSampleLevel(texture_array, texture_sampler, uv, material.texture_index, 0.0).rgb;
     }
 
-    var normal = rec.normal;
-    if (material.normal_texture_index >= 0) {
-         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
-         let map_color = textureSampleLevel(texture_array, texture_sampler, uv, material.normal_texture_index, 0.0).rgb;
-         let map_n = map_color * 2.0 - 1.0;
-         normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
-    }
+    var normal = get_transformed_normal(rec, material);
 
     if (material.mat_type == MAT_LAMBERTIAN) { // Lambertian
         let direction = mixture_pdf_generate(rec.p, normal, state);
@@ -630,10 +640,67 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> b
     return hit_anything;
 }
 
+fn shade_albedo(r_in: Ray, rec: HitRecord, state: ptr<function, u32>) -> vec3<f32> {
+    let mat_idx = get_active_material_index(rec.material_index, state);
+    let material = materials[mat_idx];
+
+    if (material.mat_type == MAT_DIFFUSE_LIGHT) {
+        if (rec.front_face) {
+            return material.emission;
+        } else {
+            return vec3<f32>(0.0);
+        }
+    }
+
+    var albedo = material.albedo;
+    if (material.texture_index >= 0) {
+        let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
+        albedo = textureSampleLevel(texture_array, texture_sampler, uv, material.texture_index, 0.0).rgb;
+    }
+
+    return albedo;
+}
+
+fn shade_normal(r_in: Ray, rec: HitRecord, state: ptr<function, u32>) -> vec3<f32> {
+    let mat_idx = get_active_material_index(rec.material_index, state);
+    let material = materials[mat_idx];
+    return get_transformed_normal(rec, material);
+}
+
+fn shade_simple(r_in: Ray, rec: HitRecord, state: ptr<function, u32>) -> vec3<f32> {
+    let mat_idx = get_active_material_index(rec.material_index, state);
+    let material = materials[mat_idx];
+
+    if (material.mat_type == MAT_DIFFUSE_LIGHT) {
+        if (rec.front_face) {
+            return material.emission;
+        } else {
+            return vec3<f32>(0.0);
+        }
+    }
+
+    var albedo = material.albedo;
+    if (material.texture_index >= 0) {
+        let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
+        albedo = textureSampleLevel(texture_array, texture_sampler, uv, material.texture_index, 0.0).rgb;
+    }
+
+    let normal = get_transformed_normal(rec, material);
+    let light_dir = vec3<f32>(1.0, 1.0, -1.0);
+    let normal_factor = dot(normal, light_dir) * 0.5 + 0.75;
+
+    return albedo * normal_factor;
+}
+
 @compute @workgroup_size(64)
 fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
     if (index >= arrayLength(&output_buffer)) {
+        return;
+    }
+
+    // For non-path tracing shaders, we only need one sample
+    if (config.shader_type != 0u && config.sample_count > 1u) {
         return;
     }
 
@@ -655,43 +722,64 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var r = Ray(camera.origin + offset, ray_direction);
 
     var accumulated_color = vec3<f32>(0.0);
-    var current_attenuation = vec3<f32>(1.0);
-    var accumulated_ray_length = 0.0;
 
-    for (var depth = 0u; depth < config.max_depth; depth++) {
-        var rec: HitRecord;
-        if (world_hit(r, 0.001, 10000.0, &rec)) {
-            var s_rec: ScatterRecord;
-            if (scatter(r, rec, &rng_state, &s_rec)) {
-                accumulated_ray_length += rec.t;
-                
-                var emitted = s_rec.emitted;
-                if (s_rec.attenuation_factor > 0.0) {
-                    emitted *= 1.0 / (1.0 + s_rec.attenuation_factor * accumulated_ray_length);
-                }
-                
-                accumulated_color += emitted * current_attenuation;
-                
-                if (s_rec.is_scattered) {
-                    current_attenuation *= s_rec.attenuation * s_rec.pdf_value;
-                    r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
+    if (config.shader_type == 0u) { // PathTracingShader
+        var current_attenuation = vec3<f32>(1.0);
+        var accumulated_ray_length = 0.0;
+
+        for (var depth = 0u; depth < config.max_depth; depth++) {
+            var rec: HitRecord;
+            if (world_hit(r, 0.001, 10000.0, &rec)) {
+                var s_rec: ScatterRecord;
+                if (scatter(r, rec, &rng_state, &s_rec)) {
+                    accumulated_ray_length += rec.t;
+                    
+                    var emitted = s_rec.emitted;
+                    if (s_rec.attenuation_factor > 0.0) {
+                        emitted *= 1.0 / (1.0 + s_rec.attenuation_factor * accumulated_ray_length);
+                    }
+                    
+                    accumulated_color += emitted * current_attenuation;
+                    
+                    if (s_rec.is_scattered) {
+                        current_attenuation *= s_rec.attenuation * s_rec.pdf_value;
+                        r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
             } else {
+                accumulated_color += config.background_color * current_attenuation;
                 break;
             }
-        } else {
-            accumulated_color += config.background_color * current_attenuation;
-            break;
-        }
 
-        if (max(current_attenuation.x, max(current_attenuation.y, current_attenuation.z)) < 0.0001) {
-            break;
+            if (max(current_attenuation.x, max(current_attenuation.y, current_attenuation.z)) < 0.0001) {
+                break;
+            }
+        }
+    } else {
+        var rec: HitRecord;
+        if (world_hit(r, 0.001, 10000.0, &rec)) {
+            switch (config.shader_type) {
+                case 1u: { // AlbedoShader
+                    accumulated_color = shade_albedo(r, rec, &rng_state);
+                }
+                case 2u: { // NormalShader
+                    accumulated_color = shade_normal(r, rec, &rng_state);
+                }
+                case 3u: { // SimpleShader
+                    accumulated_color = shade_simple(r, rec, &rng_state);
+                }
+                default: {}
+            }
+        } else {
+            accumulated_color = config.background_color;
         }
     }
 
-    if (config.sample_count <= 1u) {
+    if (config.sample_count <= 1u || config.shader_type != 0u) {
         output_buffer[index] = vec4<f32>(accumulated_color, 1.0);
     } else {
         let weight = 1.0 / f32(config.sample_count);

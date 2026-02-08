@@ -10,7 +10,7 @@ use crate::geo::{Onb, Ray};
 use crate::hittable::Hittables;
 use crate::material::texture::Textures;
 use crate::material::texture::{SolidColor, Texture};
-use crate::pdf::{ContainerPdf, CosinePdf, Pdfs, SpherePdf, mix_generate, mix_value};
+use crate::pdf::{ContainerPdf, CosinePdf, Pdfs, mix_generate, mix_value};
 use crate::random::random_normal_float;
 
 pub mod texture;
@@ -142,8 +142,6 @@ pub enum Materials {
     Dielectric,
     /// [`Material`] of type [`DiffuseLight`]
     DiffuseLight,
-    /// [`Material`] of type [`Isotropic`]
-    Isotropic,
     /// [`Material`] of type [`Blend`]
     Blend,
 }
@@ -345,44 +343,9 @@ impl Material for DiffuseLight {
     }
 }
 
-/// Isotropic is a fog type material
-/// Should not be used directly, but is used internally by ConstantMedium hittable
-#[derive(Clone, Debug)]
-pub struct Isotropic {
-    tex: Textures,
-}
-
-impl Isotropic {
-    /// Create a new isotropic material
-    pub(crate) fn new(tex: Textures) -> Self {
-        Isotropic { tex }
-    }
-}
-
 fn transform_normal_by_map(normal_map: &Textures, onb: Onb, uv: Uv) -> Vec3 {
     let n: Vec3 = normal_map.color(uv) * 2. - ONE_VECTOR;
     onb.local(n)
-}
-
-const SPHERE_PDF_VALUE: f64 = 1. / (4. * PI);
-
-impl Material for Isotropic {
-    /// Returns a randomly scattered ray in any direction
-    fn scatter(&self, _: &Ray, rec: &RayHit, lights: &[Hittables]) -> RayScatter {
-        let color = self.tex.color(rec.uv);
-
-        let pdf: Pdfs = SpherePdf::new().into();
-        let light_pdf: Pdfs = ContainerPdf::new(lights, rec.hit_point).into();
-        let pdf_direction = mix_generate(&light_pdf, &pdf);
-        let scattered = Ray::new(rec.hit_point, pdf_direction);
-        let light_pdf_value = mix_value(&light_pdf, &pdf, scattered.direction);
-
-        RayScatter::ScatterPdf(ScatterPdf {
-            color,
-            ray: scattered,
-            probability: SPHERE_PDF_VALUE / light_pdf_value,
-        })
-    }
 }
 
 /// A blend of two underlying materials

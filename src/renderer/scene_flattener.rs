@@ -3,8 +3,8 @@
 use crate::geo::Uv;
 use crate::geo::vec3::{Vec3, ZERO_VECTOR};
 use crate::hittable::{Bvh, BvhItem, Hittable, Hittables};
-use crate::material::{Material, Materials};
 use crate::material::texture::{Texture, Textures};
+use crate::material::{Material, Materials};
 use crate::renderer::Scene;
 use crate::renderer::gpu_data::{
     BvhNode as GpuBvhNode, LightRef, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
@@ -51,7 +51,8 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
             process_node(bvh, &mut data, &mut unique_textures);
         }
         _ => {
-            let (prim_index, prim_type) = add_primitive(&scene.world, &mut data, &mut unique_textures);
+            let (prim_index, prim_type) =
+                add_primitive(&scene.world, &mut data, &mut unique_textures);
             let bbox = scene.world.bounding_box();
 
             let flag = 0x80000000;
@@ -106,7 +107,11 @@ fn process_node(bvh: &Bvh, data: &mut SceneData, unique_textures: &mut Vec<Arc<R
     index
 }
 
-fn process_item(item: &BvhItem, data: &mut SceneData, unique_textures: &mut Vec<Arc<RgbImage>>) -> u32 {
+fn process_item(
+    item: &BvhItem,
+    data: &mut SceneData,
+    unique_textures: &mut Vec<Arc<RgbImage>>,
+) -> u32 {
     match item {
         BvhItem::Node(bvh) => process_node(bvh, data, unique_textures),
         BvhItem::Leaf(hittable) => {
@@ -232,7 +237,6 @@ fn add_primitive(
             (index, 2) // Type 2 = Quad
         }
         Hittables::Bvh(_) => (0xFFFFFFFF, 0),
-        Hittables::ConstantMedium(_) => (0xFFFFFFFF, 0),
     }
 }
 
@@ -296,7 +300,6 @@ fn add_material(
             [0, 0],
             0.0,
         ),
-        Materials::Isotropic(_) => (None, None, None, 0.0, 0.0, 0, 0.0, [0, 0], 0.0),
         Materials::Blend(b) => {
             let idx1 = add_material(&b.material_1, data, unique_textures);
             let idx2 = add_material(&b.material_2, data, unique_textures);
@@ -424,7 +427,7 @@ mod tests {
         let mat =
             Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
         let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat.clone());
-        
+
         let mut sub_world: Vec<Hittables> = Vec::new();
         sub_world.push(Hittables::Sphere(sphere.clone()));
         let bvh = Bvh::new(sub_world);
@@ -444,7 +447,7 @@ mod tests {
         // 3. Leaf Bvh Node (containing the sphere)
         // Total: 3 nodes
         // Spheres: 1
-        
+
         assert_eq!(data.spheres.len(), 1, "Should have 1 sphere");
         assert_eq!(data.nodes.len(), 3, "Should have 3 nodes");
     }
@@ -452,11 +455,13 @@ mod tests {
     #[test]
     fn test_flatten_scene_blend() {
         use crate::material::Blend;
-        
-        let mat1 = Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
-        let mat2 = Materials::Lambertian(Lambertian::new(SolidColor::new(0.0, 0.0, 1.0).into(), None));
+
+        let mat1 =
+            Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
+        let mat2 =
+            Materials::Lambertian(Lambertian::new(SolidColor::new(0.0, 0.0, 1.0).into(), None));
         let blend_mat = Materials::Blend(Blend::new(mat1, mat2, 0.5));
-        
+
         let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, blend_mat);
         let scene = Scene {
             world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
@@ -470,25 +475,25 @@ mod tests {
         // We expect:
         // 1 Sphere
         // 3 Materials: Blend, Mat1, Mat2 (order depends on implementation, but Blend is the root)
-        
+
         assert_eq!(data.spheres.len(), 1);
-        
+
         // Ensure we have at least 3 materials
         assert!(data.materials.len() >= 3);
-        
-        // The sphere points to the blend material. 
+
+        // The sphere points to the blend material.
         // NOTE: In current implementation add_material returns the index of the added material.
-        // If recursive, children added first? 
+        // If recursive, children added first?
         let sphere_mat_idx = data.spheres[0].material_index as usize;
         let blend_gpu_mat = &data.materials[sphere_mat_idx];
-        
+
         // Check properties
         assert_eq!(blend_gpu_mat.mat_type, 4, "Blend material type should be 4"); // 4 is new type for Blend
         assert_eq!(blend_gpu_mat.blend_factor, 0.5);
-        
+
         let child1_idx = blend_gpu_mat.blend_indices[0];
         let child2_idx = blend_gpu_mat.blend_indices[1];
-        
+
         // Verify children are valid indices
         assert!(child1_idx < data.materials.len() as u32);
         assert!(child2_idx < data.materials.len() as u32);

@@ -2,7 +2,6 @@
 //! Some of these hittable objects are containers for other objects
 
 mod bvh;
-mod constant_medium;
 mod quad;
 mod sphere;
 mod triangle;
@@ -12,7 +11,6 @@ use crate::geo::Ray;
 use crate::geo::vec3::Vec3;
 pub use crate::hittable::bvh::Bvh;
 pub(crate) use crate::hittable::bvh::BvhItem;
-pub use crate::hittable::constant_medium::ConstantMedium;
 pub use crate::hittable::quad::Quad;
 pub use crate::hittable::sphere::Sphere;
 pub use crate::hittable::triangle::Triangle;
@@ -50,8 +48,6 @@ pub trait Hittable {
 pub enum Hittables {
     /// [`Hittable`] of the type [`Sphere`]
     Sphere,
-    /// [`Hittable`] of the type [`ConstantMedium`]
-    ConstantMedium,
     /// [`Hittable`] of the type [`Quad`]
     Quad,
     /// [`Hittable`] of the type [`Triangle`]
