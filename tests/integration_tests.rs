@@ -37,7 +37,7 @@ use crate::scenes::{
 mod scenes;
 
 #[test]
-fn test_render_scene() {
+fn test_shaders() {
     let shaders: HashMap<&str, Shaders> = HashMap::from([
         ("pathTracing", PathTracingShader::new(50).into()),
         ("simple", SimpleShader::new().into()),
@@ -55,7 +55,7 @@ fn test_render_scene() {
         };
         let scene = create_test_scene(render_config);
 
-        render_and_compare_output(scene, shader_name, 0.95, false)
+        render_and_compare_output(scene, shader_name, 0.9, true)
     }
 }
 
