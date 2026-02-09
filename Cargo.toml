@@ -36,7 +36,3 @@ criterion = "0.8.1"
 [[bench]]
 name = "solstrale_benchmark"
 harness = false
-
-[[bench]]
-name = "post_processing_benchmark"
-harness = false

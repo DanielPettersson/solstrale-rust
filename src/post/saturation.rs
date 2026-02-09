@@ -1,15 +1,10 @@
 //! Post-processor for applying saturation
 
-use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
 use crate::util::wgpu_util::{
-    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
-    get_result_from_buffer, get_wgpu_device_and_queue, storage_binding,
+    bind_group, bind_group_layout, compute_pipeline, get_wgpu_device_and_queue, storage_binding,
 };
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
 use std::error::Error;
-use wgpu::BufferUsages;
 
 #[derive(Clone)]
 /// Applies a saturation effect on the pixel colors
@@ -19,15 +14,10 @@ pub struct SaturationPostProcessor {
 
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
-
-    input_pixels_buffer: Option<wgpu::Buffer>,
-    output_pixels_buffer: Option<wgpu::Buffer>,
-    download_buffer: Option<wgpu::Buffer>,
-    bind_group: Option<wgpu::BindGroup>,
 }
 
 impl SaturationPostProcessor {
-    /// Create a new saturation post-processor
+    /// Creates new saturation post-processor
     /// # Arguments
     /// * `saturation_factor` Saturation of the image. From -1 (black and white) to 1 (fully saturated)
     pub fn new(saturation_factor: f64) -> Result<Self, simple_error::SimpleError> {
@@ -43,7 +33,7 @@ impl SaturationPostProcessor {
 
         let bind_group_layout = bind_group_layout(
             device,
-            &[storage_binding(true, 16), storage_binding(false, 16)],
+            &[storage_binding(false, 16)],
         );
 
         let pipeline = compute_pipeline(
@@ -58,102 +48,33 @@ impl SaturationPostProcessor {
             height: 0,
             bind_group_layout,
             pipeline,
-            input_pixels_buffer: None,
-            output_pixels_buffer: None,
-            download_buffer: None,
-            bind_group: None,
         })
     }
 }
 
 impl PostProcessor for SaturationPostProcessor {
-    fn initialize(&mut self, width: u32, height: u32) {
-        if self.width == width && self.height == height && self.input_pixels_buffer.is_some() {
-            return;
-        }
-
+    fn initialize(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+    }
 
+    fn post_process(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        buffer: &wgpu::Buffer,
+        _num_samples: u32,
+    ) -> Result<(), Box<dyn Error>> {
         let (device, _) = get_wgpu_device_and_queue();
-        let size = (width * height * 16) as u64;
-
-        let input_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let output_pixels_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
 
         let bind_group = bind_group(
             device,
             &self.bind_group_layout,
-            &[
-                wgpu::BindingResource::Buffer(input_pixels_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(output_pixels_buffer.as_entire_buffer_binding()),
-            ],
+            &[wgpu::BindingResource::Buffer(buffer.as_entire_buffer_binding())],
         );
 
-        self.input_pixels_buffer = Some(input_pixels_buffer);
-        self.output_pixels_buffer = Some(output_pixels_buffer);
-        self.download_buffer = Some(download_buffer);
-        self.bind_group = Some(bind_group);
-    }
+        let workgroup_count = (self.width * self.height).div_ceil(64);
+        crate::util::wgpu_util::add_compute_pass(encoder, &self.pipeline, &bind_group, workgroup_count);
 
-    #[allow(clippy::needless_range_loop)]
-    fn intermediate_post_process(
-        &self,
-        pixel_colors: &[Vec3],
-        _num_samples: u32,
-    ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        let input_pixels: Vec<[f32; 4]> = pixel_colors.par_iter().map(|p| p.into()).collect();
-
-        let (device, queue) = get_wgpu_device_and_queue();
-
-        let input_pixels_buffer = self.input_pixels_buffer.as_ref().ok_or("Not initialized")?;
-        let output_pixels_buffer = self
-            .output_pixels_buffer
-            .as_ref()
-            .ok_or("Not initialized")?;
-        let download_buffer = self.download_buffer.as_ref().ok_or("Not initialized")?;
-        let bind_group = self.bind_group.as_ref().ok_or("Not initialized")?;
-
-        queue.write_buffer(input_pixels_buffer, 0, bytemuck::cast_slice(&input_pixels));
-
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-        let workgroup_count = pixel_colors.len().div_ceil(64) as u32;
-        add_compute_pass(&mut encoder, &self.pipeline, bind_group, workgroup_count);
-        add_buffer_copy(&mut encoder, output_pixels_buffer, download_buffer);
-
-        let command_buffer = encoder.finish();
-        queue.submit([command_buffer]);
-
-        let result = get_result_from_buffer::<[f32; 4]>(device, download_buffer);
-
-        Ok(result.par_iter().map(|d| d.into()).collect())
-    }
-
-    fn width(&self) -> u32 {
-        self.width
-    }
-
-    fn height(&self) -> u32 {
-        self.height
+        Ok(())
     }
 }

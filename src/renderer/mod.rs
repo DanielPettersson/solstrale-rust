@@ -13,7 +13,7 @@ use crate::geo::vec3::{Vec3, ZERO_VECTOR};
 use crate::geo::{Ray, Uv};
 use crate::hittable::{Hittable, Hittables};
 use crate::material::AttenuatedColor;
-use crate::post::{NopPostProcessor, PostProcessor, PostProcessors};
+use crate::post::{pixel_colors_to_rgb_image, PostProcessors};
 use crate::random::random_normal_float;
 use crate::renderer::shader::PathTracingShader;
 use crate::util::interval::RAY_INTERVAL;
@@ -125,7 +125,7 @@ pub(crate) struct RayColorResult {
 
 impl Renderer {
     /// Creates a new renderer given a scene and channels for communicating with the caller
-    pub fn new(mut scene: Scene) -> Result<Renderer, Box<dyn Error>> {
+    pub fn new(scene: Scene) -> Result<Renderer, Box<dyn Error>> {
         let light_list = scene.world.get_lights();
 
         if light_list.is_empty() {
@@ -133,23 +133,6 @@ impl Renderer {
                 "Scene should have at least one light",
             )));
         }
-
-        if scene.render_config.post_processors.is_empty() {
-            scene
-                .render_config
-                .post_processors
-                .push(NopPostProcessor::new().into());
-        }
-        scene
-            .render_config
-            .post_processors
-            .iter_mut()
-            .for_each(|p| {
-                p.initialize(
-                    scene.render_config.width as u32,
-                    scene.render_config.height as u32,
-                )
-            });
 
         Ok(Renderer {
             scene,
@@ -243,26 +226,18 @@ impl Renderer {
                     ) {
                     last_image_generated_time = now;
 
-                    if let Some((last_post_processor, intermediate_post_processors)) =
-                        self.scene.render_config.post_processors.split_last()
-                    {
-                        if abort.try_recv().is_ok() {
-                            return Ok(());
-                        }
-
-                        let mut intermediate_pixel_colors = pixel_colors.lock().unwrap().clone();
-
-                        for ipp in intermediate_post_processors {
-                            let processed_pixel_colors =
-                                ipp.intermediate_post_process(&intermediate_pixel_colors, sample)?;
-
-                            intermediate_pixel_colors = processed_pixel_colors;
-                        }
-
-                        Some(last_post_processor.post_process(&intermediate_pixel_colors, sample)?)
-                    } else {
-                        None
+                    if abort.try_recv().is_ok() {
+                        return Ok(());
                     }
+
+                    let intermediate_pixel_colors = pixel_colors.lock().unwrap().clone();
+
+                    Some(pixel_colors_to_rgb_image(
+                        intermediate_pixel_colors.as_slice(),
+                        image_width as u32,
+                        image_height as u32,
+                        samples_per_pixel,
+                    ))
                 } else {
                     None
                 };

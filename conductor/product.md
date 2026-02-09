@@ -12,7 +12,7 @@ To learn about Rust and WPGU by implementing a modern path tracing library
 - Deepen understanding of Rust's performance capabilities and the WGPU graphics API.
 
 ## Key Features
-- **Core Engine:** Hybrid Monte Carlo path tracing (CPU and WGPU-based GPU implementations) implementing global illumination, caustics, reflections, and refractions.
+- **Core Engine:** Hybrid Monte Carlo path tracing (CPU and WGPU-based GPU implementations) implementing global illumination, caustics, reflections, and refractions. Note: Advanced post-processing is exclusively supported via the GPU renderer.
 - **Model Support:** Efficient loading of OBJ models with full material support.
 - **Acceleration:** Multithreaded BVH (Bounding Volume Hierarchy) creation for optimized rendering performance.
 - **Advanced Post-Processing:**

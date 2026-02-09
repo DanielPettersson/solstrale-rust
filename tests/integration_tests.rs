@@ -1,5 +1,4 @@
 use std::default::Default;
-use std::error::Error;
 use std::ops::Deref;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -15,11 +14,9 @@ use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
-use solstrale::post::{BloomPostProcessor, PostProcessor, SaturationPostProcessor};
+use solstrale::post::{BloomPostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
-use solstrale::renderer::gpu_renderer::GpuRenderer;
-use solstrale::renderer::{RenderConfig, Renderer, Scene};
-use solstrale::util::rgb_color::rgb_to_vec3;
+use solstrale::renderer::{RenderConfig, Scene};
 
 use crate::scenes::{
     create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
@@ -40,7 +37,7 @@ fn test_scene() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene", 0.9, true)
+    render_and_compare_output(scene, "test_scene", 0.9)
 }
 
 #[test]
@@ -58,7 +55,7 @@ fn test_scene_bloom() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_bloom", 0.9, true)
+    render_and_compare_output(scene, "test_scene_bloom", 0.95)
 }
 
 #[test]
@@ -72,7 +69,7 @@ fn test_scene_saturation() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_sat", 0.9, true)
+    render_and_compare_output(scene, "test_scene_sat", 0.95)
 }
 
 #[test]
@@ -91,7 +88,7 @@ fn test_scene_bloom_and_saturation() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_bloom_sat", 0.9, true)
+    render_and_compare_output(scene, "test_scene_bloom_sat", 0.95)
 }
 
 #[test]
@@ -103,7 +100,7 @@ fn test_render_obj_with_textures() {
     };
     let scene = create_obj_scene(render_config);
 
-    render_and_compare_output(scene, "obj", 0.95, true);
+    render_and_compare_output(scene, "obj", 0.95);
 }
 
 #[test]
@@ -115,7 +112,7 @@ fn test_render_obj_with_default_material() {
     };
     let scene = create_obj_with_box(render_config, "resources/obj/", "box.obj");
 
-    render_and_compare_output(scene, "obj_default", 0.95, true);
+    render_and_compare_output(scene, "obj_default", 0.95);
 }
 
 #[test]
@@ -127,7 +124,7 @@ fn test_render_obj_with_diffuse_material() {
     };
     let scene = create_obj_with_box(render_config, "resources/obj/", "boxWithMat.obj");
 
-    render_and_compare_output(scene, "obj_diffuse", 0.95, true);
+    render_and_compare_output(scene, "obj_diffuse", 0.95);
 }
 
 #[test]
@@ -139,7 +136,7 @@ fn test_render_uv_mapping() {
     };
     let scene = create_uv_scene(render_config);
 
-    render_and_compare_output(scene, "uv", 0.95, true);
+    render_and_compare_output(scene, "uv", 0.95);
 }
 
 #[test]
@@ -151,7 +148,7 @@ fn test_render_normal_mapping_disabled() {
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), false);
-    render_and_compare_output(scene, "normal_mapping_disabled", 0.95, true);
+    render_and_compare_output(scene, "normal_mapping_disabled", 0.95);
 }
 
 #[test]
@@ -163,7 +160,7 @@ fn test_render_normal_mapping_1() {
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), true);
-    render_and_compare_output(scene, "normal_mapping_1", 0.95, true);
+    render_and_compare_output(scene, "normal_mapping_1", 0.95);
 }
 
 #[test]
@@ -175,7 +172,7 @@ fn test_render_normal_mapping_2() {
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(-30., 30., 30.), true);
-    render_and_compare_output(scene, "normal_mapping_2", 0.95, true);
+    render_and_compare_output(scene, "normal_mapping_2", 0.95);
 }
 
 #[test]
@@ -186,7 +183,7 @@ fn test_render_normal_mapping_sphere_1() {
         ..Default::default()
     };
     let scene = create_normal_mapping_sphere_scene(render_config, Vec3::new(-30., 30., 30.));
-    render_and_compare_output(scene, "normal_mapping_sphere_1", 0.97, true);
+    render_and_compare_output(scene, "normal_mapping_sphere_1", 0.97);
 }
 
 #[test]
@@ -197,7 +194,7 @@ fn test_render_normal_mapping_sphere_2() {
         ..Default::default()
     };
     let scene = create_normal_mapping_sphere_scene(render_config, Vec3::new(30., 30., 30.));
-    render_and_compare_output(scene, "normal_mapping_sphere_2", 0.97, true);
+    render_and_compare_output(scene, "normal_mapping_sphere_2", 0.97);
 }
 
 #[test]
@@ -229,7 +226,7 @@ fn test_render_obj_with_normal_map() {
     };
     let scene = create_obj_with_triangle(render_config, "resources/obj/", "triWithNormalMap.obj");
 
-    render_and_compare_output(scene, "obj_normal_map", 0.95, true);
+    render_and_compare_output(scene, "obj_normal_map", 0.95);
 }
 
 #[test]
@@ -241,7 +238,7 @@ fn test_render_obj_with_height_map() {
     };
     let scene = create_obj_with_triangle(render_config, "resources/obj/", "triWithHeightMap.obj");
 
-    render_and_compare_output(scene, "obj_height_map", 0.95, true);
+    render_and_compare_output(scene, "obj_height_map", 0.95);
 }
 
 #[test]
@@ -261,53 +258,8 @@ fn test_render_light_attenuation() {
                 attenuation_half_length.map_or(-1., |a| a)
             ),
             0.95,
-            true,
         );
     }
-}
-
-#[test]
-fn test_bloom() -> Result<(), Box<dyn Error>> {
-    let mut post = BloomPostProcessor::new(0.2, None, None)?;
-    let bloom_image = image::open("resources/textures/bloom.png")?.into_rgb8();
-    let w = bloom_image.width();
-    let h = bloom_image.height();
-    let pixel_colors = image_to_vec3(bloom_image);
-
-    post.initialize(w, h);
-
-    let res = post.post_process(&pixel_colors, 1)?;
-
-    compare_output("bloom", &res, 0.95);
-
-    let res = post.post_process(&pixel_colors, 1)?;
-
-    compare_output("bloom", &res, 0.95);
-
-    Ok(())
-}
-
-#[test]
-fn test_saturation() -> Result<(), Box<dyn Error>> {
-    for saturation_factor in [-1., 0., 1.] {
-        let mut post = SaturationPostProcessor::new(saturation_factor)?;
-        let saturation_image = image::open("resources/textures/bloom.png")?.into_rgb8();
-        let w = saturation_image.width();
-        let h = saturation_image.height();
-        let pixel_colors = image_to_vec3(saturation_image);
-
-        post.initialize(w, h);
-
-        let res = post.post_process(&pixel_colors, 1)?;
-
-        compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
-
-        let res = post.post_process(&pixel_colors, 1)?;
-
-        compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
-    }
-
-    Ok(())
 }
 
 #[test]
@@ -327,7 +279,7 @@ fn test_aabb_of_rotated_quad() {
             rotation.deref(),
         );
 
-        render_and_compare_output(scene, &format!("quad_rotated{}", i), 0.95, true);
+        render_and_compare_output(scene, &format!("quad_rotated{}", i), 0.95);
     }
 }
 
@@ -343,12 +295,7 @@ fn test_blended_materials() {
             blend_factor,
         );
 
-        render_and_compare_output(
-            scene,
-            &format!("blended_materials_{}", blend_factor),
-            0.95,
-            true,
-        );
+        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), 0.95);
     }
 }
 
@@ -360,7 +307,7 @@ fn test_texture_map() {
         ..RenderConfig::default()
     });
 
-    render_and_compare_output(scene, "texture_map", 0.95, true);
+    render_and_compare_output(scene, "texture_map", 0.95);
 }
 
 #[test]
@@ -392,7 +339,7 @@ fn test_gpu_scene_sphere() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_sphere", 0.95, true);
+    render_and_compare_output(scene, "gpu_sphere", 0.95);
 }
 
 #[test]
@@ -434,7 +381,7 @@ fn test_gpu_scene_box() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_box", 0.95, true);
+    render_and_compare_output(scene, "gpu_box", 0.95);
 }
 
 #[test]
@@ -468,7 +415,7 @@ fn test_gpu_scene_sphere2() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_sphere2", 0.95, true);
+    render_and_compare_output(scene, "gpu_sphere2", 0.95);
 }
 
 #[test]
@@ -522,7 +469,7 @@ fn test_gpu_scene_sphere_quad_and_triangle() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_sphere_quad_and_triangle", 0.95, true);
+    render_and_compare_output(scene, "gpu_sphere_quad_and_triangle", 0.95);
 }
 
 #[test]
@@ -585,7 +532,7 @@ fn test_gpu_scene_triangle3() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_triangle3", 0.95, true);
+    render_and_compare_output(scene, "gpu_triangle3", 0.95);
 }
 
 #[test]
@@ -626,20 +573,10 @@ fn test_gpu_scene_nested_bvh() {
         render_config,
     };
 
-    render_and_compare_output(scene, "gpu_nested_bvh", 0.95, true);
+    render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
 }
 
-fn image_to_vec3(image: RgbImage) -> Vec<Vec3> {
-    let mut ret = Vec::with_capacity((image.width() * image.height()) as usize);
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            ret.push(rgb_to_vec3(image.get_pixel(x, y)));
-        }
-    }
-    ret
-}
-
-fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64, gpu: bool) {
+fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
     let (output_sender, output_receiver) = channel();
     let (_, abort_receiver) = channel();
 
@@ -647,17 +584,7 @@ fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64
     let height = scene.render_config.height as u32;
 
     thread::spawn(move || {
-        if gpu {
-            GpuRenderer::new(scene)
-                .unwrap()
-                .render(&output_sender, &abort_receiver)
-                .unwrap();
-        } else {
-            Renderer::new(scene)
-                .unwrap()
-                .render(&output_sender, &abort_receiver)
-                .unwrap();
-        }
+        ray_trace(scene, &output_sender, &abort_receiver).unwrap();
     });
 
     let mut image = RgbImage::new(width, height);

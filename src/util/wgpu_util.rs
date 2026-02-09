@@ -26,7 +26,8 @@ pub(crate) struct BindingInfo {
 static DEVICE_AND_QUEUE: Lazy<(wgpu::Device, wgpu::Queue)> =
     Lazy::new(|| create_wgpu_device_and_queue().expect("Failed to create device and queue"));
 
-pub(crate) fn get_wgpu_device_and_queue() -> &'static (wgpu::Device, wgpu::Queue) {
+/// Returns the global WGPU device and queue
+pub fn get_wgpu_device_and_queue() -> &'static (wgpu::Device, wgpu::Queue) {
     &DEVICE_AND_QUEUE
 }
 
@@ -58,7 +59,8 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
     .map_err(|e| SimpleError::new(format!("Failed to create device: {}", e)).into())
 }
 
-pub(crate) fn get_result_from_buffer<T: AnyBitPattern>(
+/// Reads the content of a buffer from the GPU
+pub fn get_result_from_buffer<T: AnyBitPattern>(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
 ) -> Vec<T> {
