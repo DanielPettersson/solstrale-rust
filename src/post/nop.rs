@@ -1,4 +1,3 @@
-use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
 use std::error::Error;
 
@@ -17,23 +16,17 @@ impl NopPostProcessor {
 }
 
 impl PostProcessor for NopPostProcessor {
-    fn initialize(&mut self, width: u32, height: u32) {
+    fn initialize(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, width: u32, height: u32) {
         self.width = width;
         self.height = height;
     }
 
     fn post_process(
         &self,
-        pixel_colors: &[Vec3],
+        _encoder: &mut wgpu::CommandEncoder,
+        _output_buffer: &wgpu::Buffer,
         _num_samples: u32,
-    ) -> Result<Vec<Vec3>, Box<dyn Error>> {
-        Ok(Vec::from(pixel_colors))
-    }
-
-    fn width(&self) -> u32 {
-        self.width
-    }
-    fn height(&self) -> u32 {
-        self.height
+    ) -> Result<(), Box<dyn Error>> {
+        Ok(())
     }
 }

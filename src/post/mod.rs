@@ -17,20 +17,15 @@ pub use crate::post::saturation::SaturationPostProcessor;
 #[enum_dispatch]
 pub trait PostProcessor {
     /// Does post-construct initialization for the post-processor when width and height are known
-    fn initialize(&mut self, width: u32, height: u32);
+    fn initialize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32);
 
     /// Execute final postprocessing of the rendered image
     fn post_process(
         &self,
-        pixel_colors: &[Vec3],
+        encoder: &mut wgpu::CommandEncoder,
+        output_buffer: &wgpu::Buffer,
         num_samples: u32,
-    ) -> Result<Vec<Vec3>, Box<dyn Error>>;
-
-    /// Returns the width of the image
-    fn width(&self) -> u32;
-
-    /// Returns the height of the image
-    fn height(&self) -> u32;
+    ) -> Result<(), Box<dyn Error>>;
 }
 
 #[enum_dispatch(PostProcessor)]
