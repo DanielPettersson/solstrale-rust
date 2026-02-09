@@ -270,47 +270,81 @@ fn test_render_light_attenuation() {
 
 #[test]
 fn test_bloom() -> Result<(), Box<dyn Error>> {
-    /*
     let mut post = BloomPostProcessor::new(0.2, None, None)?;
+    let (device, queue) = solstrale::util::wgpu_util::get_wgpu_device_and_queue();
+
     let bloom_image = image::open("resources/textures/bloom.png")?.into_rgb8();
     let w = bloom_image.width();
     let h = bloom_image.height();
     let pixel_colors = image_to_vec3(bloom_image);
+    let pixel_data: Vec<[f32; 4]> = pixel_colors.iter().map(|p| p.into()).collect();
 
-    post.initialize(w, h);
+    post.initialize(device, queue, w, h);
 
-    let res = post.post_process(&pixel_colors, 1)?;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (w * h * 16) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&pixel_data));
+
+    let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (w * h * 16) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    post.post_process(&mut encoder, &buffer, 1)?;
+    encoder.copy_buffer_to_buffer(&buffer, 0, &download_buffer, 0, (w * h * 16) as u64);
+    queue.submit([encoder.finish()]);
+
+    let res_data: Vec<[f32; 4]> = solstrale::util::wgpu_util::get_result_from_buffer(device, &download_buffer);
+    let res: Vec<Vec3> = res_data.iter().map(|d| d.into()).collect();
 
     compare_output("bloom", &pixel_colors_to_rgb_image(&res, w, h, 1), 0.95);
 
-    let res = post.post_process(&pixel_colors, 1)?;
-
-    compare_output("bloom", &pixel_colors_to_rgb_image(&res, w, h, 1), 0.95);
-     */
     Ok(())
 }
 
 #[test]
 fn test_saturation() -> Result<(), Box<dyn Error>> {
-    /*
+    let (device, queue) = solstrale::util::wgpu_util::get_wgpu_device_and_queue();
+
     for saturation_factor in [-1., 0., 1.] {
         let mut post = SaturationPostProcessor::new(saturation_factor)?;
         let saturation_image = image::open("resources/textures/bloom.png")?.into_rgb8();
         let w = saturation_image.width();
         let h = saturation_image.height();
         let pixel_colors = image_to_vec3(saturation_image);
+        let pixel_data: Vec<[f32; 4]> = pixel_colors.iter().map(|p| p.into()).collect();
 
-        post.initialize(w, h);
+        post.initialize(device, queue, w, h);
 
-        let res = post.post_process(&pixel_colors, 1)?;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (w * h * 16) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&pixel_data));
 
-        compare_output(
-            &format!("saturation_{}", saturation_factor),
-            &pixel_colors_to_rgb_image(&res, w, h, 1),
-            0.95,
-        );
+        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (w * h * 16) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
-        let res = post.post_process(&pixel_colors, 1)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        post.post_process(&mut encoder, &buffer, 1)?;
+        encoder.copy_buffer_to_buffer(&buffer, 0, &download_buffer, 0, (w * h * 16) as u64);
+        queue.submit([encoder.finish()]);
+
+        let res_data: Vec<[f32; 4]> = solstrale::util::wgpu_util::get_result_from_buffer(device, &download_buffer);
+        let res: Vec<Vec3> = res_data.iter().map(|d| d.into()).collect();
 
         compare_output(
             &format!("saturation_{}", saturation_factor),
@@ -318,7 +352,7 @@ fn test_saturation() -> Result<(), Box<dyn Error>> {
             0.95,
         );
     }
-     */
+
     Ok(())
 }
 
