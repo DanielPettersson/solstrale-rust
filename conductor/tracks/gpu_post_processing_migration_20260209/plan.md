@@ -2,7 +2,7 @@
 
 Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU using `wgpu::Buffer`, refactor the `PostProcessor` trait, and remove post-processing from the CPU renderer.
 
-## Phase 1: CPU Renderer Cleanup
+## Phase 1: CPU Renderer Cleanup [checkpoint: 0977744]
 - [x] Task: Remove post-processing logic from `src/renderer/mod.rs`. aa2fa9a
     - [x] Update `Renderer::new` to remove post-processor initialization.
     - [x] Update `Renderer::render` to remove the post-processing loop.
