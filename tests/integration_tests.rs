@@ -15,7 +15,9 @@ use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
-use solstrale::post::{BloomPostProcessor, PostProcessor, SaturationPostProcessor};
+use solstrale::post::{
+    BloomPostProcessor, PostProcessor, SaturationPostProcessor, pixel_colors_to_rgb_image,
+};
 use solstrale::ray_trace;
 use solstrale::renderer::gpu_renderer::GpuRenderer;
 use solstrale::renderer::{RenderConfig, Renderer, Scene};
@@ -278,11 +280,11 @@ fn test_bloom() -> Result<(), Box<dyn Error>> {
 
     let res = post.post_process(&pixel_colors, 1)?;
 
-    compare_output("bloom", &res, 0.95);
+    compare_output("bloom", &pixel_colors_to_rgb_image(&res, w, h, 1), 0.95);
 
     let res = post.post_process(&pixel_colors, 1)?;
 
-    compare_output("bloom", &res, 0.95);
+    compare_output("bloom", &pixel_colors_to_rgb_image(&res, w, h, 1), 0.95);
 
     Ok(())
 }
@@ -300,11 +302,19 @@ fn test_saturation() -> Result<(), Box<dyn Error>> {
 
         let res = post.post_process(&pixel_colors, 1)?;
 
-        compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
+        compare_output(
+            &format!("saturation_{}", saturation_factor),
+            &pixel_colors_to_rgb_image(&res, w, h, 1),
+            0.95,
+        );
 
         let res = post.post_process(&pixel_colors, 1)?;
 
-        compare_output(&format!("saturation_{}", saturation_factor), &res, 0.95);
+        compare_output(
+            &format!("saturation_{}", saturation_factor),
+            &pixel_colors_to_rgb_image(&res, w, h, 1),
+            0.95,
+        );
     }
 
     Ok(())

@@ -27,7 +27,7 @@ pub struct SaturationPostProcessor {
 }
 
 impl SaturationPostProcessor {
-    /// Create a new saturation post-processor
+    /// Creates new saturation post-processor
     /// # Arguments
     /// * `saturation_factor` Saturation of the image. From -1 (black and white) to 1 (fully saturated)
     pub fn new(saturation_factor: f64) -> Result<Self, simple_error::SimpleError> {
@@ -115,7 +115,7 @@ impl PostProcessor for SaturationPostProcessor {
     }
 
     #[allow(clippy::needless_range_loop)]
-    fn intermediate_post_process(
+    fn post_process(
         &self,
         pixel_colors: &[Vec3],
         _num_samples: u32,

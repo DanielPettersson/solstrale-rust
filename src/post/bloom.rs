@@ -254,7 +254,7 @@ impl PostProcessor for BloomPostProcessor {
     }
 
     #[allow(clippy::needless_range_loop)]
-    fn intermediate_post_process(
+    fn post_process(
         &self,
         pixel_colors: &[Vec3],
         num_samples: u32,

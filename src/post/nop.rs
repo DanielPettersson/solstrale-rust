@@ -22,7 +22,7 @@ impl PostProcessor for NopPostProcessor {
         self.height = height;
     }
 
-    fn intermediate_post_process(
+    fn post_process(
         &self,
         pixel_colors: &[Vec3],
         _num_samples: u32,

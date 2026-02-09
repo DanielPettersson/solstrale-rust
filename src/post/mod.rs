@@ -16,26 +16,11 @@ pub use crate::post::saturation::SaturationPostProcessor;
 /// Responsible for taking the rendered image and transforming it
 #[enum_dispatch]
 pub trait PostProcessor {
-    /// Does post-construct initialization for the post-processor when with and height are known
+    /// Does post-construct initialization for the post-processor when width and height are known
     fn initialize(&mut self, width: u32, height: u32);
 
     /// Execute final postprocessing of the rendered image
     fn post_process(
-        &self,
-        pixel_colors: &[Vec3],
-        num_samples: u32,
-    ) -> Result<image::RgbImage, Box<dyn Error>> {
-        let pixel_colors = self.intermediate_post_process(pixel_colors, num_samples)?;
-        Ok(pixel_colors_to_rgb_image(
-            &pixel_colors,
-            self.width(),
-            self.height(),
-            num_samples,
-        ))
-    }
-
-    /// Execute intermediate postprocessing of the rendered image
-    fn intermediate_post_process(
         &self,
         pixel_colors: &[Vec3],
         num_samples: u32,
@@ -60,7 +45,8 @@ pub enum PostProcessors {
     NopPostProcessor,
 }
 
-fn pixel_colors_to_rgb_image(
+/// Converts a vector of pixel colors to an image
+pub fn pixel_colors_to_rgb_image(
     pixel_colors: &[Vec3],
     width: u32,
     height: u32,
