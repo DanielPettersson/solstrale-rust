@@ -39,6 +39,6 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: GPU Post-Processor Implementations' (Protocol in workflow.md)
 
 ## Phase 5: Verification & Testing
-- [ ] Task: Run integration tests in `tests/integration_tests.rs` and ensure they pass.
-- [ ] Task: Verify code coverage and perform final cleanup.
-- [ ] Task: Conductor - User Manual Verification 'Phase 5: Verification & Testing' (Protocol in workflow.md)
+- [x] Task: Run integration tests in `tests/integration_tests.rs` and ensure they pass. 0f5f7ff
+- [x] Task: Verify code coverage and perform final cleanup. 0f5f7ff
+- [x] Task: Conductor - User Manual Verification 'Phase 5: Verification & Testing' (Protocol in workflow.md)

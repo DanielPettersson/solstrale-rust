@@ -36,9 +36,12 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 fn get_index(curr_index: u32, dx: i32, dy: i32, num_pixels: u32) -> u32 {
-    let new_index = i32(curr_index) + dx + dy * i32(width);
-    if (new_index < 0 || new_index >= i32(num_pixels)) {
-        return curr_index;
-    }
-    return u32(new_index);
+    let x = i32(curr_index % width);
+    let y = i32(curr_index / width);
+    let height = i32(num_pixels / width);
+    
+    let nx = clamp(x + dx, 0, i32(width) - 1);
+    let ny = clamp(y + dy, 0, height - 1);
+    
+    return u32(nx + ny * i32(width));
 }

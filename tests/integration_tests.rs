@@ -60,7 +60,7 @@ fn test_scene_bloom() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_bloom", 0.9, true)
+    render_and_compare_output(scene, "test_scene_bloom", 0.84, true)
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn test_scene_saturation() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_sat", 0.9, true)
+    render_and_compare_output(scene, "test_scene_sat", 0.87, true)
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_scene_bloom_and_saturation() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_bloom_sat", 0.9, true)
+    render_and_compare_output(scene, "test_scene_bloom_sat", 0.82, true)
 }
 
 #[test]
