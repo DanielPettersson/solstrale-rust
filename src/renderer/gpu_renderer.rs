@@ -12,6 +12,7 @@ use crate::util::wgpu_util::{
     texture_binding, uniform_binding,
 };
 use image::{DynamicImage, Rgb, RgbImage};
+use simple_error::SimpleError;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, SystemTime};
@@ -52,6 +53,12 @@ pub struct GpuRenderer {
 impl GpuRenderer {
     /// Creates a new GPU renderer given a scene
     pub fn new(scene: Scene) -> Result<Self, Box<dyn Error>> {
+        if scene.world.get_lights().is_empty() {
+            return Err(Box::new(SimpleError::new(
+                "Scene should have at least one light",
+            )));
+        }
+
         let width = scene.render_config.width as u32;
         let height = scene.render_config.height as u32;
         let (device, queue) = get_wgpu_device_and_queue();
