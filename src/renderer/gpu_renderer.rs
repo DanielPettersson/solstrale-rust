@@ -387,7 +387,11 @@ impl GpuRenderer {
                 for p in &self.post_processors {
                     p.post_process(&mut encoder, &self.post_process_buffer, 1)?;
                 }
-                add_buffer_copy(&mut encoder, &self.post_process_buffer, &self.download_buffer);
+                add_buffer_copy(
+                    &mut encoder,
+                    &self.post_process_buffer,
+                    &self.download_buffer,
+                );
             }
 
             let command_buffer = encoder.finish();

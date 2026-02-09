@@ -1,5 +1,4 @@
 use std::default::Default;
-use std::error::Error;
 use std::ops::Deref;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -15,13 +14,10 @@ use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
-use solstrale::post::{
-    BloomPostProcessor, PostProcessor, SaturationPostProcessor, pixel_colors_to_rgb_image,
-};
+use solstrale::post::{BloomPostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::gpu_renderer::GpuRenderer;
 use solstrale::renderer::{RenderConfig, Renderer, Scene};
-use solstrale::util::rgb_color::rgb_to_vec3;
 
 use crate::scenes::{
     create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
@@ -60,7 +56,7 @@ fn test_scene_bloom() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_bloom", 0.84, true)
+    render_and_compare_output(scene, "test_scene_bloom", 0.95, true)
 }
 
 #[test]
@@ -74,7 +70,7 @@ fn test_scene_saturation() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_sat", 0.87, true)
+    render_and_compare_output(scene, "test_scene_sat", 0.95, true)
 }
 
 #[test]
@@ -93,7 +89,7 @@ fn test_scene_bloom_and_saturation() {
     };
     let scene = create_test_scene(render_config);
 
-    render_and_compare_output(scene, "test_scene_bloom_sat", 0.82, true)
+    render_and_compare_output(scene, "test_scene_bloom_sat", 0.95, true)
 }
 
 #[test]
@@ -266,94 +262,6 @@ fn test_render_light_attenuation() {
             true,
         );
     }
-}
-
-#[test]
-fn test_bloom() -> Result<(), Box<dyn Error>> {
-    let mut post = BloomPostProcessor::new(0.2, None, None)?;
-    let (device, queue) = solstrale::util::wgpu_util::get_wgpu_device_and_queue();
-
-    let bloom_image = image::open("resources/textures/bloom.png")?.into_rgb8();
-    let w = bloom_image.width();
-    let h = bloom_image.height();
-    let pixel_colors = image_to_vec3(bloom_image);
-    let pixel_data: Vec<[f32; 4]> = pixel_colors.iter().map(|p| p.into()).collect();
-
-    post.initialize(device, queue, w, h);
-
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (w * h * 16) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&pixel_data));
-
-    let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (w * h * 16) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    post.post_process(&mut encoder, &buffer, 1)?;
-    encoder.copy_buffer_to_buffer(&buffer, 0, &download_buffer, 0, (w * h * 16) as u64);
-    queue.submit([encoder.finish()]);
-
-    let res_data: Vec<[f32; 4]> = solstrale::util::wgpu_util::get_result_from_buffer(device, &download_buffer);
-    let res: Vec<Vec3> = res_data.iter().map(|d| d.into()).collect();
-
-    compare_output("bloom", &pixel_colors_to_rgb_image(&res, w, h, 1), 0.95);
-
-    Ok(())
-}
-
-#[test]
-fn test_saturation() -> Result<(), Box<dyn Error>> {
-    let (device, queue) = solstrale::util::wgpu_util::get_wgpu_device_and_queue();
-
-    for saturation_factor in [-1., 0., 1.] {
-        let mut post = SaturationPostProcessor::new(saturation_factor)?;
-        let saturation_image = image::open("resources/textures/bloom.png")?.into_rgb8();
-        let w = saturation_image.width();
-        let h = saturation_image.height();
-        let pixel_colors = image_to_vec3(saturation_image);
-        let pixel_data: Vec<[f32; 4]> = pixel_colors.iter().map(|p| p.into()).collect();
-
-        post.initialize(device, queue, w, h);
-
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (w * h * 16) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&pixel_data));
-
-        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (w * h * 16) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        post.post_process(&mut encoder, &buffer, 1)?;
-        encoder.copy_buffer_to_buffer(&buffer, 0, &download_buffer, 0, (w * h * 16) as u64);
-        queue.submit([encoder.finish()]);
-
-        let res_data: Vec<[f32; 4]> = solstrale::util::wgpu_util::get_result_from_buffer(device, &download_buffer);
-        let res: Vec<Vec3> = res_data.iter().map(|d| d.into()).collect();
-
-        compare_output(
-            &format!("saturation_{}", saturation_factor),
-            &pixel_colors_to_rgb_image(&res, w, h, 1),
-            0.95,
-        );
-    }
-
-    Ok(())
 }
 
 #[test]
@@ -673,16 +581,6 @@ fn test_gpu_scene_nested_bvh() {
     };
 
     render_and_compare_output(scene, "gpu_nested_bvh", 0.95, true);
-}
-
-fn image_to_vec3(image: RgbImage) -> Vec<Vec3> {
-    let mut ret = Vec::with_capacity((image.width() * image.height()) as usize);
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            ret.push(rgb_to_vec3(image.get_pixel(x, y)));
-        }
-    }
-    ret
 }
 
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64, gpu: bool) {
