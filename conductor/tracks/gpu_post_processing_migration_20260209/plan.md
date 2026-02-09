@@ -9,7 +9,7 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
     - [ ] Note: The CPU renderer will now only output raw path-traced images.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: CPU Renderer Cleanup' (Protocol in workflow.md)
 
-## Phase 2: Trait Refactoring
+## Phase 2: Trait Refactoring [checkpoint: 4e01828]
 - [x] Task: Update `PostProcessor` trait in `src/post/mod.rs` 207b407
     - [x] Change `initialize` to: `fn initialize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32)`
     - [x] Change `post_process` to: `fn post_process(&self, encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer, num_samples: u32) -> Result<(), Box<dyn Error>>`
