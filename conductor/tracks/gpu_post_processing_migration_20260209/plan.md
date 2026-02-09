@@ -19,12 +19,12 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Trait Refactoring' (Protocol in workflow.md)
 
 ## Phase 3: GPU Renderer Integration
-- [ ] Task: Update `GpuRenderer` struct in `src/renderer/gpu_renderer.rs` to store initialized post-processors.
-- [ ] Task: Update `GpuRenderer::new` to initialize post-processors using the provided `device` and `queue`.
-- [ ] Task: Update `GpuRenderer::render` to execute the post-processing chain.
-    - [ ] Call `post_process` on each configured post-processor before copying to the `download_buffer`.
-    - [ ] Note: Pass `1` as `num_samples` to post-processors because the GPU shader already averages colors.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: GPU Renderer Integration' (Protocol in workflow.md)
+- [x] Task: Update `GpuRenderer` struct in `src/renderer/gpu_renderer.rs` to store initialized post-processors. a1497fc
+- [x] Task: Update `GpuRenderer::new` to initialize post-processors using the provided `device` and `queue`. a1497fc
+- [x] Task: Update `GpuRenderer::render` to execute the post-processing chain. a1497fc
+    - [x] Call `post_process` on each configured post-processor before copying to the `download_buffer`.
+    - [x] Note: Pass `1` as `num_samples` to post-processors because the GPU shader already averages colors.
+- [x] Task: Conductor - User Manual Verification 'Phase 3: GPU Renderer Integration' (Protocol in workflow.md)
 
 ## Phase 4: GPU Post-Processor Implementations
 - [ ] Task: Implement `NopPostProcessor` in `src/post/nop.rs` with the new trait.
