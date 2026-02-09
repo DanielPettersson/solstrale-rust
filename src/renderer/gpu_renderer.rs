@@ -2,6 +2,7 @@
 
 use crate::camera::Camera;
 use crate::hittable::Hittable;
+use crate::post::PostProcessor;
 use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
 use crate::renderer::{RenderProgress, Scene};
@@ -26,6 +27,7 @@ pub struct GpuRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     output_buffer: wgpu::Buffer,
+    post_process_buffer: wgpu::Buffer,
     download_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
@@ -44,6 +46,7 @@ pub struct GpuRenderer {
     config_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     lights_buffer: wgpu::Buffer,
+    post_processors: Vec<crate::post::PostProcessors>,
 }
 
 impl GpuRenderer {
@@ -268,6 +271,13 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
 
+        let post_process_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Post Process Buffer"),
+            size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Download Buffer"),
             size,
@@ -293,6 +303,11 @@ impl GpuRenderer {
             ],
         );
 
+        let mut post_processors = scene.render_config.post_processors.clone();
+        for p in &mut post_processors {
+            p.initialize(device, queue, width, height);
+        }
+
         Ok(GpuRenderer {
             scene,
             width,
@@ -300,6 +315,7 @@ impl GpuRenderer {
             bind_group_layout,
             pipeline,
             output_buffer,
+            post_process_buffer,
             download_buffer,
             bind_group,
             nodes_buffer,
@@ -310,6 +326,7 @@ impl GpuRenderer {
             camera_buffer,
             config_buffer,
             lights_buffer,
+            post_processors,
         })
     }
 
@@ -366,7 +383,11 @@ impl GpuRenderer {
                 .should_generate_image(sample, samples_per_pixel, now, last_image_generated_time);
 
             if should_generate_image {
-                add_buffer_copy(&mut encoder, &self.output_buffer, &self.download_buffer);
+                add_buffer_copy(&mut encoder, &self.output_buffer, &self.post_process_buffer);
+                for p in &self.post_processors {
+                    p.post_process(&mut encoder, &self.post_process_buffer, 1)?;
+                }
+                add_buffer_copy(&mut encoder, &self.post_process_buffer, &self.download_buffer);
             }
 
             let command_buffer = encoder.finish();
