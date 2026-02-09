@@ -18,7 +18,7 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
 - [x] Task: Stub implementations in `src/post/bloom.rs`, `src/post/saturation.rs`, and `src/post/nop.rs` to fix compilation errors. 207b407
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Trait Refactoring' (Protocol in workflow.md)
 
-## Phase 3: GPU Renderer Integration
+## Phase 3: GPU Renderer Integration [checkpoint: fe79503]
 - [x] Task: Update `GpuRenderer` struct in `src/renderer/gpu_renderer.rs` to store initialized post-processors. a1497fc
 - [x] Task: Update `GpuRenderer::new` to initialize post-processors using the provided `device` and `queue`. a1497fc
 - [x] Task: Update `GpuRenderer::render` to execute the post-processing chain. a1497fc
