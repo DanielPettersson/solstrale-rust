@@ -27,14 +27,15 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
 - [x] Task: Conductor - User Manual Verification 'Phase 3: GPU Renderer Integration' (Protocol in workflow.md)
 
 ## Phase 4: GPU Post-Processor Implementations
-- [ ] Task: Implement `NopPostProcessor` in `src/post/nop.rs` with the new trait.
-- [ ] Task: Implement `SaturationPostProcessor` in `src/post/saturation.rs`.
-    - [ ] Remove CPU round-trip (no `pixel_colors` slice conversion).
-    - [ ] Record compute pass directly into the provided `encoder`.
-- [ ] Task: Implement `BloomPostProcessor` in `src/post/bloom.rs`.
-    - [ ] Remove CPU round-trip.
-    - [ ] Record all compute passes (filter, blur X/Y, add) into the provided `encoder`.
-    - [ ] Ensure threshold/intensity calculations account for the fact that `GpuRenderer` provides averaged colors.
+- [x] Task: Implement `NopPostProcessor` in `src/post/nop.rs` with the new trait. 207b407
+- [x] Task: Implement `SaturationPostProcessor` in `src/post/saturation.rs`. 207b407
+    - [x] Remove CPU round-trip (no `pixel_colors` slice conversion).
+    - [x] Record compute pass directly into the provided `encoder`.
+- [x] Task: Implement `BloomPostProcessor` in `src/post/bloom.rs`. 207b407
+    - [x] Remove CPU round-trip.
+    - [x] Record all compute passes (filter, blur X/Y, add) into the provided `encoder`.
+    - [x] Ensure threshold/intensity calculations account for the fact that `GpuRenderer` provides averaged colors.
+- [x] Task: Conductor - User Manual Verification 'Phase 4: GPU Post-Processor Implementations' (Protocol in workflow.md)
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: GPU Post-Processor Implementations' (Protocol in workflow.md)
 
 ## Phase 5: Verification & Testing
