@@ -26,12 +26,12 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
     - [x] Note: Pass `1` as `num_samples` to post-processors because the GPU shader already averages colors.
 - [x] Task: Conductor - User Manual Verification 'Phase 3: GPU Renderer Integration' (Protocol in workflow.md)
 
-## Phase 4: GPU Post-Processor Implementations
-- [x] Task: Implement `NopPostProcessor` in `src/post/nop.rs` with the new trait. 207b407
-- [x] Task: Implement `SaturationPostProcessor` in `src/post/saturation.rs`. 207b407
+## Phase 4: GPU Post-Processor Implementations [checkpoint: eca129a]
+- [x] Task: Implement `NopPostProcessor` in `src/post/nop.rs` with the new trait. 0f5f7ff
+- [x] Task: Implement `SaturationPostProcessor` in `src/post/saturation.rs`. 0f5f7ff
     - [x] Remove CPU round-trip (no `pixel_colors` slice conversion).
     - [x] Record compute pass directly into the provided `encoder`.
-- [x] Task: Implement `BloomPostProcessor` in `src/post/bloom.rs`. 207b407
+- [x] Task: Implement `BloomPostProcessor` in `src/post/bloom.rs`. 0f5f7ff
     - [x] Remove CPU round-trip.
     - [x] Record all compute passes (filter, blur X/Y, add) into the provided `encoder`.
     - [x] Ensure threshold/intensity calculations account for the fact that `GpuRenderer` provides averaged colors.
