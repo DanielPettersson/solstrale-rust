@@ -10,13 +10,13 @@ Migrate post-processing effects (Bloom, Saturation) to run directly on the GPU u
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: CPU Renderer Cleanup' (Protocol in workflow.md)
 
 ## Phase 2: Trait Refactoring
-- [ ] Task: Update `PostProcessor` trait in `src/post/mod.rs`
-    - [ ] Change `initialize` to: `fn initialize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32)`
-    - [ ] Change `post_process` to: `fn post_process(&self, encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer, num_samples: u32) -> Result<(), Box<dyn Error>>`
-    - [ ] Remove `width()` and `height()` from the trait as they are no longer needed by callers.
-- [ ] Task: Update `PostProcessors` enum and `enum_dispatch` in `src/post/mod.rs`
-- [ ] Task: Stub implementations in `src/post/bloom.rs`, `src/post/saturation.rs`, and `src/post/nop.rs` to fix compilation errors.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Trait Refactoring' (Protocol in workflow.md)
+- [x] Task: Update `PostProcessor` trait in `src/post/mod.rs` 207b407
+    - [x] Change `initialize` to: `fn initialize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32)`
+    - [x] Change `post_process` to: `fn post_process(&self, encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer, num_samples: u32) -> Result<(), Box<dyn Error>>`
+    - [x] Remove `width()` and `height()` from the trait as they are no longer needed by callers.
+- [x] Task: Update `PostProcessors` enum and `enum_dispatch` in `src/post/mod.rs` 207b407
+- [x] Task: Stub implementations in `src/post/bloom.rs`, `src/post/saturation.rs`, and `src/post/nop.rs` to fix compilation errors. 207b407
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Trait Refactoring' (Protocol in workflow.md)
 
 ## Phase 3: GPU Renderer Integration
 - [ ] Task: Update `GpuRenderer` struct in `src/renderer/gpu_renderer.rs` to store initialized post-processors.
