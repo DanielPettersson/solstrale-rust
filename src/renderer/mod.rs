@@ -13,9 +13,8 @@ use crate::post::PostProcessors;
 use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
 use crate::util::wgpu_util::{
-    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
-    get_result_from_buffer, get_wgpu_device_and_queue, sampler_binding, storage_binding,
-    texture_binding, uniform_binding,
+    add_compute_pass, bind_group, bind_group_layout, compute_pipeline, get_wgpu_device_and_queue,
+    sampler_binding, storage_binding, texture_binding, uniform_binding,
 };
 use image::{DynamicImage, Rgb, RgbImage};
 use simple_error::SimpleError;
@@ -71,8 +70,8 @@ pub struct RenderProgress {
     pub fps: Option<f64>,
     /// Estimated time left until rendering is complete
     pub estimated_time_left: Duration,
-    /// Output image so far, will be final when progress is 1
-    pub render_image: Option<RgbImage>,
+    /// Output buffer containing the image data
+    pub output_buffer: wgpu::Buffer,
 }
 
 #[derive(Copy, Clone)]
@@ -121,8 +120,6 @@ pub struct Renderer {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     output_buffer: wgpu::Buffer,
-    post_process_buffer: wgpu::Buffer,
-    download_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
     nodes_buffer: wgpu::Buffer,
@@ -379,21 +376,7 @@ impl Renderer {
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
             size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let post_process_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Post Process Buffer"),
-            size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Download Buffer"),
-            size,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
@@ -427,8 +410,6 @@ impl Renderer {
             bind_group_layout,
             pipeline,
             output_buffer,
-            post_process_buffer,
-            download_buffer,
             bind_group,
             nodes_buffer,
             spheres_buffer,
@@ -447,16 +428,15 @@ impl Renderer {
         &self,
         output: &Sender<RenderProgress>,
         abort: &Receiver<bool>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<wgpu::Buffer, Box<dyn Error>> {
         let (device, queue) = get_wgpu_device_and_queue();
         let render_start_time = SystemTime::now();
-        let mut last_image_generated_time = SystemTime::UNIX_EPOCH;
 
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
 
         for sample in 1..=samples_per_pixel {
             if abort.try_recv().is_ok() {
-                return Ok(());
+                return Ok(self.output_buffer.clone());
             }
 
             // Update config buffer with current sample count
@@ -487,56 +467,16 @@ impl Renderer {
                 workgroup_count,
             );
 
-            let now = SystemTime::now();
-            let should_generate_image = self
-                .scene
-                .render_config
-                .render_image_strategy
-                .should_generate_image(sample, samples_per_pixel, now, last_image_generated_time);
-
-            if should_generate_image {
-                add_buffer_copy(&mut encoder, &self.output_buffer, &self.post_process_buffer);
+            if sample == samples_per_pixel {
                 for p in &self.post_processors {
-                    p.post_process(&mut encoder, &self.post_process_buffer, 1)?;
+                    p.post_process(&mut encoder, &self.output_buffer, 1)?;
                 }
-                add_buffer_copy(
-                    &mut encoder,
-                    &self.post_process_buffer,
-                    &self.download_buffer,
-                );
             }
 
             let command_buffer = encoder.finish();
             queue.submit([command_buffer]);
 
-            let render_image = if should_generate_image {
-                last_image_generated_time = now;
-
-                // Read back
-                let result: Vec<[f32; 4]> = get_result_from_buffer(device, &self.download_buffer);
-
-                if abort.try_recv().is_ok() {
-                    return Ok(());
-                }
-
-                // Convert to Image
-                let mut img = RgbImage::new(self.width, self.height);
-                for (i, pixel) in result.iter().enumerate() {
-                    let x = (i as u32) % self.width;
-                    let y = (i as u32) / self.width;
-                    if x < self.width && y < self.height {
-                        // Apply gamma correction (gamma = 2.0) and clamp
-                        let r = (pixel[0].max(0.0).sqrt().min(0.999) * 256.0) as u8;
-                        let g = (pixel[1].max(0.0).sqrt().min(0.999) * 256.0) as u8;
-                        let b = (pixel[2].max(0.0).sqrt().min(0.999) * 256.0) as u8;
-                        img.put_pixel(x, y, Rgb([r, g, b]));
-                    }
-                }
-
-                Some(img)
-            } else {
-                None
-            };
+            let now = SystemTime::now();
 
             output.send(RenderProgress {
                 progress: sample as f64 / samples_per_pixel as f64,
@@ -547,11 +487,11 @@ impl Renderer {
                     sample,
                     samples_per_pixel,
                 ),
-                render_image,
+                output_buffer: self.output_buffer.clone(),
             })?;
         }
 
-        Ok(())
+        Ok(self.output_buffer.clone())
     }
 }
 

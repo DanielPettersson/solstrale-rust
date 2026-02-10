@@ -54,7 +54,7 @@
 //! });
 //!
 //! for render_output in output_receiver {
-//!     let _image = render_output.render_image;
+//!     let _buffer = render_output.output_buffer;
 //! }
 //! ```
 //!
@@ -92,6 +92,6 @@ pub fn ray_trace<'a>(
     scene: Scene,
     output: &'a Sender<RenderProgress>,
     abort: &'a Receiver<bool>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<wgpu::Buffer, Box<dyn Error>> {
     Renderer::new(scene)?.render(output, abort)
 }
