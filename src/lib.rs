@@ -27,7 +27,6 @@
 //! # use solstrale::material::texture::SolidColor;
 //! # use solstrale::ray_trace;
 //! # use solstrale::renderer::{RenderConfig, Scene};
-//! # use solstrale::renderer::shader::PathTracingShader;
 //! let camera = CameraConfig {
 //!     vertical_fov_degrees: 20.,
 //!     aperture_size: 0.1,
@@ -68,8 +67,8 @@
 //! ## Credits
 //! The ray tracing is inspired by the excellent [Ray Tracing in One Weekend Book Series](https://github.com/RayTracing/raytracing.github.io) by Peter Shirley
 
-use crate::renderer::gpu_renderer::GpuRenderer;
 use crate::renderer::{RenderProgress, Scene};
+use renderer::Renderer;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -78,9 +77,7 @@ pub mod geo;
 pub mod hittable;
 pub mod loader;
 pub mod material;
-pub mod pdf;
 pub mod post;
-pub mod random;
 pub mod renderer;
 pub mod util;
 
@@ -96,5 +93,5 @@ pub fn ray_trace<'a>(
     output: &'a Sender<RenderProgress>,
     abort: &'a Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
-    GpuRenderer::new(scene)?.render(output, abort)
+    Renderer::new(scene)?.render(output, abort)
 }
