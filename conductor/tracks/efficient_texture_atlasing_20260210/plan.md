@@ -13,7 +13,7 @@ Implement the core packing algorithm and data structures to manage the atlas lay
     - [x] Write tests to verify the error condition when textures exceed max atlas size
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Texture Packing Utility' (Protocol in workflow.md) 143c014
 
-## Phase 2: GpuData and Scene Flattener Refactor
+## Phase 2: GpuData and Scene Flattener Refactor [checkpoint: 173a4ab]
 Update the data structures passed to the GPU to include atlas coordinates and scales.
 
 - [x] Task: Update `GpuData` structures 455ba32
@@ -21,7 +21,7 @@ Update the data structures passed to the GPU to include atlas coordinates and sc
 - [x] Task: Update `SceneFlattener` to calculate these values during scene processing 455ba32
 - [x] Task: TDD - Scene Flattener verification 455ba32
     - [x] Write unit tests to ensure `SceneFlattener` correctly assigns atlas coordinates to materials
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: GpuData and Scene Flattener Refactor' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: GpuData and Scene Flattener Refactor' (Protocol in workflow.md) 173a4ab
 
 ## Phase 3: Texture Upload and Shader Updates
 Modify the renderer to upload a single atlas and update the WGSL shader to use it.
