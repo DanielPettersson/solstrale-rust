@@ -38,9 +38,12 @@ Modify the renderer to upload a single atlas and update the WGSL shader to use i
 ## Phase 4: Final Integration and Optimization
 Clean up old resizing logic and perform final verification.
 
-- [ ] Task: Remove obsolete resizing logic
-    - [ ] Remove forced 1024x1024 resizing from `src/util/texture_processing.rs`
-- [ ] Task: Final quality gate and coverage check
-    - [ ] Run `./coverage.sh` and ensure >90% coverage for new logic
-    - [ ] Run `cargo clippy` and `cargo fmt`
+- [x] Task: Optimize atlas size to reduce memory usage and upload time 6b3db8d
+    - [x] Update `TexturePacker` to calculate minimum required dimensions
+    - [x] Update `Renderer` and `SceneFlattener` to use dynamic atlas size
+- [x] Task: Remove obsolete resizing logic 6b3db8d
+    - [x] Remove forced 1024x1024 resizing from `src/util/texture_processing.rs`
+- [x] Task: Final quality gate and coverage check 6b3db8d
+    - [x] Run `./coverage.sh` and ensure >90% coverage for new logic
+    - [x] Run `cargo clippy` and `cargo fmt`
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Final Integration and Optimization' (Protocol in workflow.md)
