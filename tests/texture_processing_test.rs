@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use image::{ImageBuffer, RgbImage};
     use solstrale::util::texture_processing::{TexturePacker, TextureRect};
 
     #[test]

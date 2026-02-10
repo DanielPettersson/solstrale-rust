@@ -635,10 +635,11 @@ mod tests {
         assert_eq!(data.materials.len(), 1);
         let m = &data.materials[0];
 
-        // With one 100x100 texture in 8192x8192 atlas:
+        // With one 100x100 texture:
+        // width aligned to 64 is 128. height is 100.
         // offset should be [0, 0]
-        // scale should be [100/8192, 100/8192]
+        // scale should be [100/128, 100/100]
         assert_eq!(m.albedo_offset, [0.0, 0.0]);
-        assert_eq!(m.albedo_scale, [100.0 / 8192.0, 100.0 / 8192.0]);
+        assert_eq!(m.albedo_scale, [100.0 / 128.0, 100.0 / 100.0]);
     }
 }
