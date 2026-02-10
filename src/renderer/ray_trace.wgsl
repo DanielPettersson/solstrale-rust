@@ -63,6 +63,10 @@ struct Material {
     texture_index: i32,
     normal_texture_index: i32,
     blend_indices: vec2<u32>,
+    albedo_offset: vec2<f32>,
+    albedo_scale: vec2<f32>,
+    normal_offset: vec2<f32>,
+    normal_scale: vec2<f32>,
 }
 
 const MAT_LAMBERTIAN = 0u;
