@@ -3,10 +3,7 @@ use std::fmt;
 use std::fmt::Display;
 
 use crate::geo::Aabb;
-use crate::geo::Ray;
 use crate::hittable::{Hittable, Hittables};
-use crate::material::RayHit;
-use crate::util::interval::Interval;
 
 /// Bounding Volume Hierarchy
 #[derive(Display, Debug)]
@@ -35,14 +32,6 @@ impl Display for BvhItem {
 }
 
 impl BvhItem {
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
-        match self {
-            BvhItem::Node(i) => i.hit(r, ray_length),
-            BvhItem::Leaf(i) => i.hit(r, ray_length),
-            BvhItem::None => None,
-        }
-    }
-
     fn get_lights(&self) -> Vec<Hittables> {
         match self {
             BvhItem::Node(b) => b.get_lights(),
@@ -161,23 +150,6 @@ fn sort_hittables_by_center(list: &mut [Hittables], center: f64, axis: u8) -> us
 }
 
 impl Hittable for Bvh {
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
-        if !self.b_box.hit(r) {
-            return None;
-        }
-
-        match self.left.hit(r, ray_length) {
-            None => self.right.hit(r, ray_length),
-            Some(left_rec) => {
-                let new_ray_length = Interval::new(ray_length.min, left_rec.ray_length);
-                match self.right.hit(r, &new_ray_length) {
-                    Some(right_rec) => Some(right_rec),
-                    None => Some(left_rec),
-                }
-            }
-        }
-    }
-
     fn bounding_box(&self) -> &Aabb {
         &self.b_box
     }

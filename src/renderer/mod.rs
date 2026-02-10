@@ -1,27 +1,28 @@
 //! The renderer takes a [`Scene`] as input, renders it and reports [`RenderProgress`]
 
+use crate::hittable::Hittable;
+use crate::post::PostProcessor;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use image::RgbImage;
-use simple_error::SimpleError;
-
 use crate::camera::{Camera, CameraConfig};
-use crate::geo::vec3::{Vec3, ZERO_VECTOR};
-use crate::geo::{Ray, Uv};
-use crate::hittable::{Hittable, Hittables};
-use crate::material::AttenuatedColor;
-use crate::post::{pixel_colors_to_rgb_image, PostProcessors};
-use crate::random::random_normal_float;
-use crate::renderer::shader::PathTracingShader;
-use crate::util::interval::RAY_INTERVAL;
+use crate::geo::vec3::Vec3;
+use crate::hittable::Hittables;
+use crate::post::PostProcessors;
+use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
+use crate::renderer::scene_flattener::flatten_scene;
+use crate::util::wgpu_util::{
+    add_buffer_copy, add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
+    get_result_from_buffer, get_wgpu_device_and_queue, sampler_binding, storage_binding,
+    texture_binding, uniform_binding,
+};
+use image::{DynamicImage, Rgb, RgbImage};
+use simple_error::SimpleError;
+use wgpu::BufferUsages;
 
 pub mod gpu_data;
-pub mod gpu_renderer;
 pub mod scene_flattener;
-pub mod shader;
 
 ///Input to the ray tracer for how the image should be rendered
 #[derive(Clone)]
@@ -112,156 +113,433 @@ impl RenderImageStrategy {
 /// Renderer is a central part of the raytracer responsible for controlling the
 /// process reporting back progress to the caller
 pub struct Renderer {
+    #[allow(dead_code)]
     scene: Scene,
-    shader: PathTracingShader,
-    /// All the light hittables in the world
-    pub lights: Vec<Hittables>,
-}
-
-/// Result of calculating color for a ray
-pub(crate) struct RayColorResult {
-    pixel_color: AttenuatedColor,
+    width: u32,
+    height: u32,
+    #[allow(dead_code)]
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+    output_buffer: wgpu::Buffer,
+    post_process_buffer: wgpu::Buffer,
+    download_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
+    nodes_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    spheres_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    triangles_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    quads_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    materials_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    camera_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    config_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    lights_buffer: wgpu::Buffer,
+    post_processors: Vec<PostProcessors>,
 }
 
 impl Renderer {
-    /// Creates a new renderer given a scene and channels for communicating with the caller
-    pub fn new(scene: Scene) -> Result<Renderer, Box<dyn Error>> {
-        let light_list = scene.world.get_lights();
-
-        if light_list.is_empty() {
+    /// Creates a new GPU renderer given a scene
+    pub fn new(scene: Scene) -> Result<Self, Box<dyn Error>> {
+        if scene.world.get_lights().is_empty() {
             return Err(Box::new(SimpleError::new(
                 "Scene should have at least one light",
             )));
         }
 
+        let width = scene.render_config.width as u32;
+        let height = scene.render_config.height as u32;
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        let module = device.create_shader_module(wgpu::include_wgsl!("ray_trace.wgsl"));
+
+        // Flatten scene
+        let scene_data = flatten_scene(&scene);
+
+        // Create buffers
+        let nodes_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Nodes Buffer",
+            &scene_data.nodes,
+            BufferUsages::STORAGE,
+        );
+        let spheres_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Spheres Buffer",
+            &scene_data.spheres,
+            BufferUsages::STORAGE,
+        );
+        let triangles_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Triangles Buffer",
+            &scene_data.triangles,
+            BufferUsages::STORAGE,
+        );
+        let quads_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Quads Buffer",
+            &scene_data.quads,
+            BufferUsages::STORAGE,
+        );
+        let materials_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Materials Buffer",
+            &scene_data.materials,
+            BufferUsages::STORAGE,
+        );
+        let lights_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Lights Buffer",
+            &scene_data.lights,
+            BufferUsages::STORAGE,
+        );
+
+        // Create texture-array
+        let texture_list: Vec<RgbImage> = if scene_data.textures.is_empty() {
+            vec![RgbImage::new(1024, 1024)]
+        } else {
+            scene_data
+                .textures
+                .iter()
+                .map(crate::util::texture_processing::standardize_texture)
+                .collect()
+        };
+
+        let texture_extent = wgpu::Extent3d {
+            width: 1024,
+            height: 1024,
+            depth_or_array_layers: texture_list.len() as u32,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture Array"),
+            size: texture_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for (i, img) in texture_list.iter().enumerate() {
+            let rgba = DynamicImage::ImageRgb8(img.clone()).to_rgba8();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: i as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * 1024),
+                    rows_per_image: Some(1024),
+                },
+                wgpu::Extent3d {
+                    width: 1024,
+                    height: 1024,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let camera_inst = Camera::new(width as usize, height as usize, &scene.camera);
+
+        let gpu_camera = GpuCamera {
+            origin: [
+                camera_inst.origin.x as f32,
+                camera_inst.origin.y as f32,
+                camera_inst.origin.z as f32,
+            ],
+            lens_radius: camera_inst.lens_radius as f32,
+            lower_left_corner: [
+                camera_inst.lower_left_corner.x as f32,
+                camera_inst.lower_left_corner.y as f32,
+                camera_inst.lower_left_corner.z as f32,
+            ],
+            _pad1: 0.0,
+            horizontal: [
+                camera_inst.horizontal.x as f32,
+                camera_inst.horizontal.y as f32,
+                camera_inst.horizontal.z as f32,
+            ],
+            _pad2: 0.0,
+            vertical: [
+                camera_inst.vertical.x as f32,
+                camera_inst.vertical.y as f32,
+                camera_inst.vertical.z as f32,
+            ],
+            _pad3: 0.0,
+            u: [
+                camera_inst.u.x as f32,
+                camera_inst.u.y as f32,
+                camera_inst.u.z as f32,
+            ],
+            _pad4: 0.0,
+            v: [
+                camera_inst.v.x as f32,
+                camera_inst.v.y as f32,
+                camera_inst.v.z as f32,
+            ],
+            _pad5: 0.0,
+        };
+        let camera_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Camera Buffer",
+            &[gpu_camera],
+            BufferUsages::UNIFORM,
+        );
+
+        let gpu_config = GpuRenderConfig {
+            width,
+            height,
+            sample_count: 0,
+            max_depth: 50,
+            background_color: [
+                scene.background_color.x as f32,
+                scene.background_color.y as f32,
+                scene.background_color.z as f32,
+            ],
+            light_count: scene_data.lights.len() as u32,
+        };
+        let config_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Config Buffer",
+            &[gpu_config],
+            BufferUsages::UNIFORM,
+        );
+
+        let bind_group_layout = bind_group_layout(
+            device,
+            &[
+                storage_binding(false, 0), // 0: output buffer
+                storage_binding(true, 0),  // 1: nodes
+                storage_binding(true, 0),  // 2: spheres
+                storage_binding(true, 0),  // 3: triangles
+                storage_binding(true, 0),  // 4: quads
+                storage_binding(true, 0),  // 5: materials
+                uniform_binding(std::mem::size_of::<GpuCamera>() as u64), // 6: camera
+                uniform_binding(std::mem::size_of::<GpuRenderConfig>() as u64), // 7: config
+                texture_binding(wgpu::TextureViewDimension::D2Array), // 8: texture array
+                sampler_binding(),         // 9: sampler
+                storage_binding(true, 0),  // 10: lights
+            ],
+        );
+
+        let pipeline = compute_pipeline(device, &bind_group_layout, &module, &[]);
+
+        let size = (width * height * 16) as u64; // vec3 is 16 bytes aligned (as vec4 effectively)
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Output Buffer"),
+            size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let post_process_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Post Process Buffer"),
+            size,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Download Buffer"),
+            size,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = bind_group(
+            device,
+            &bind_group_layout,
+            &[
+                wgpu::BindingResource::Buffer(output_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(nodes_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(spheres_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(triangles_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(quads_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(materials_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(camera_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(config_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::TextureView(&texture_view),
+                wgpu::BindingResource::Sampler(&sampler),
+                wgpu::BindingResource::Buffer(lights_buffer.as_entire_buffer_binding()),
+            ],
+        );
+
+        let mut post_processors = scene.render_config.post_processors.clone();
+        for p in &mut post_processors {
+            p.initialize(device, queue, width, height);
+        }
+
         Ok(Renderer {
             scene,
-            shader: PathTracingShader::new(50),
-            lights: light_list,
+            width,
+            height,
+            bind_group_layout,
+            pipeline,
+            output_buffer,
+            post_process_buffer,
+            download_buffer,
+            bind_group,
+            nodes_buffer,
+            spheres_buffer,
+            triangles_buffer,
+            quads_buffer,
+            materials_buffer,
+            camera_buffer,
+            config_buffer,
+            lights_buffer,
+            post_processors,
         })
     }
 
-    fn ray_color(&self, ray: &Ray, depth: u32, accumulated_ray_length: f64) -> RayColorResult {
-        match self.scene.world.hit(ray, &RAY_INTERVAL) {
-            Some(rec) => {
-                let attenuated_color =
-                    self.shader
-                        .shade(self, &rec, ray, depth, accumulated_ray_length);
-
-                RayColorResult {
-                    pixel_color: attenuated_color,
-                }
-            }
-            None => RayColorResult {
-                pixel_color: AttenuatedColor {
-                    color: self.scene.background_color,
-                    ..AttenuatedColor::default()
-                },
-            },
-        }
-    }
-
-    /// Executes the rendering of the image
+    /// Executes the rendering of the image on the GPU
     pub fn render(
         &self,
         output: &Sender<RenderProgress>,
         abort: &Receiver<bool>,
     ) -> Result<(), Box<dyn Error>> {
-        let mut last_image_generated_time = SystemTime::UNIX_EPOCH;
+        let (device, queue) = get_wgpu_device_and_queue();
         let render_start_time = SystemTime::now();
-        let image_width = self.scene.render_config.width;
-        let image_height = self.scene.render_config.height;
-        let pixel_count = image_width * image_height;
+        let mut last_image_generated_time = SystemTime::UNIX_EPOCH;
+
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
-
-        let pixel_colors: Arc<Mutex<Vec<Vec3>>> =
-            Arc::new(Mutex::new(vec![ZERO_VECTOR; pixel_count]));
-
-        let camera = Arc::new(Camera::new(image_width, image_height, &self.scene.camera));
-
-        let pool = rayon::ThreadPoolBuilder::new()
-            .build()
-            .expect("Failed to create thread pool");
 
         for sample in 1..=samples_per_pixel {
             if abort.try_recv().is_ok() {
                 return Ok(());
             }
 
-            pool.scope(|s| {
-                for y in 0..image_height {
-                    let camera = camera.clone();
-                    let pixel_colors = pixel_colors.clone();
+            // Update config buffer with current sample count
+            let gpu_config = GpuRenderConfig {
+                width: self.width,
+                height: self.height,
+                sample_count: sample,
+                max_depth: 50,
+                background_color: [
+                    self.scene.background_color.x as f32,
+                    self.scene.background_color.y as f32,
+                    self.scene.background_color.z as f32,
+                ],
+                light_count: self.scene.world.get_lights().len() as u32,
+            };
+            queue.write_buffer(&self.config_buffer, 0, bytemuck::cast_slice(&[gpu_config]));
 
-                    s.spawn(move |_| {
-                        let mut row_pixel_colors: Vec<Vec3> = vec![ZERO_VECTOR; image_width];
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-                        let yi = ((image_height - 1) - y) * image_width;
-                        #[allow(clippy::needless_range_loop)]
-                        for x in 0..image_width {
-                            let u = (x as f64 + random_normal_float()) / (image_width - 1) as f64;
-                            let v = (y as f64 + random_normal_float()) / (image_height - 1) as f64;
-                            let ray = camera.get_ray(Uv::new(u as f32, v as f32));
-                            let ray_color_res = self.ray_color(&ray, 0, 0.);
+            let pixel_count = self.width * self.height;
+            let workgroup_count = pixel_count.div_ceil(64);
 
-                            row_pixel_colors[x] = ray_color_res.pixel_color.get_attenuated_color();
-                        }
+            add_compute_pass(
+                &mut encoder,
+                &self.pipeline,
+                &self.bind_group,
+                workgroup_count,
+            );
 
-                        add_row_data(yi, &mut pixel_colors.lock().unwrap(), &row_pixel_colors);
-                    });
+            let now = SystemTime::now();
+            let should_generate_image = self
+                .scene
+                .render_config
+                .render_image_strategy
+                .should_generate_image(sample, samples_per_pixel, now, last_image_generated_time);
+
+            if should_generate_image {
+                add_buffer_copy(&mut encoder, &self.output_buffer, &self.post_process_buffer);
+                for p in &self.post_processors {
+                    p.post_process(&mut encoder, &self.post_process_buffer, 1)?;
                 }
-            });
-
-            {
-                let now = SystemTime::now();
-                let render_image = if self
-                    .scene
-                    .render_config
-                    .render_image_strategy
-                    .should_generate_image(
-                        sample,
-                        samples_per_pixel,
-                        now,
-                        last_image_generated_time,
-                    ) {
-                    last_image_generated_time = now;
-
-                    if abort.try_recv().is_ok() {
-                        return Ok(());
-                    }
-
-                    let intermediate_pixel_colors = pixel_colors.lock().unwrap().clone();
-
-                    Some(pixel_colors_to_rgb_image(
-                        intermediate_pixel_colors.as_slice(),
-                        image_width as u32,
-                        image_height as u32,
-                        samples_per_pixel,
-                    ))
-                } else {
-                    None
-                };
-
-                output.send(RenderProgress {
-                    progress: sample as f64 / samples_per_pixel as f64,
-                    fps: Some(calculate_fps(render_start_time, now, sample)),
-                    estimated_time_left: calculate_estimated_time_left(
-                        render_start_time,
-                        now,
-                        sample,
-                        samples_per_pixel,
-                    ),
-                    render_image,
-                })?
+                add_buffer_copy(
+                    &mut encoder,
+                    &self.post_process_buffer,
+                    &self.download_buffer,
+                );
             }
-        }
-        Ok(())
-    }
-}
 
-fn add_row_data(yi: usize, colors: &mut [Vec3], row_colors: &[Vec3]) {
-    for (x, c) in row_colors.iter().enumerate() {
-        colors[yi + x] += *c;
+            let command_buffer = encoder.finish();
+            queue.submit([command_buffer]);
+
+            let render_image = if should_generate_image {
+                last_image_generated_time = now;
+
+                // Read back
+                let result: Vec<[f32; 4]> = get_result_from_buffer(device, &self.download_buffer);
+
+                if abort.try_recv().is_ok() {
+                    return Ok(());
+                }
+
+                // Convert to Image
+                let mut img = RgbImage::new(self.width, self.height);
+                for (i, pixel) in result.iter().enumerate() {
+                    let x = (i as u32) % self.width;
+                    let y = (i as u32) / self.width;
+                    if x < self.width && y < self.height {
+                        // Apply gamma correction (gamma = 2.0) and clamp
+                        let r = (pixel[0].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+                        let g = (pixel[1].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+                        let b = (pixel[2].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+                        img.put_pixel(x, y, Rgb([r, g, b]));
+                    }
+                }
+
+                Some(img)
+            } else {
+                None
+            };
+
+            output.send(RenderProgress {
+                progress: sample as f64 / samples_per_pixel as f64,
+                fps: Some(calculate_fps(render_start_time, now, sample)),
+                estimated_time_left: calculate_estimated_time_left(
+                    render_start_time,
+                    now,
+                    sample,
+                    samples_per_pixel,
+                ),
+                render_image,
+            })?;
+        }
+
+        Ok(())
     }
 }
 
@@ -289,12 +567,44 @@ fn calculate_estimated_time_left(
         .mul_f32(samples_left as f32)
 }
 
+fn create_and_upload_buffer<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    data: &[T],
+    usage: BufferUsages,
+) -> wgpu::Buffer {
+    let size_bytes = size_of_val(data) as u64;
+
+    // Ensure the minimum size for a valid buffer and pad to 16 bytes for WGSL array compatibility
+    let mut effective_size = if size_bytes == 0 {
+        size_of::<T>() as u64
+    } else {
+        size_bytes
+    };
+
+    if effective_size % 16 != 0 {
+        effective_size = ((effective_size / 16) + 1) * 16;
+    }
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: effective_size,
+        usage: usage | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    if size_bytes > 0 {
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+    }
+
+    buffer
+}
+
 #[cfg(test)]
 mod test {
-    use std::time::{Duration, SystemTime};
-
     use crate::renderer::{calculate_estimated_time_left, calculate_fps};
-
+    use std::time::{Duration, SystemTime};
     #[test]
     fn test_calculate_fps() {
         let render_start = SystemTime::UNIX_EPOCH + Duration::from_millis(900);

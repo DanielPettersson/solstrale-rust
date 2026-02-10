@@ -1,16 +1,13 @@
 //! Post processors for applying effects to the raw rendered image
 
 mod bloom;
-mod nop;
 mod saturation;
 
 use std::error::Error;
 
 use enum_dispatch::enum_dispatch;
 
-use crate::geo::vec3::Vec3;
 pub use crate::post::bloom::BloomPostProcessor;
-pub use crate::post::nop::NopPostProcessor;
 pub use crate::post::saturation::SaturationPostProcessor;
 
 /// Responsible for taking the rendered image and transforming it
@@ -36,29 +33,4 @@ pub enum PostProcessors {
     BloomPostProcessor,
     /// [`PostProcessor`] of type [`SaturationPostProcessor`]
     SaturationPostProcessor,
-    /// [`PostProcessor`] of type [`NopPostProcessor`]
-    NopPostProcessor,
-}
-
-/// Converts a vector of pixel colors to an image
-pub fn pixel_colors_to_rgb_image(
-    pixel_colors: &[Vec3],
-    width: u32,
-    height: u32,
-    num_samples: u32,
-) -> image::RgbImage {
-    let mut img: image::RgbImage = image::ImageBuffer::new(width, height);
-
-    for y in 0..height {
-        for x in 0..width {
-            let i = (y * width + x) as usize;
-            img.put_pixel(
-                x,
-                y,
-                crate::util::rgb_color::to_rgb_color(pixel_colors[i], num_samples),
-            )
-        }
-    }
-
-    img
 }
