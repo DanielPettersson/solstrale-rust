@@ -23,7 +23,7 @@ Update the data structures passed to the GPU to include atlas coordinates and sc
     - [x] Write unit tests to ensure `SceneFlattener` correctly assigns atlas coordinates to materials
 - [x] Task: Conductor - User Manual Verification 'Phase 2: GpuData and Scene Flattener Refactor' (Protocol in workflow.md) 173a4ab
 
-## Phase 3: Texture Upload and Shader Updates
+## Phase 3: Texture Upload and Shader Updates [checkpoint: 2c9e949]
 Modify the renderer to upload a single atlas and update the WGSL shader to use it.
 
 - [x] Task: Refactor texture upload in `src/renderer/mod.rs` 5a52a8b
@@ -33,7 +33,7 @@ Modify the renderer to upload a single atlas and update the WGSL shader to use i
     - [x] Modify the texture sampling logic to apply the `uv_offset` and `uv_scale` to mesh UVs
 - [x] Task: TDD - Shader and Upload verification 5a52a8b
     - [x] Update integration tests in `tests/integration_tests.rs` to verify visual correctness with different texture sizes
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Texture Upload and Shader Updates' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Texture Upload and Shader Updates' (Protocol in workflow.md) 2c9e949
 
 ## Phase 4: Final Integration and Optimization
 Clean up old resizing logic and perform final verification.
