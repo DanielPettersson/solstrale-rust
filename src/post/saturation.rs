@@ -31,10 +31,7 @@ impl SaturationPostProcessor {
 
         let module = device.create_shader_module(wgpu::include_wgsl!("saturation.wgsl"));
 
-        let bind_group_layout = bind_group_layout(
-            device,
-            &[storage_binding(false, 16)],
-        );
+        let bind_group_layout = bind_group_layout(device, &[storage_binding(false, 16)]);
 
         let pipeline = compute_pipeline(
             device,
@@ -53,7 +50,13 @@ impl SaturationPostProcessor {
 }
 
 impl PostProcessor for SaturationPostProcessor {
-    fn initialize(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue, width: u32, height: u32) {
+    fn initialize(
+        &mut self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) {
         self.width = width;
         self.height = height;
     }
@@ -69,11 +72,18 @@ impl PostProcessor for SaturationPostProcessor {
         let bind_group = bind_group(
             device,
             &self.bind_group_layout,
-            &[wgpu::BindingResource::Buffer(buffer.as_entire_buffer_binding())],
+            &[wgpu::BindingResource::Buffer(
+                buffer.as_entire_buffer_binding(),
+            )],
         );
 
         let workgroup_count = (self.width * self.height).div_ceil(64);
-        crate::util::wgpu_util::add_compute_pass(encoder, &self.pipeline, &bind_group, workgroup_count);
+        crate::util::wgpu_util::add_compute_pass(
+            encoder,
+            &self.pipeline,
+            &bind_group,
+            workgroup_count,
+        );
 
         Ok(())
     }

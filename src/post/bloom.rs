@@ -80,10 +80,7 @@ impl BloomPostProcessor {
 
         let add_bind_group_layout = bind_group_layout(
             device,
-            &[
-                storage_binding(false, 16),
-                storage_binding(true, 16),
-            ],
+            &[storage_binding(false, 16), storage_binding(true, 16)],
         );
 
         let filter_bright_pipeline = Some(compute_pipeline(
@@ -198,7 +195,10 @@ impl PostProcessor for BloomPostProcessor {
     ) -> Result<(), Box<dyn Error>> {
         let (device, _) = get_wgpu_device_and_queue();
 
-        let intermediate_buffer1 = self.intermediate_buffer1.as_ref().ok_or("Not initialized")?;
+        let intermediate_buffer1 = self
+            .intermediate_buffer1
+            .as_ref()
+            .ok_or("Not initialized")?;
         let apply_bind_group_x = self.apply_bind_group_x.as_ref().ok_or("Not initialized")?;
         let apply_bind_group_y = self.apply_bind_group_y.as_ref().ok_or("Not initialized")?;
 
