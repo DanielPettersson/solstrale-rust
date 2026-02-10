@@ -10,6 +10,7 @@ use crate::renderer::gpu_data::{
     BvhNode as GpuBvhNode, LightRef, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
     Triangle as GpuTriangle,
 };
+use crate::util::texture_processing::{AtlasLayout, TexturePacker};
 use image::RgbImage;
 use std::sync::Arc;
 
@@ -44,15 +45,35 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     };
 
     let mut unique_textures: Vec<Arc<RgbImage>> = Vec::new();
+    collect_unique_textures(&scene.world, &mut unique_textures);
+
+    let atlas_layout = if !unique_textures.is_empty() {
+        let packer = TexturePacker::new(8192, 8192);
+        let dims: Vec<(u32, u32)> = unique_textures
+            .iter()
+            .map(|img| (img.width(), img.height()))
+            .collect();
+        Some(
+            packer
+                .pack(&dims)
+                .expect("Failed to pack textures into atlas"),
+        )
+    } else {
+        None
+    };
 
     // Process world
     match &scene.world {
         Hittables::Bvh(bvh) => {
-            process_node(bvh, &mut data, &mut unique_textures);
+            process_node(bvh, &mut data, &unique_textures, atlas_layout.as_ref());
         }
         _ => {
-            let (prim_index, prim_type) =
-                add_primitive(&scene.world, &mut data, &mut unique_textures);
+            let (prim_index, prim_type) = add_primitive(
+                &scene.world,
+                &mut data,
+                &unique_textures,
+                atlas_layout.as_ref(),
+            );
             let bbox = scene.world.bounding_box();
 
             let flag = 0x80000000;
@@ -73,10 +94,84 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         }
     }
 
+    // For now, we still return the list of unique textures.
+    // In Phase 3, we will blit them into a single atlas image.
+    data.textures = unique_textures.iter().map(|img| (**img).clone()).collect();
+
     data
 }
 
-fn process_node(bvh: &Bvh, data: &mut SceneData, unique_textures: &mut Vec<Arc<RgbImage>>) -> u32 {
+fn collect_unique_textures(hittable: &Hittables, unique_textures: &mut Vec<Arc<RgbImage>>) {
+    match hittable {
+        Hittables::Sphere(s) => collect_material_textures(&s.mat, unique_textures),
+        Hittables::Triangle(t) => collect_material_textures(&t.mat, unique_textures),
+        Hittables::Quad(q) => collect_material_textures(&q.mat, unique_textures),
+        Hittables::Bvh(bvh) => {
+            collect_unique_textures_item(&bvh.left, unique_textures);
+            collect_unique_textures_item(&bvh.right, unique_textures);
+        }
+    }
+}
+
+fn collect_unique_textures_item(item: &BvhItem, unique_textures: &mut Vec<Arc<RgbImage>>) {
+    match item {
+        BvhItem::Node(bvh) => {
+            collect_unique_textures_item(&bvh.left, unique_textures);
+            collect_unique_textures_item(&bvh.right, unique_textures);
+        }
+        BvhItem::Leaf(hittable) => collect_unique_textures(hittable, unique_textures),
+        BvhItem::None => {}
+    }
+}
+
+fn collect_material_textures(material: &Materials, unique_textures: &mut Vec<Arc<RgbImage>>) {
+    match material {
+        Materials::Lambertian(m) => {
+            collect_texture(&m.albedo, unique_textures);
+            if let Some(n) = &m.normal {
+                collect_texture(n, unique_textures);
+            }
+        }
+        Materials::Metal(m) => {
+            collect_texture(&m.albedo, unique_textures);
+            if let Some(n) = &m.normal {
+                collect_texture(n, unique_textures);
+            }
+        }
+        Materials::Dielectric(m) => {
+            collect_texture(&m.albedo, unique_textures);
+            if let Some(n) = &m.normal {
+                collect_texture(n, unique_textures);
+            }
+        }
+        Materials::DiffuseLight(m) => {
+            collect_texture(&m.tex, unique_textures);
+        }
+        Materials::Blend(b) => {
+            collect_material_textures(&b.material_1, unique_textures);
+            collect_material_textures(&b.material_2, unique_textures);
+        }
+    }
+}
+
+fn collect_texture(tex: &Textures, unique_textures: &mut Vec<Arc<RgbImage>>) {
+    if let Textures::ImageMap(im) = tex {
+        let img = im.get_image();
+        if !unique_textures
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &img))
+        {
+            unique_textures.push(img.clone());
+        }
+    }
+}
+
+fn process_node(
+    bvh: &Bvh,
+    data: &mut SceneData,
+    unique_textures: &[Arc<RgbImage>],
+    atlas_layout: Option<&AtlasLayout>,
+) -> u32 {
     let index = data.nodes.len() as u32;
     // Reserve slot
     data.nodes.push(GpuBvhNode {
@@ -84,8 +179,8 @@ fn process_node(bvh: &Bvh, data: &mut SceneData, unique_textures: &mut Vec<Arc<R
         max_and_right: [0; 4],
     });
 
-    let left_idx = process_item(&bvh.left, data, unique_textures);
-    let right_idx = process_item(&bvh.right, data, unique_textures);
+    let left_idx = process_item(&bvh.left, data, unique_textures, atlas_layout);
+    let right_idx = process_item(&bvh.right, data, unique_textures, atlas_layout);
 
     let bbox = bvh.bounding_box();
 
@@ -110,16 +205,18 @@ fn process_node(bvh: &Bvh, data: &mut SceneData, unique_textures: &mut Vec<Arc<R
 fn process_item(
     item: &BvhItem,
     data: &mut SceneData,
-    unique_textures: &mut Vec<Arc<RgbImage>>,
+    unique_textures: &[Arc<RgbImage>],
+    atlas_layout: Option<&AtlasLayout>,
 ) -> u32 {
     match item {
-        BvhItem::Node(bvh) => process_node(bvh, data, unique_textures),
+        BvhItem::Node(bvh) => process_node(bvh, data, unique_textures, atlas_layout),
         BvhItem::Leaf(hittable) => {
             if let Hittables::Bvh(bvh) = &**hittable {
-                return process_node(bvh, data, unique_textures);
+                return process_node(bvh, data, unique_textures, atlas_layout);
             }
 
-            let (prim_index, prim_type) = add_primitive(hittable, data, unique_textures);
+            let (prim_index, prim_type) =
+                add_primitive(hittable, data, unique_textures, atlas_layout);
 
             let index = data.nodes.len() as u32;
             let bbox = hittable.bounding_box();
@@ -150,12 +247,13 @@ fn process_item(
 fn add_primitive(
     hittable: &Hittables,
     data: &mut SceneData,
-    unique_textures: &mut Vec<Arc<RgbImage>>,
+    unique_textures: &[Arc<RgbImage>],
+    atlas_layout: Option<&AtlasLayout>,
 ) -> (u32, u32) {
     match hittable {
         Hittables::Sphere(s) => {
             let index = data.spheres.len() as u32;
-            let mat_idx = add_material(&s.mat, data, unique_textures);
+            let mat_idx = add_material(&s.mat, data, unique_textures, atlas_layout);
             data.spheres.push(GpuSphere {
                 center_and_radius: [
                     s.center.x as f32,
@@ -176,7 +274,7 @@ fn add_primitive(
         }
         Hittables::Triangle(t) => {
             let index = data.triangles.len() as u32;
-            let mat_idx = add_material(&t.mat, data, unique_textures);
+            let mat_idx = add_material(&t.mat, data, unique_textures, atlas_layout);
             let v1 = t.v0 + t.v0v1;
             let v2 = t.v0 + t.v0v2;
             data.triangles.push(GpuTriangle {
@@ -208,7 +306,7 @@ fn add_primitive(
         }
         Hittables::Quad(q) => {
             let index = data.quads.len() as u32;
-            let mat_idx = add_material(&q.mat, data, unique_textures);
+            let mat_idx = add_material(&q.mat, data, unique_textures, atlas_layout);
             data.quads.push(GpuQuad {
                 q: to_array(q.q),
                 area: q.area as f32,
@@ -243,7 +341,8 @@ fn add_primitive(
 fn add_material(
     material: &Materials,
     data: &mut SceneData,
-    unique_textures: &mut Vec<Arc<RgbImage>>,
+    unique_textures: &[Arc<RgbImage>],
+    atlas_layout: Option<&AtlasLayout>,
 ) -> u32 {
     let (
         albedo_tex,
@@ -301,8 +400,8 @@ fn add_material(
             0.0,
         ),
         Materials::Blend(b) => {
-            let idx1 = add_material(&b.material_1, data, unique_textures);
-            let idx2 = add_material(&b.material_2, data, unique_textures);
+            let idx1 = add_material(&b.material_1, data, unique_textures, atlas_layout);
+            let idx2 = add_material(&b.material_2, data, unique_textures, atlas_layout);
             (
                 None,
                 None,
@@ -320,14 +419,14 @@ fn add_material(
     let albedo = albedo_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
     let emission = emission_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
 
-    let texture_index = albedo_tex
+    let (texture_index, albedo_offset, albedo_scale) = albedo_tex
         .or(emission_tex)
-        .map(|t| get_texture_index(t, data, unique_textures))
-        .unwrap_or(-1);
+        .map(|t| get_texture_info(t, unique_textures, atlas_layout))
+        .unwrap_or((-1, [0.0; 2], [1.0; 2]));
 
-    let normal_texture_index = normal_tex
-        .map(|t| get_texture_index(t, data, unique_textures))
-        .unwrap_or(-1);
+    let (normal_texture_index, normal_offset, normal_scale) = normal_tex
+        .map(|t| get_texture_info(t, unique_textures, atlas_layout))
+        .unwrap_or((-1, [0.0; 2], [1.0; 2]));
 
     let index = data.materials.len() as u32;
     data.materials.push(GpuMaterial {
@@ -342,29 +441,43 @@ fn add_material(
         texture_index,
         normal_texture_index,
         blend_indices,
+        albedo_offset,
+        albedo_scale,
+        normal_offset,
+        normal_scale,
     });
 
     index
 }
 
-fn get_texture_index(
+fn get_texture_info(
     tex: &Textures,
-    data: &mut SceneData,
-    unique_textures: &mut Vec<Arc<RgbImage>>,
-) -> i32 {
+    unique_textures: &[Arc<RgbImage>],
+    atlas_layout: Option<&AtlasLayout>,
+) -> (i32, [f32; 2], [f32; 2]) {
     if let Textures::ImageMap(im) = tex {
         let img = im.get_image();
         for (i, existing) in unique_textures.iter().enumerate() {
             if Arc::ptr_eq(existing, &img) {
-                return i as i32;
+                if let Some(layout) = atlas_layout {
+                    let rect = &layout.placements[i];
+                    return (
+                        i as i32,
+                        [
+                            rect.x as f32 / layout.width as f32,
+                            rect.y as f32 / layout.height as f32,
+                        ],
+                        [
+                            rect.width as f32 / layout.width as f32,
+                            rect.height as f32 / layout.height as f32,
+                        ],
+                    );
+                }
+                return (i as i32, [0.0; 2], [1.0; 2]);
             }
         }
-        let index = unique_textures.len() as i32;
-        unique_textures.push(img.clone());
-        data.textures.push((*img).clone());
-        return index;
     }
-    -1
+    (-1, [0.0; 2], [1.0; 2])
 }
 
 fn sample_texture(tex: &Textures) -> Vec3 {
@@ -498,5 +611,34 @@ mod tests {
         assert_ne!(child1_idx, child2_idx);
         assert_ne!(child1_idx, sphere_mat_idx as u32);
         assert_ne!(child2_idx, sphere_mat_idx as u32);
+    }
+
+    #[test]
+    fn test_flatten_scene_with_texture_atlas() {
+        use crate::material::texture::ImageMap;
+        use image::RgbImage;
+        use std::sync::Arc;
+
+        let img = Arc::new(RgbImage::new(100, 100));
+        let mat = Materials::Lambertian(Lambertian::new(ImageMap::new(img).into(), None));
+
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat);
+        let scene = Scene {
+            world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
+            camera: Default::default(),
+            background_color: Default::default(),
+            render_config: RenderConfig::default(),
+        };
+
+        let data = flatten_scene(&scene);
+
+        assert_eq!(data.materials.len(), 1);
+        let m = &data.materials[0];
+
+        // With one 100x100 texture in 8192x8192 atlas:
+        // offset should be [0, 0]
+        // scale should be [100/8192, 100/8192]
+        assert_eq!(m.albedo_offset, [0.0, 0.0]);
+        assert_eq!(m.albedo_scale, [100.0 / 8192.0, 100.0 / 8192.0]);
     }
 }

@@ -167,6 +167,14 @@ pub struct Material {
     pub normal_texture_index: i32,
     /// Indices of the two materials to blend
     pub blend_indices: [u32; 2],
+    /// UV offset for the albedo texture in the atlas
+    pub albedo_offset: [f32; 2],
+    /// UV scale for the albedo texture in the atlas
+    pub albedo_scale: [f32; 2],
+    /// UV offset for the normal texture in the atlas
+    pub normal_offset: [f32; 2],
+    /// UV scale for the normal texture in the atlas
+    pub normal_scale: [f32; 2],
 }
 
 #[repr(C)]
