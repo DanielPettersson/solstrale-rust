@@ -1,16 +1,7 @@
 //! Utilities for processing textures.
 
-use image::imageops::FilterType;
-use image::{DynamicImage, RgbImage};
 use std::error::Error;
 use std::fmt;
-
-/// Resizes a texture to the standard 1024x1024 resolution required by the GPU renderer.
-pub fn standardize_texture(image: &RgbImage) -> RgbImage {
-    let dyn_img = DynamicImage::ImageRgb8(image.clone());
-    let resized = dyn_img.resize_exact(1024, 1024, FilterType::Lanczos3);
-    resized.into_rgb8()
-}
 
 /// Represents the position and dimensions of a texture within the atlas.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,9 +121,21 @@ impl TexturePacker {
         // Restore original order
         placements.sort_by_key(|p| p.original_index);
 
+        // Calculate actual used bounds
+        let mut used_width = 0;
+        let mut used_height = 0;
+        for p in &placements {
+            used_width = used_width.max(p.x + p.width);
+            used_height = used_height.max(p.y + p.height);
+        }
+
+        // Align width to 64 pixels (256 bytes for RGBA8) to satisfy WebGPU requirements
+        let align = 64;
+        let aligned_width = used_width.div_ceil(align) * align;
+
         Ok(AtlasLayout {
-            width: self.max_width,
-            height: self.max_height,
+            width: aligned_width.max(1),
+            height: used_height.max(1),
             placements,
         })
     }

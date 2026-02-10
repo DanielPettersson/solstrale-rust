@@ -206,18 +206,22 @@ impl Renderer {
         );
 
         // Create texture atlas
-        let (atlas_width, atlas_height) = (8192, 8192);
-        let mut atlas_image = RgbImage::new(atlas_width, atlas_height);
+        let (max_atlas_width, max_atlas_height) = (8192, 8192);
+        let mut atlas_image;
 
         if !scene_data.textures.is_empty() {
-            let packer =
-                crate::util::texture_processing::TexturePacker::new(atlas_width, atlas_height);
+            let packer = crate::util::texture_processing::TexturePacker::new(
+                max_atlas_width,
+                max_atlas_height,
+            );
             let dims: Vec<(u32, u32)> = scene_data
                 .textures
                 .iter()
                 .map(|img| (img.width(), img.height()))
                 .collect();
             let layout = packer.pack(&dims).expect("Failed to pack textures in renderer - this should have been caught in flatten_scene");
+
+            atlas_image = RgbImage::new(layout.width, layout.height);
 
             for placement in layout.placements.iter() {
                 let texture = &scene_data.textures[placement.original_index];
@@ -262,8 +266,8 @@ impl Renderer {
             &atlas_rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * atlas_width),
-                rows_per_image: Some(atlas_height),
+                bytes_per_row: Some(4 * atlas_rgba.width()),
+                rows_per_image: Some(atlas_rgba.height()),
             },
             texture_extent,
         );
@@ -277,8 +281,8 @@ impl Renderer {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });

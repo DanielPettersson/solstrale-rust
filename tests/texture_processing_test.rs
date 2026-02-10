@@ -1,15 +1,7 @@
 #[cfg(test)]
 mod tests {
     use image::{ImageBuffer, RgbImage};
-    use solstrale::util::texture_processing::{TexturePacker, TextureRect, standardize_texture};
-
-    #[test]
-    fn test_standardize_texture_resizes_correctly() {
-        let img: RgbImage = ImageBuffer::new(100, 200);
-        let processed = standardize_texture(&img);
-        assert_eq!(processed.width(), 1024);
-        assert_eq!(processed.height(), 1024);
-    }
+    use solstrale::util::texture_processing::{TexturePacker, TextureRect};
 
     #[test]
     fn test_packer_simple_fit() {
@@ -28,6 +20,17 @@ mod tests {
         assert!(p1.y + p1.height <= 200);
         assert!(p2.x + p2.width <= 200);
         assert!(p2.y + p2.height <= 200);
+    }
+
+    #[test]
+    fn test_packer_alignment() {
+        let textures = vec![(10, 10)]; // 10px width
+        let packer = TexturePacker::new(100, 100);
+        let layout = packer.pack(&textures).unwrap();
+
+        // 10 aligned to 64 is 64.
+        assert_eq!(layout.width, 64);
+        assert_eq!(layout.height, 10);
     }
 
     #[test]
