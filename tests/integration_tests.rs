@@ -576,6 +576,8 @@ fn test_gpu_scene_nested_bvh() {
     render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
 }
 
+use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
+
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
     let (output_sender, output_receiver) = channel();
     let (_, abort_receiver) = channel();
@@ -587,12 +589,13 @@ fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64
         ray_trace(scene, &output_sender, &abort_receiver).unwrap();
     });
 
-    let mut image = RgbImage::new(width, height);
+    let mut output_buffer = None;
     for render_output in output_receiver {
-        if let Some(render_image) = render_output.render_image {
-            image = render_image;
-        }
+        output_buffer = Some(render_output.output_buffer);
     }
+
+    let (device, _) = get_wgpu_device_and_queue();
+    let image = buffer_to_image(device, &output_buffer.unwrap(), width, height);
 
     compare_output(name, &image, comparison_threshold);
 }

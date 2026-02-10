@@ -90,14 +90,6 @@ pub(crate) fn add_compute_pass(
     compute_pass.dispatch_workgroups(workgroup_count_x, 1, 1);
 }
 
-pub(crate) fn add_buffer_copy(
-    encoder: &mut wgpu::CommandEncoder,
-    source: &wgpu::Buffer,
-    destination: &wgpu::Buffer,
-) {
-    encoder.copy_buffer_to_buffer(source, 0, destination, 0, destination.size());
-}
-
 pub(crate) fn compute_pipeline<'a>(
     device: &wgpu::Device,
     bind_group_layout: &wgpu::BindGroupLayout,
@@ -221,4 +213,43 @@ fn pipeline_layout(
         bind_group_layouts: &[bind_group_layout],
         immediate_size: 0,
     })
+}
+
+/// Converts a wgpu buffer to an RgbImage
+pub fn buffer_to_image(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+) -> image::RgbImage {
+    let size = (width * height * 16) as u64;
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Staging Buffer"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let queue = &get_wgpu_device_and_queue().1;
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging_buffer, 0, size);
+    queue.submit(Some(encoder.finish()));
+
+    let result: Vec<[f32; 4]> = get_result_from_buffer(device, &staging_buffer);
+
+    let mut img = image::RgbImage::new(width, height);
+    for (i, pixel) in result.iter().enumerate() {
+        let x = (i as u32) % width;
+        let y = (i as u32) / width;
+        if x < width && y < height {
+            // Apply gamma correction (gamma = 2.0) and clamp
+            let r = (pixel[0].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+            let g = (pixel[1].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+            let b = (pixel[2].max(0.0).sqrt().min(0.999) * 256.0) as u8;
+            img.put_pixel(x, y, image::Rgb([r, g, b]));
+        }
+    }
+    img
 }

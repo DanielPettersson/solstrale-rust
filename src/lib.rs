@@ -54,7 +54,7 @@
 //! });
 //!
 //! for render_output in output_receiver {
-//!     let _image = render_output.render_image;
+//!     let _buffer = render_output.output_buffer;
 //! }
 //! ```
 //!
