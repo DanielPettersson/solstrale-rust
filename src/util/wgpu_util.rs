@@ -90,14 +90,6 @@ pub(crate) fn add_compute_pass(
     compute_pass.dispatch_workgroups(workgroup_count_x, 1, 1);
 }
 
-pub(crate) fn add_buffer_copy(
-    encoder: &mut wgpu::CommandEncoder,
-    source: &wgpu::Buffer,
-    destination: &wgpu::Buffer,
-) {
-    encoder.copy_buffer_to_buffer(source, 0, destination, 0, destination.size());
-}
-
 pub(crate) fn compute_pipeline<'a>(
     device: &wgpu::Device,
     bind_group_layout: &wgpu::BindGroupLayout,

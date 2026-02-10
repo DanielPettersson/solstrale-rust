@@ -428,7 +428,7 @@ impl Renderer {
         &self,
         output: &Sender<RenderProgress>,
         abort: &Receiver<bool>,
-    ) -> Result<wgpu::Buffer, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         let (device, queue) = get_wgpu_device_and_queue();
         let render_start_time = SystemTime::now();
 
@@ -436,7 +436,7 @@ impl Renderer {
 
         for sample in 1..=samples_per_pixel {
             if abort.try_recv().is_ok() {
-                return Ok(self.output_buffer.clone());
+                return Ok(());
             }
 
             // Update config buffer with current sample count
@@ -491,7 +491,7 @@ impl Renderer {
             })?;
         }
 
-        Ok(self.output_buffer.clone())
+        Ok(())
     }
 }
 

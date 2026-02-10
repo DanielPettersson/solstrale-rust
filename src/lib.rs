@@ -92,6 +92,6 @@ pub fn ray_trace<'a>(
     scene: Scene,
     output: &'a Sender<RenderProgress>,
     abort: &'a Receiver<bool>,
-) -> Result<wgpu::Buffer, Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>> {
     Renderer::new(scene)?.render(output, abort)
 }
