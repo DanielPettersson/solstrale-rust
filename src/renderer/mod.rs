@@ -138,6 +138,7 @@ pub struct Renderer {
     #[allow(dead_code)]
     lights_buffer: wgpu::Buffer,
     post_processors: Vec<PostProcessors>,
+    render_config: GpuRenderConfig,
 }
 
 impl Renderer {
@@ -332,7 +333,7 @@ impl Renderer {
             BufferUsages::UNIFORM,
         );
 
-        let gpu_config = GpuRenderConfig {
+        let render_config = GpuRenderConfig {
             width,
             height,
             sample_count: 0,
@@ -348,7 +349,7 @@ impl Renderer {
             device,
             queue,
             "Config Buffer",
-            &[gpu_config],
+            &[render_config],
             BufferUsages::UNIFORM,
         );
 
@@ -420,45 +421,36 @@ impl Renderer {
             config_buffer,
             lights_buffer,
             post_processors,
+            render_config,
         })
     }
 
     /// Executes the rendering of the image on the GPU
     pub fn render(
-        &self,
+        &mut self,
         output: &Sender<RenderProgress>,
         abort: &Receiver<bool>,
     ) -> Result<(), Box<dyn Error>> {
         let (device, queue) = get_wgpu_device_and_queue();
         let render_start_time = SystemTime::now();
-
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
+        let pixel_count = self.width * self.height;
+        let workgroup_count = pixel_count.div_ceil(64);
 
         for sample in 1..=samples_per_pixel {
             if abort.try_recv().is_ok() {
                 return Ok(());
             }
 
-            // Update config buffer with current sample count
-            let gpu_config = GpuRenderConfig {
-                width: self.width,
-                height: self.height,
-                sample_count: sample,
-                max_depth: 50,
-                background_color: [
-                    self.scene.background_color.x as f32,
-                    self.scene.background_color.y as f32,
-                    self.scene.background_color.z as f32,
-                ],
-                light_count: self.scene.world.get_lights().len() as u32,
-            };
-            queue.write_buffer(&self.config_buffer, 0, bytemuck::cast_slice(&[gpu_config]));
+            self.render_config.sample_count = sample;
+            queue.write_buffer(
+                &self.config_buffer,
+                0,
+                bytemuck::cast_slice(&[self.render_config]),
+            );
 
             let mut encoder =
                 device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-            let pixel_count = self.width * self.height;
-            let workgroup_count = pixel_count.div_ceil(64);
 
             add_compute_pass(
                 &mut encoder,
