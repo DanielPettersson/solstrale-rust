@@ -16,11 +16,11 @@ Implement the core packing algorithm and data structures to manage the atlas lay
 ## Phase 2: GpuData and Scene Flattener Refactor
 Update the data structures passed to the GPU to include atlas coordinates and scales.
 
-- [ ] Task: Update `GpuData` structures
-    - [ ] Modify `Material` struct in `src/renderer/gpu_data.rs` to include `uv_offset` and `uv_scale`
-    - [ ] Update `SceneFlattener` to calculate these values during scene processing
-- [ ] Task: TDD - Scene Flattener verification
-    - [ ] Write unit tests to ensure `SceneFlattener` correctly assigns atlas coordinates to materials
+- [x] Task: Update `GpuData` structures 455ba32
+    - [x] Modify `Material` struct in `src/renderer/gpu_data.rs` to include `uv_offset` and `uv_scale`
+- [x] Task: Update `SceneFlattener` to calculate these values during scene processing 455ba32
+- [x] Task: TDD - Scene Flattener verification 455ba32
+    - [x] Write unit tests to ensure `SceneFlattener` correctly assigns atlas coordinates to materials
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: GpuData and Scene Flattener Refactor' (Protocol in workflow.md)
 
 ## Phase 3: Texture Upload and Shader Updates
