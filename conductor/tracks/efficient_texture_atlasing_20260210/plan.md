@@ -26,13 +26,13 @@ Update the data structures passed to the GPU to include atlas coordinates and sc
 ## Phase 3: Texture Upload and Shader Updates
 Modify the renderer to upload a single atlas and update the WGSL shader to use it.
 
-- [ ] Task: Refactor texture upload in `src/renderer/mod.rs`
-    - [ ] Change `texture_2d_array` to a single `texture_2d` for the atlas
-    - [ ] Implement the logic to blit individual textures into the atlas buffer before upload
-- [ ] Task: Update `ray_trace.wgsl`
-    - [ ] Modify the texture sampling logic to apply the `uv_offset` and `uv_scale` to mesh UVs
-- [ ] Task: TDD - Shader and Upload verification
-    - [ ] Update integration tests in `tests/integration_tests.rs` to verify visual correctness with different texture sizes
+- [x] Task: Refactor texture upload in `src/renderer/mod.rs` 5a52a8b
+    - [x] Change `texture_2d_array` to a single `texture_2d` for the atlas
+    - [x] Implement the logic to blit individual textures into the atlas buffer before upload
+- [x] Task: Update `ray_trace.wgsl` 5a52a8b
+    - [x] Modify the texture sampling logic to apply the `uv_offset` and `uv_scale` to mesh UVs
+- [x] Task: TDD - Shader and Upload verification 5a52a8b
+    - [x] Update integration tests in `tests/integration_tests.rs` to verify visual correctness with different texture sizes
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Texture Upload and Shader Updates' (Protocol in workflow.md)
 
 ## Phase 4: Final Integration and Optimization
