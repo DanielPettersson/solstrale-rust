@@ -205,25 +205,42 @@ impl Renderer {
             BufferUsages::STORAGE,
         );
 
-        // Create texture-array
-        let texture_list: Vec<RgbImage> = if scene_data.textures.is_empty() {
-            vec![RgbImage::new(1024, 1024)]
-        } else {
-            scene_data
+        // Create texture atlas
+        let (atlas_width, atlas_height) = (8192, 8192);
+        let mut atlas_image = RgbImage::new(atlas_width, atlas_height);
+
+        if !scene_data.textures.is_empty() {
+            let packer =
+                crate::util::texture_processing::TexturePacker::new(atlas_width, atlas_height);
+            let dims: Vec<(u32, u32)> = scene_data
                 .textures
                 .iter()
-                .map(crate::util::texture_processing::standardize_texture)
-                .collect()
-        };
+                .map(|img| (img.width(), img.height()))
+                .collect();
+            let layout = packer.pack(&dims).expect("Failed to pack textures in renderer - this should have been caught in flatten_scene");
+
+            for placement in layout.placements.iter() {
+                let texture = &scene_data.textures[placement.original_index];
+                image::imageops::replace(
+                    &mut atlas_image,
+                    texture,
+                    placement.x as i64,
+                    placement.y as i64,
+                );
+            }
+        } else {
+            // Create a 1x1 white pixel if no textures, just to have valid binding
+            atlas_image = RgbImage::from_pixel(1, 1, Rgb([255, 255, 255]));
+        }
 
         let texture_extent = wgpu::Extent3d {
-            width: 1024,
-            height: 1024,
-            depth_or_array_layers: texture_list.len() as u32,
+            width: atlas_image.width(),
+            height: atlas_image.height(),
+            depth_or_array_layers: 1,
         };
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Texture Array"),
+            label: Some("Texture Atlas"),
             size: texture_extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -233,35 +250,26 @@ impl Renderer {
             view_formats: &[],
         });
 
-        for (i, img) in texture_list.iter().enumerate() {
-            let rgba = DynamicImage::ImageRgb8(img.clone()).to_rgba8();
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: i as u32,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &rgba,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * 1024),
-                    rows_per_image: Some(1024),
-                },
-                wgpu::Extent3d {
-                    width: 1024,
-                    height: 1024,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
+        let atlas_rgba = DynamicImage::ImageRgb8(atlas_image).to_rgba8();
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &atlas_rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * atlas_width),
+                rows_per_image: Some(atlas_height),
+            },
+            texture_extent,
+        );
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            dimension: Some(wgpu::TextureViewDimension::D2),
             ..Default::default()
         });
 
@@ -269,8 +277,8 @@ impl Renderer {
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -354,7 +362,7 @@ impl Renderer {
                 storage_binding(true, 0),  // 5: materials
                 uniform_binding(std::mem::size_of::<GpuCamera>() as u64), // 6: camera
                 uniform_binding(std::mem::size_of::<GpuRenderConfig>() as u64), // 7: config
-                texture_binding(wgpu::TextureViewDimension::D2Array), // 8: texture array
+                texture_binding(wgpu::TextureViewDimension::D2), // 8: texture array
                 sampler_binding(),         // 9: sampler
                 storage_binding(true, 0),  // 10: lights
             ],

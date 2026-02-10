@@ -135,7 +135,7 @@ var<uniform> camera: Camera;
 var<uniform> config: RenderConfig;
 
 @group(0) @binding(8)
-var texture_array: texture_2d_array<f32>;
+var texture_array: texture_2d<f32>;
 
 @group(0) @binding(9)
 var texture_sampler: sampler;
@@ -372,13 +372,15 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     var albedo = material.albedo;
     if (material.texture_index >= 0) {
         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
-        albedo = textureSampleLevel(texture_array, texture_sampler, uv, material.texture_index, 0.0).rgb;
+        let uv_atlas = material.albedo_offset + uv * material.albedo_scale;
+        albedo = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
     }
 
     var normal = rec.normal;
     if (material.normal_texture_index >= 0) {
          let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
-         let map_color = textureSampleLevel(texture_array, texture_sampler, uv, material.normal_texture_index, 0.0).rgb;
+         let uv_atlas = material.normal_offset + uv * material.normal_scale;
+         let map_color = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
          let map_n = map_color * 2.0 - 1.0;
          normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
     }
