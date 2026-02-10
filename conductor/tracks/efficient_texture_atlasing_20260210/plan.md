@@ -8,7 +8,7 @@ Implement the core packing algorithm and data structures to manage the atlas lay
 - [x] Task: Implement `TexturePacker` utility 87fad38
     - [ ] Define `TextureRect` and `AtlasLayout` structs in `src/util/texture_processing.rs`
     - [ ] Implement Shelf Packing algorithm logic
-- [ ] Task: TDD - `TexturePacker` unit tests
+- [x] Task: TDD - `TexturePacker` unit tests 87fad38
     - [ ] Write tests in `tests/texture_processing_test.rs` to verify non-overlapping placement
     - [ ] Write tests to verify the error condition when textures exceed max atlas size
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Texture Packing Utility' (Protocol in workflow.md)
