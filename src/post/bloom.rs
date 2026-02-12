@@ -3,9 +3,7 @@
 use crate::geo::vec3::Vec3;
 use crate::post::PostProcessor;
 use crate::util::gaussian::create_gaussian_blur_weights;
-use crate::util::wgpu_util::{
-    bind_group, bind_group_layout, compute_pipeline, get_wgpu_device_and_queue, storage_binding,
-};
+use crate::util::wgpu_util::{bind_group, bind_group_layout, compute_pipeline, storage_binding};
 use std::error::Error;
 use wgpu::BufferUsages;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -47,6 +45,7 @@ impl BloomPostProcessor {
         kernel_size_fraction: f64,
         threshold: Option<f64>,
         max_intensity: Option<f64>,
+        device: &wgpu::Device,
     ) -> Result<Self, simple_error::SimpleError> {
         if !(0. ..=0.5).contains(&kernel_size_fraction) {
             return Err(simple_error::SimpleError::new(
@@ -56,8 +55,6 @@ impl BloomPostProcessor {
 
         let threshold = threshold.unwrap_or(Vec3::new(1., 1., 1.).length());
         let max_intensity = max_intensity.unwrap_or(1000.);
-
-        let (device, _) = get_wgpu_device_and_queue();
 
         let filter_bright_module =
             device.create_shader_module(wgpu::include_wgsl!("bloom_filter_bright.wgsl"));
@@ -191,10 +188,8 @@ impl PostProcessor for BloomPostProcessor {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         buffer: &wgpu::Buffer,
-        _num_samples: u32,
+        device: &wgpu::Device,
     ) -> Result<(), Box<dyn Error>> {
-        let (device, _) = get_wgpu_device_and_queue();
-
         let intermediate_buffer1 = self
             .intermediate_buffer1
             .as_ref()

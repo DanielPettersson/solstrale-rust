@@ -42,12 +42,13 @@ fn test_scene() {
 
 #[test]
 fn test_scene_bloom() {
+    let (device, _) = get_wgpu_device_and_queue();
     let render_config = RenderConfig {
         width: 200,
         height: 100,
         samples_per_pixel: 100,
         post_processors: vec![
-            BloomPostProcessor::new(0.1, None, Some(3.0))
+            BloomPostProcessor::new(0.1, None, Some(3.0), &device)
                 .unwrap()
                 .into(),
         ],
@@ -60,11 +61,12 @@ fn test_scene_bloom() {
 
 #[test]
 fn test_scene_saturation() {
+    let (device, _) = get_wgpu_device_and_queue();
     let render_config = RenderConfig {
         width: 200,
         height: 100,
         samples_per_pixel: 100,
-        post_processors: vec![SaturationPostProcessor::new(-0.7).unwrap().into()],
+        post_processors: vec![SaturationPostProcessor::new(-0.7, &device).unwrap().into()],
         ..Default::default()
     };
     let scene = create_test_scene(render_config);
@@ -74,13 +76,14 @@ fn test_scene_saturation() {
 
 #[test]
 fn test_scene_bloom_and_saturation() {
+    let (device, _) = get_wgpu_device_and_queue();
     let render_config = RenderConfig {
         width: 200,
         height: 100,
         samples_per_pixel: 100,
         post_processors: vec![
-            SaturationPostProcessor::new(-0.7).unwrap().into(),
-            BloomPostProcessor::new(0.1, None, Some(3.0))
+            SaturationPostProcessor::new(-0.7, &device).unwrap().into(),
+            BloomPostProcessor::new(0.1, None, Some(3.0), &device)
                 .unwrap()
                 .into(),
         ],
@@ -199,6 +202,7 @@ fn test_render_normal_mapping_sphere_2() {
 
 #[test]
 fn test_render_scene_without_light() {
+    let (device, queue) = get_wgpu_device_and_queue();
     let render_config = RenderConfig {
         width: 20,
         height: 10,
@@ -209,7 +213,7 @@ fn test_render_scene_without_light() {
     let (output_sender, _) = channel();
     let (_, abort_receiver) = channel();
 
-    let res = ray_trace(scene, &output_sender, &abort_receiver);
+    let res = ray_trace(scene, &output_sender, &abort_receiver, device, queue);
 
     match res {
         Ok(_) => panic!("There should be an error"),
@@ -579,6 +583,7 @@ fn test_gpu_scene_nested_bvh() {
 use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
 
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
+    let (device, queue) = get_wgpu_device_and_queue();
     let (output_sender, output_receiver) = channel();
     let (_, abort_receiver) = channel();
 
@@ -586,7 +591,7 @@ fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64
     let height = scene.render_config.height as u32;
 
     thread::spawn(move || {
-        ray_trace(scene, &output_sender, &abort_receiver).unwrap();
+        ray_trace(scene, &output_sender, &abort_receiver, device, queue).unwrap();
     });
 
     let mut output_buffer = None;
@@ -594,8 +599,7 @@ fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64
         output_buffer = Some(render_output.output_buffer);
     }
 
-    let (device, _) = get_wgpu_device_and_queue();
-    let image = buffer_to_image(device, &output_buffer.unwrap(), width, height);
+    let image = buffer_to_image(device, queue, &output_buffer.unwrap(), width, height);
 
     compare_output(name, &image, comparison_threshold);
 }

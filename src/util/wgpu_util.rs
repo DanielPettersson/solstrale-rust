@@ -218,6 +218,7 @@ fn pipeline_layout(
 /// Converts a wgpu buffer to an RgbImage
 pub fn buffer_to_image(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
     width: u32,
     height: u32,
@@ -230,7 +231,6 @@ pub fn buffer_to_image(
         mapped_at_creation: false,
     });
 
-    let queue = &get_wgpu_device_and_queue().1;
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 

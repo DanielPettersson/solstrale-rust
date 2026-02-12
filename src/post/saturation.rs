@@ -1,9 +1,7 @@
 //! Post-processor for applying saturation
 
 use crate::post::PostProcessor;
-use crate::util::wgpu_util::{
-    bind_group, bind_group_layout, compute_pipeline, get_wgpu_device_and_queue, storage_binding,
-};
+use crate::util::wgpu_util::{bind_group, bind_group_layout, compute_pipeline, storage_binding};
 use std::error::Error;
 
 #[derive(Clone)]
@@ -11,7 +9,6 @@ use std::error::Error;
 pub struct SaturationPostProcessor {
     width: u32,
     height: u32,
-
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
 }
@@ -20,14 +17,15 @@ impl SaturationPostProcessor {
     /// Creates new saturation post-processor
     /// # Arguments
     /// * `saturation_factor` Saturation of the image. From -1 (black and white) to 1 (fully saturated)
-    pub fn new(saturation_factor: f64) -> Result<Self, simple_error::SimpleError> {
+    pub fn new(
+        saturation_factor: f64,
+        device: &wgpu::Device,
+    ) -> Result<Self, simple_error::SimpleError> {
         if !(-1. ..=1.).contains(&saturation_factor) {
             return Err(simple_error::SimpleError::new(
                 "saturation_factor must be between -1 and 1",
             ));
         }
-
-        let (device, _) = get_wgpu_device_and_queue();
 
         let module = device.create_shader_module(wgpu::include_wgsl!("saturation.wgsl"));
 
@@ -65,10 +63,8 @@ impl PostProcessor for SaturationPostProcessor {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         buffer: &wgpu::Buffer,
-        _num_samples: u32,
+        device: &wgpu::Device,
     ) -> Result<(), Box<dyn Error>> {
-        let (device, _) = get_wgpu_device_and_queue();
-
         let bind_group = bind_group(
             device,
             &self.bind_group_layout,

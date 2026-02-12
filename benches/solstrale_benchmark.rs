@@ -6,10 +6,10 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use derive_more::{Constructor, Display};
 
+use crate::scenes::{create_test_scene, new_bvh_test_scene};
 use solstrale::ray_trace;
 use solstrale::renderer::RenderConfig;
-
-use crate::scenes::{create_test_scene, new_bvh_test_scene};
+use solstrale::util::wgpu_util::get_wgpu_device_and_queue;
 
 #[path = "../tests/scenes.rs"]
 mod scenes;
@@ -46,11 +46,14 @@ pub fn bvh_benchmark(c: &mut Criterion) {
                         )
                     },
                     |scene| {
+                        let (device, queue) = get_wgpu_device_and_queue();
+
                         let (output_sender, output_receiver) = channel();
                         let (_, abort_receiver) = channel();
 
                         thread::spawn(move || {
-                            ray_trace(scene, &output_sender, &abort_receiver).unwrap();
+                            ray_trace(scene, &output_sender, &abort_receiver, device, queue)
+                                .unwrap();
                         });
 
                         for _ in output_receiver {}
@@ -75,11 +78,13 @@ pub fn scene_benchmark(c: &mut Criterion) {
                 create_test_scene(render_config)
             },
             |scene| {
+                let (device, queue) = get_wgpu_device_and_queue();
+
                 let (output_sender, output_receiver) = channel();
                 let (_, abort_receiver) = channel();
 
                 thread::spawn(move || {
-                    ray_trace(scene, &output_sender, &abort_receiver).unwrap();
+                    ray_trace(scene, &output_sender, &abort_receiver, device, queue).unwrap();
                 });
 
                 for _ in output_receiver {}

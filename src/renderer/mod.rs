@@ -13,8 +13,8 @@ use crate::post::PostProcessors;
 use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
 use crate::util::wgpu_util::{
-    add_compute_pass, bind_group, bind_group_layout, compute_pipeline, get_wgpu_device_and_queue,
-    sampler_binding, storage_binding, texture_binding, uniform_binding,
+    add_compute_pass, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
+    storage_binding, texture_binding, uniform_binding,
 };
 use image::{DynamicImage, Rgb, RgbImage};
 use simple_error::SimpleError;
@@ -111,7 +111,7 @@ impl RenderImageStrategy {
 
 /// Renderer is a central part of the raytracer responsible for controlling the
 /// process reporting back progress to the caller
-pub struct Renderer {
+pub struct Renderer<'a> {
     #[allow(dead_code)]
     scene: Scene,
     width: u32,
@@ -139,11 +139,17 @@ pub struct Renderer {
     lights_buffer: wgpu::Buffer,
     post_processors: Vec<PostProcessors>,
     render_config: GpuRenderConfig,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
 }
 
-impl Renderer {
+impl<'a> Renderer<'a> {
     /// Creates a new GPU renderer given a scene
-    pub fn new(scene: Scene) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        scene: Scene,
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+    ) -> Result<Self, Box<dyn Error>> {
         if scene.world.get_lights().is_empty() {
             return Err(Box::new(SimpleError::new(
                 "Scene should have at least one light",
@@ -152,7 +158,6 @@ impl Renderer {
 
         let width = scene.render_config.width as u32;
         let height = scene.render_config.height as u32;
-        let (device, queue) = get_wgpu_device_and_queue();
 
         let module = device.create_shader_module(wgpu::include_wgsl!("ray_trace.wgsl"));
 
@@ -422,6 +427,8 @@ impl Renderer {
             lights_buffer,
             post_processors,
             render_config,
+            device,
+            queue,
         })
     }
 
@@ -431,7 +438,6 @@ impl Renderer {
         output: &Sender<RenderProgress>,
         abort: &Receiver<bool>,
     ) -> Result<(), Box<dyn Error>> {
-        let (device, queue) = get_wgpu_device_and_queue();
         let render_start_time = SystemTime::now();
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
         let pixel_count = self.width * self.height;
@@ -443,14 +449,15 @@ impl Renderer {
             }
 
             self.render_config.sample_count = sample;
-            queue.write_buffer(
+            self.queue.write_buffer(
                 &self.config_buffer,
                 0,
                 bytemuck::cast_slice(&[self.render_config]),
             );
 
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
             add_compute_pass(
                 &mut encoder,
@@ -461,12 +468,12 @@ impl Renderer {
 
             if sample == samples_per_pixel {
                 for p in &self.post_processors {
-                    p.post_process(&mut encoder, &self.output_buffer, 1)?;
+                    p.post_process(&mut encoder, &self.output_buffer, self.device)?;
                 }
             }
 
             let command_buffer = encoder.finish();
-            queue.submit([command_buffer]);
+            self.queue.submit([command_buffer]);
 
             let now = SystemTime::now();
 

@@ -27,6 +27,7 @@
 //! # use solstrale::material::texture::SolidColor;
 //! # use solstrale::ray_trace;
 //! # use solstrale::renderer::{RenderConfig, Scene};
+//! # use solstrale::util::wgpu_util::get_wgpu_device_and_queue;
 //! let camera = CameraConfig {
 //!     vertical_fov_degrees: 20.,
 //!     aperture_size: 0.1,
@@ -46,11 +47,13 @@
 //!     render_config: RenderConfig::default(),
 //! };
 //!
+//! let (device, queue) = get_wgpu_device_and_queue();
+//!
 //! let (output_sender, output_receiver) = channel();
 //! let (_, abort_receiver) = channel();
 //!
 //! thread::spawn(move || {
-//!     ray_trace(scene, &output_sender, &abort_receiver).unwrap();
+//!     ray_trace(scene, &output_sender, &abort_receiver, &device, &queue).unwrap();
 //! });
 //!
 //! for render_output in output_receiver {
@@ -92,6 +95,8 @@ pub fn ray_trace<'a>(
     scene: Scene,
     output: &'a Sender<RenderProgress>,
     abort: &'a Receiver<bool>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
 ) -> Result<(), Box<dyn Error>> {
-    Renderer::new(scene)?.render(output, abort)
+    Renderer::new(scene, device, queue)?.render(output, abort)
 }

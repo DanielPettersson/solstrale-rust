@@ -21,7 +21,7 @@ pub trait PostProcessor {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         output_buffer: &wgpu::Buffer,
-        num_samples: u32,
+        device: &wgpu::Device,
     ) -> Result<(), Box<dyn Error>>;
 }
 
