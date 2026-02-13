@@ -17,6 +17,7 @@ use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{BloomPostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
+use wgpu::naga::compact::KeepUnused::No;
 
 use crate::scenes::{
     create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
@@ -386,6 +387,57 @@ fn test_gpu_scene_box() {
     };
 
     render_and_compare_output(scene, "gpu_box", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_quad() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(278., 278., -800.),
+        look_at: Vec3::new(278., 278., 0.),
+        vertical_fov_degrees: 35.,
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(
+        Quad::new(
+            Vec3::new(408., 554., 383.),
+            Vec3::new(-260., 0., 0.),
+            Vec3::new(0., 0., -210.),
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
+
+    world.push(
+        Quad::new(
+            Vec3::new(0., 0., 555.),
+            Vec3::new(555., 0., 0.),
+            Vec3::new(0., 555., 0.),
+            mat.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_quad", 0.95);
 }
 
 #[test]
