@@ -75,6 +75,8 @@ const MAT_DIELECTRIC = 2u;
 const MAT_DIFFUSE_LIGHT = 3u;
 const MAT_BLEND = 4u;
 
+const CLAMPING_THRESHOLD = 3.5;
+
 struct Camera {
     origin: vec3<f32>,
     lens_radius: f32,
@@ -696,6 +698,8 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
             break;
         }
     }
+    
+    accumulated_color = min(accumulated_color, vec3<f32>(CLAMPING_THRESHOLD));
 
     if (config.sample_count <= 1u) {
         output_buffer[index] = vec4<f32>(accumulated_color, 1.0);
