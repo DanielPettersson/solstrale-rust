@@ -7,8 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/DanielPettersson/solstrale-rust"
 keywords = ["Pathtracing", "Graphics"]
 exclude = [
-    "resources/*",
-    "oidn/*"
+    "resources/*"
 ]
 
 [profile.release]
