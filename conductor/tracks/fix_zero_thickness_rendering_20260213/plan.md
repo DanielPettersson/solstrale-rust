@@ -14,7 +14,7 @@
 - [x] Task: Verify all existing tests pass, specifically `test_gpu_scene_quad`. 1cf60e1
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Fix & Verify (TDD)' (Protocol in workflow.md) 2790357
 
-## Phase 3: Quality Assurance
+## Phase 3: Quality Assurance [checkpoint: c0e3ffe]
 - [x] Task: Run `./coverage.sh` and ensure coverage for `src/hittable` and `src/renderer` remains > 90%. d674072
 - [x] Task: Run `cargo clippy` and `cargo fmt` to ensure code quality. d674072
-- [~] Task: Conductor - User Manual Verification 'Phase 3: Quality Assurance' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Quality Assurance' (Protocol in workflow.md) c0e3ffe
