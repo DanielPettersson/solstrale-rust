@@ -1,7 +1,7 @@
 # Implementation Plan: Fix Zero-Thickness Hittable Rendering Bug
 
 ## Phase 1: Investigation & Reproduce
-- [ ] Task: Confirm failure of `test_gpu_scene_quad` in `tests/integration_tests.rs`.
+- [x] Task: Confirm failure of `test_gpu_scene_quad` in `tests/integration_tests.rs`. b444d0e
 - [ ] Task: Inspect `src/hittable/quad.rs` and `src/hittable/triangle.rs` bounding box (AABB) generation logic.
 - [ ] Task: Inspect `src/hittable/bvh.rs` to see how it handles AABBs with zero width/height/depth.
 - [ ] Task: Inspect `src/renderer/ray_trace.wgsl` intersection logic for potential division by zero or precision issues with axis-aligned surfaces.
