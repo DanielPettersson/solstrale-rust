@@ -2,10 +2,10 @@
 
 ## Phase 1: Investigation & Reproduce
 - [x] Task: Confirm failure of `test_gpu_scene_quad` in `tests/integration_tests.rs`. b444d0e
-- [ ] Task: Inspect `src/hittable/quad.rs` and `src/hittable/triangle.rs` bounding box (AABB) generation logic.
-- [ ] Task: Inspect `src/hittable/bvh.rs` to see how it handles AABBs with zero width/height/depth.
-- [ ] Task: Inspect `src/renderer/ray_trace.wgsl` intersection logic for potential division by zero or precision issues with axis-aligned surfaces.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Investigation & Reproduce' (Protocol in workflow.md)
+- [x] Task: Inspect `src/hittable/quad.rs` and `src/hittable/triangle.rs` bounding box (AABB) generation logic. 683cdbc
+- [x] Task: Inspect `src/hittable/bvh.rs` to see how it handles AABBs with zero width/height/depth. 683cdbc
+- [x] Task: Inspect `src/renderer/ray_trace.wgsl` intersection logic for potential division by zero or precision issues with axis-aligned surfaces. 683cdbc
+- [~] Task: Conductor - User Manual Verification 'Phase 1: Investigation & Reproduce' (Protocol in workflow.md)
 
 ## Phase 2: Fix & Verify (TDD)
 - [ ] Task: Create new unit tests for AABB generation of axis-aligned quads and triangles to verify they provide sufficient volume for the BVH.
