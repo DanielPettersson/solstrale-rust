@@ -1,8 +1,0 @@
-{
-  "track_id": "gpu_imagemap_textures_20260201",
-  "type": "feature",
-  "status": "new",
-  "created_at": "2026-02-01T12:00:00Z",
-  "updated_at": "2026-02-01T12:00:00Z",
-  "description": "Implement support for imagemap textures on materials in the GPU renderer. There is an existing integration test test_texture_map that is currently failing for this."
-}

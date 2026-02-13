@@ -1,8 +1,0 @@
-{
-  "track_id": "gpu_nested_bvh_fix_20260131",
-  "type": "bug",
-  "status": "new",
-  "created_at": "2026-01-31T12:00:00Z",
-  "updated_at": "2026-01-31T12:00:00Z",
-  "description": "There is a bug when rendering a scene using the GpuRenderer with nested bvh's. The objects in the nested bvh are not visible in the rendered output. There is a test test_gpu_scene_nested_bvh that fails because of this bug. The suspicion is that the bvh flattening in scene_flattener.rs is causing this."
-}
