@@ -1,0 +1,8 @@
+{
+  "track_id": "fix_zero_thickness_rendering_20260213",
+  "type": "bug",
+  "status": "new",
+  "created_at": "2026-02-13T10:00:00Z",
+  "updated_at": "2026-02-13T10:00:00Z",
+  "description": "Fix rendering of axis-aligned quads with zero thickness in one plane (failing test_gpu_scene_quad)"
+}
