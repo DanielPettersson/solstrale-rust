@@ -15,6 +15,6 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Fix & Verify (TDD)' (Protocol in workflow.md) 2790357
 
 ## Phase 3: Quality Assurance
-- [ ] Task: Run `./coverage.sh` and ensure coverage for `src/hittable` and `src/renderer` remains > 90%.
-- [ ] Task: Run `cargo clippy` and `cargo fmt` to ensure code quality.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Quality Assurance' (Protocol in workflow.md)
+- [x] Task: Run `./coverage.sh` and ensure coverage for `src/hittable` and `src/renderer` remains > 90%. d674072
+- [x] Task: Run `cargo clippy` and `cargo fmt` to ensure code quality. d674072
+- [~] Task: Conductor - User Manual Verification 'Phase 3: Quality Assurance' (Protocol in workflow.md)

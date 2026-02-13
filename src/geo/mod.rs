@@ -193,7 +193,7 @@ mod tests {
         // Flat in Z
         let aabb = Aabb::new_from_2_points(Vec3::new(0., 0., 555.), Vec3::new(555., 555., 555.));
         assert_eq!(aabb.z.size(), 0.0);
-        
+
         let padded = aabb.pad_if_needed();
         assert!(padded.z.size() >= PAD_DELTA - 0.000001);
         assert_eq!(padded.x.size(), 555.0);
@@ -202,6 +202,12 @@ mod tests {
         // Check if padding is enough for f32 precision at large coordinates
         let z_min_f32 = padded.z.min as f32;
         let z_max_f32 = padded.z.max as f32;
-        assert!(z_max_f32 > z_min_f32, "Padding {} is too small for f32 at 555.0: {} == {}", PAD_DELTA, z_min_f32, z_max_f32);
+        assert!(
+            z_max_f32 > z_min_f32,
+            "Padding {} is too small for f32 at 555.0: {} == {}",
+            PAD_DELTA,
+            z_min_f32,
+            z_max_f32
+        );
     }
 }
