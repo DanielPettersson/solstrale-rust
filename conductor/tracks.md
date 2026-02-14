@@ -4,6 +4,6 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: Interactive Camera Rendering**
+- [x] **Track: Interactive Camera Rendering**
 *Link: [./tracks/interactive_camera_20260214/](./tracks/interactive_camera_20260214/)*
 
