@@ -422,12 +422,17 @@ impl<'a> Renderer<'a> {
                 return Ok(());
             }
 
-            if let Ok(config) = camera_config.try_recv() {
+            let mut latest_camera_config = None;
+            while let Ok(config) = camera_config.try_recv() {
+                latest_camera_config = Some(config);
+            }
+
+            if let Some(config) = latest_camera_config {
                 self.update_camera(&config);
                 sample = 1;
                 render_start_time = SystemTime::now();
 
-                // Clear output buffer when camera moves
+                // Clear the output buffer when the camera moves
                 let mut encoder = self
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });

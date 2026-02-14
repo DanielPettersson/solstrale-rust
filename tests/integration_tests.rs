@@ -17,7 +17,6 @@ use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{BloomPostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
-use wgpu::naga::compact::KeepUnused::No;
 
 use crate::scenes::{
     create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
@@ -215,7 +214,15 @@ fn test_render_scene_without_light() {
     let (_, camera_config_receiver) = channel();
     let (_, abort_receiver) = channel();
 
-    let res = ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, device, queue, false);
+    let res = ray_trace(
+        scene,
+        &output_sender,
+        &camera_config_receiver,
+        &abort_receiver,
+        device,
+        queue,
+        false,
+    );
 
     match res {
         Ok(_) => panic!("There should be an error"),
@@ -645,7 +652,16 @@ fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64
     let height = scene.render_config.height as u32;
 
     thread::spawn(move || {
-        ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, device, queue, false).unwrap();
+        ray_trace(
+            scene,
+            &output_sender,
+            &camera_config_receiver,
+            &abort_receiver,
+            device,
+            queue,
+            false,
+        )
+        .unwrap();
     });
 
     let mut output_buffer = None;

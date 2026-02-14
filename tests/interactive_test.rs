@@ -1,6 +1,3 @@
-use std::sync::mpsc::channel;
-use std::thread;
-use std::time::Duration;
 use solstrale::camera::CameraConfig;
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Sphere};
@@ -8,6 +5,8 @@ use solstrale::material::DiffuseLight;
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
 use solstrale::util::wgpu_util::get_wgpu_device_and_queue;
+use std::sync::mpsc::channel;
+use std::thread;
 
 #[test]
 fn test_interactive_camera_restart() {
@@ -19,7 +18,14 @@ fn test_interactive_camera_restart() {
         ..Default::default()
     };
     let mut world = Vec::new();
-    world.push(Sphere::new(Vec3::new(0., 10., 0.), 1., DiffuseLight::new(1., 1., 1., None).into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(0., 10., 0.),
+            1.,
+            DiffuseLight::new(1., 1., 1., None).into(),
+        )
+        .into(),
+    );
 
     let scene = Scene {
         world: Bvh::new(world).into(),
@@ -36,7 +42,16 @@ fn test_interactive_camera_restart() {
     let (abort_sender, abort_receiver) = channel();
 
     thread::spawn(move || {
-        ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, device, queue, true).unwrap();
+        ray_trace(
+            scene,
+            &output_sender,
+            &camera_config_receiver,
+            &abort_receiver,
+            device,
+            queue,
+            true,
+        )
+        .unwrap();
     });
 
     // Wait for some progress
@@ -50,10 +65,12 @@ fn test_interactive_camera_restart() {
     assert!(first_progress > 0.1);
 
     // Update camera
-    camera_config_sender.send(CameraConfig {
-        look_from: Vec3::new(0., 0., 2.),
-        ..Default::default()
-    }).unwrap();
+    camera_config_sender
+        .send(CameraConfig {
+            look_from: Vec3::new(0., 0., 2.),
+            ..Default::default()
+        })
+        .unwrap();
 
     // Verify progress restarts
     let mut restarted = false;

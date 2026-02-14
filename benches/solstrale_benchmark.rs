@@ -50,10 +50,19 @@ pub fn bvh_benchmark(c: &mut Criterion) {
 
                         let (output_sender, output_receiver) = channel();
                         let (_, abort_receiver) = channel();
+                        let (_, camera_config_receiver) = channel();
 
                         thread::spawn(move || {
-                            ray_trace(scene, &output_sender, &abort_receiver, device, queue)
-                                .unwrap();
+                            ray_trace(
+                                scene,
+                                &output_sender,
+                                &abort_receiver,
+                                &camera_config_receiver,
+                                device,
+                                queue,
+                                false,
+                            )
+                            .unwrap();
                         });
 
                         for _ in output_receiver {}
@@ -82,9 +91,19 @@ pub fn scene_benchmark(c: &mut Criterion) {
 
                 let (output_sender, output_receiver) = channel();
                 let (_, abort_receiver) = channel();
+                let (_, camera_config_receiver) = channel();
 
                 thread::spawn(move || {
-                    ray_trace(scene, &output_sender, &abort_receiver, device, queue).unwrap();
+                    ray_trace(
+                        scene,
+                        &output_sender,
+                        &abort_receiver,
+                        &camera_config_receiver,
+                        device,
+                        queue,
+                        false,
+                    )
+                    .unwrap();
                 });
 
                 for _ in output_receiver {}
