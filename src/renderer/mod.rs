@@ -399,11 +399,8 @@ impl<'a> Renderer<'a> {
     pub fn update_camera(&mut self, camera_config: &CameraConfig) {
         let camera_inst = Camera::new(self.width as usize, self.height as usize, camera_config);
         let gpu_camera = camera_to_gpu(&camera_inst);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[gpu_camera]),
-        );
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[gpu_camera]));
     }
 
     /// Executes the rendering of the image on the GPU
@@ -412,7 +409,7 @@ impl<'a> Renderer<'a> {
         output: &Sender<RenderProgress>,
         camera_config: &Receiver<CameraConfig>,
         abort: &Receiver<bool>,
-        idle: bool,
+        idle_after_rendering: bool,
     ) -> Result<(), Box<dyn Error>> {
         let mut render_start_time = SystemTime::now();
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
@@ -439,7 +436,7 @@ impl<'a> Renderer<'a> {
             }
 
             if sample > samples_per_pixel {
-                if idle {
+                if idle_after_rendering {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 } else {
@@ -626,11 +623,11 @@ mod test {
     fn test_update_camera() {
         use crate::camera::CameraConfig;
         use crate::geo::vec3::Vec3;
-        use crate::renderer::{Renderer, RenderConfig, Scene};
         use crate::hittable::{Bvh, Sphere};
         use crate::material::DiffuseLight;
-        use crate::util::wgpu_util::{get_wgpu_device_and_queue, get_result_from_buffer};
         use crate::renderer::gpu_data::GpuCamera;
+        use crate::renderer::{RenderConfig, Renderer, Scene};
+        use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
 
         let (device, queue) = get_wgpu_device_and_queue();
         let render_config = RenderConfig {
@@ -639,7 +636,14 @@ mod test {
             ..Default::default()
         };
         let mut world = Vec::new();
-        world.push(Sphere::new(Vec3::new(0., 10., 0.), 1., DiffuseLight::new(1., 1., 1., None).into()).into());
+        world.push(
+            Sphere::new(
+                Vec3::new(0., 10., 0.),
+                1.,
+                DiffuseLight::new(1., 1., 1., None).into(),
+            )
+            .into(),
+        );
 
         let scene = Scene {
             world: Bvh::new(world).into(),
@@ -666,8 +670,15 @@ mod test {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        encoder.copy_buffer_to_buffer(&renderer.camera_buffer, 0, &staging_buffer, 0, std::mem::size_of::<GpuCamera>() as u64);
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(
+            &renderer.camera_buffer,
+            0,
+            &staging_buffer,
+            0,
+            std::mem::size_of::<GpuCamera>() as u64,
+        );
         queue.submit(Some(encoder.finish()));
 
         let camera_data: Vec<GpuCamera> = get_result_from_buffer(device, &staging_buffer);
