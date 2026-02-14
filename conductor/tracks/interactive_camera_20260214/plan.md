@@ -7,7 +7,7 @@
     - [ ] Verify test passes
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Renderer Foundation' (Protocol in workflow.md)
 
-## Phase 2: Interactive Render Loop
+## Phase 2: Interactive Render Loop [checkpoint: 4a73cb3]
 - [x] Task: Update `render` function signature and basic restart logic 6f74f64
     - [ ] Update `render` signature in `src/renderer/mod.rs` to include `camera_config: &Receiver<CameraConfig>` and `idle: bool`
     - [ ] Modify the render loop to check for camera updates at the start of each iteration
