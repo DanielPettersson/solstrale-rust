@@ -410,16 +410,41 @@ impl<'a> Renderer<'a> {
     pub fn render(
         &mut self,
         output: &Sender<RenderProgress>,
+        camera_config: &Receiver<CameraConfig>,
         abort: &Receiver<bool>,
+        idle: bool,
     ) -> Result<(), Box<dyn Error>> {
-        let render_start_time = SystemTime::now();
+        let mut render_start_time = SystemTime::now();
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
         let pixel_count = self.width * self.height;
         let workgroup_count = pixel_count.div_ceil(64);
 
-        for sample in 1..=samples_per_pixel {
+        let mut sample = 1;
+        loop {
             if abort.try_recv().is_ok() {
                 return Ok(());
+            }
+
+            if let Ok(config) = camera_config.try_recv() {
+                self.update_camera(&config);
+                sample = 1;
+                render_start_time = SystemTime::now();
+
+                // Clear output buffer when camera moves
+                let mut encoder = self
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                encoder.clear_buffer(&self.output_buffer, 0, None);
+                self.queue.submit([encoder.finish()]);
+            }
+
+            if sample > samples_per_pixel {
+                if idle {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                } else {
+                    break;
+                }
             }
 
             self.render_config.sample_count = sample;
@@ -462,6 +487,8 @@ impl<'a> Renderer<'a> {
                 ),
                 output_buffer: self.output_buffer.clone(),
             })?;
+
+            sample += 1;
         }
 
         Ok(())

@@ -50,10 +50,11 @@
 //! let (device, queue) = get_wgpu_device_and_queue();
 //!
 //! let (output_sender, output_receiver) = channel();
+//! let (_, camera_config_receiver) = channel();
 //! let (_, abort_receiver) = channel();
 //!
 //! thread::spawn(move || {
-//!     ray_trace(scene, &output_sender, &abort_receiver, &device, &queue).unwrap();
+//!     ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, &device, &queue, false).unwrap();
 //! });
 //!
 //! for render_output in output_receiver {
@@ -90,13 +91,17 @@ pub mod util;
 /// # Arguments
 /// * `scene` - A scene describing how, and what should be rendered
 /// * `output` - Channel where render progress will be sent
+/// * `camera_config` - Channel to send updated camera configurations
 /// * `abort` - Channel to send abort signals to the renderer
+/// * `idle` - If true, the renderer will keep listening for camera updates after finishing the initial samples
 pub fn ray_trace<'a>(
     scene: Scene,
     output: &'a Sender<RenderProgress>,
+    camera_config: &'a Receiver<crate::camera::CameraConfig>,
     abort: &'a Receiver<bool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    idle: bool,
 ) -> Result<(), Box<dyn Error>> {
-    Renderer::new(scene, device, queue)?.render(output, abort)
+    Renderer::new(scene, device, queue)?.render(output, camera_config, abort, idle)
 }
