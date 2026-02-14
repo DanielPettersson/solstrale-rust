@@ -8,11 +8,11 @@
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Renderer Foundation' (Protocol in workflow.md)
 
 ## Phase 2: Interactive Render Loop
-- [ ] Task: Update `render` function signature and basic restart logic
+- [x] Task: Update `render` function signature and basic restart logic 6f74f64
     - [ ] Update `render` signature in `src/renderer/mod.rs` to include `camera_config: &Receiver<CameraConfig>` and `idle: bool`
     - [ ] Modify the render loop to check for camera updates at the start of each iteration
     - [ ] Implement the logic to call `update_camera` and reset `sample` to 0 when an update is received
-- [ ] Task: Implement Idle Mode
+- [x] Task: Implement Idle Mode 6f74f64
     - [ ] Add logic at the end of the `samples_per_pixel` loop to enter a polling loop if `idle` is true
     - [ ] Implement polling for `camera_config` and `abort` signals with a 10ms sleep in the idle state
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Interactive Render Loop' (Protocol in workflow.md)
