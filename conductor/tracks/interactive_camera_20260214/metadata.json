@@ -1,0 +1,8 @@
+{
+  "track_id": "interactive_camera_20260214",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-02-14T12:00:00Z",
+  "updated_at": "2026-02-14T12:00:00Z",
+  "description": "Add an additional Recevier parameter to the render function in the Renderer to support moving the camera while rendering."
+}
