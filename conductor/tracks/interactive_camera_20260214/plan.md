@@ -1,6 +1,6 @@
 # Implementation Plan: Interactive Camera Rendering
 
-## Phase 1: Renderer Foundation
+## Phase 1: Renderer Foundation [checkpoint: d494309]
 - [x] Task: Implement `update_camera` method in `Renderer` 842642f
     - [ ] Write unit test in `src/renderer/mod.rs` to verify that `update_camera` correctly updates the GPU `camera_buffer`
     - [ ] Implement `update_camera` in `src/renderer/mod.rs`
