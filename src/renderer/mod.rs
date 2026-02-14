@@ -292,50 +292,13 @@ impl<'a> Renderer<'a> {
 
         let camera_inst = Camera::new(width as usize, height as usize, &scene.camera);
 
-        let gpu_camera = GpuCamera {
-            origin: [
-                camera_inst.origin.x as f32,
-                camera_inst.origin.y as f32,
-                camera_inst.origin.z as f32,
-            ],
-            lens_radius: camera_inst.lens_radius as f32,
-            lower_left_corner: [
-                camera_inst.lower_left_corner.x as f32,
-                camera_inst.lower_left_corner.y as f32,
-                camera_inst.lower_left_corner.z as f32,
-            ],
-            _pad1: 0.0,
-            horizontal: [
-                camera_inst.horizontal.x as f32,
-                camera_inst.horizontal.y as f32,
-                camera_inst.horizontal.z as f32,
-            ],
-            _pad2: 0.0,
-            vertical: [
-                camera_inst.vertical.x as f32,
-                camera_inst.vertical.y as f32,
-                camera_inst.vertical.z as f32,
-            ],
-            _pad3: 0.0,
-            u: [
-                camera_inst.u.x as f32,
-                camera_inst.u.y as f32,
-                camera_inst.u.z as f32,
-            ],
-            _pad4: 0.0,
-            v: [
-                camera_inst.v.x as f32,
-                camera_inst.v.y as f32,
-                camera_inst.v.z as f32,
-            ],
-            _pad5: 0.0,
-        };
+        let gpu_camera = camera_to_gpu(&camera_inst);
         let camera_buffer = create_and_upload_buffer(
             device,
             queue,
             "Camera Buffer",
             &[gpu_camera],
-            BufferUsages::UNIFORM,
+            BufferUsages::UNIFORM | BufferUsages::COPY_SRC,
         );
 
         let render_config = GpuRenderConfig {
@@ -432,20 +395,53 @@ impl<'a> Renderer<'a> {
         })
     }
 
+    /// Updates the camera buffer with a new camera configuration
+    pub fn update_camera(&mut self, camera_config: &CameraConfig) {
+        let camera_inst = Camera::new(self.width as usize, self.height as usize, camera_config);
+        let gpu_camera = camera_to_gpu(&camera_inst);
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[gpu_camera]));
+    }
+
     /// Executes the rendering of the image on the GPU
     pub fn render(
         &mut self,
         output: &Sender<RenderProgress>,
+        camera_config: &Receiver<CameraConfig>,
         abort: &Receiver<bool>,
+        idle_after_rendering: bool,
     ) -> Result<(), Box<dyn Error>> {
-        let render_start_time = SystemTime::now();
+        let mut render_start_time = SystemTime::now();
         let samples_per_pixel = self.scene.render_config.samples_per_pixel;
         let pixel_count = self.width * self.height;
         let workgroup_count = pixel_count.div_ceil(64);
 
-        for sample in 1..=samples_per_pixel {
+        let mut sample = 1;
+        loop {
             if abort.try_recv().is_ok() {
                 return Ok(());
+            }
+
+            if let Ok(config) = camera_config.try_recv() {
+                self.update_camera(&config);
+                sample = 1;
+                render_start_time = SystemTime::now();
+
+                // Clear output buffer when camera moves
+                let mut encoder = self
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                encoder.clear_buffer(&self.output_buffer, 0, None);
+                self.queue.submit([encoder.finish()]);
+            }
+
+            if sample > samples_per_pixel {
+                if idle_after_rendering {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                } else {
+                    break;
+                }
             }
 
             self.render_config.sample_count = sample;
@@ -488,6 +484,8 @@ impl<'a> Renderer<'a> {
                 ),
                 output_buffer: self.output_buffer.clone(),
             })?;
+
+            sample += 1;
         }
 
         Ok(())
@@ -516,6 +514,47 @@ fn calculate_estimated_time_left(
     time_since_start
         .div_f32(samples_done as f32)
         .mul_f32(samples_left as f32)
+}
+
+fn camera_to_gpu(camera_inst: &Camera) -> GpuCamera {
+    GpuCamera {
+        origin: [
+            camera_inst.origin.x as f32,
+            camera_inst.origin.y as f32,
+            camera_inst.origin.z as f32,
+        ],
+        lens_radius: camera_inst.lens_radius as f32,
+        lower_left_corner: [
+            camera_inst.lower_left_corner.x as f32,
+            camera_inst.lower_left_corner.y as f32,
+            camera_inst.lower_left_corner.z as f32,
+        ],
+        _pad1: 0.0,
+        horizontal: [
+            camera_inst.horizontal.x as f32,
+            camera_inst.horizontal.y as f32,
+            camera_inst.horizontal.z as f32,
+        ],
+        _pad2: 0.0,
+        vertical: [
+            camera_inst.vertical.x as f32,
+            camera_inst.vertical.y as f32,
+            camera_inst.vertical.z as f32,
+        ],
+        _pad3: 0.0,
+        u: [
+            camera_inst.u.x as f32,
+            camera_inst.u.y as f32,
+            camera_inst.u.z as f32,
+        ],
+        _pad4: 0.0,
+        v: [
+            camera_inst.v.x as f32,
+            camera_inst.v.y as f32,
+            camera_inst.v.z as f32,
+        ],
+        _pad5: 0.0,
+    }
 }
 
 fn create_and_upload_buffer<T: bytemuck::Pod>(
@@ -578,5 +617,71 @@ mod test {
 
         time_left = calculate_estimated_time_left(render_start, now, 100, 100);
         assert_eq!(time_left, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_update_camera() {
+        use crate::camera::CameraConfig;
+        use crate::geo::vec3::Vec3;
+        use crate::hittable::{Bvh, Sphere};
+        use crate::material::DiffuseLight;
+        use crate::renderer::gpu_data::GpuCamera;
+        use crate::renderer::{RenderConfig, Renderer, Scene};
+        use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
+
+        let (device, queue) = get_wgpu_device_and_queue();
+        let render_config = RenderConfig {
+            width: 10,
+            height: 10,
+            ..Default::default()
+        };
+        let mut world = Vec::new();
+        world.push(
+            Sphere::new(
+                Vec3::new(0., 10., 0.),
+                1.,
+                DiffuseLight::new(1., 1., 1., None).into(),
+            )
+            .into(),
+        );
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera: CameraConfig {
+                look_from: Vec3::new(0., 0., 1.),
+                ..Default::default()
+            },
+            background_color: Vec3::new(0., 0., 0.),
+            render_config,
+        };
+
+        let mut renderer = Renderer::new(scene, device, queue).unwrap();
+
+        let new_config = CameraConfig {
+            look_from: Vec3::new(0., 0., 10.),
+            ..Default::default()
+        };
+
+        renderer.update_camera(&new_config);
+
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: std::mem::size_of::<GpuCamera>() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(
+            &renderer.camera_buffer,
+            0,
+            &staging_buffer,
+            0,
+            std::mem::size_of::<GpuCamera>() as u64,
+        );
+        queue.submit(Some(encoder.finish()));
+
+        let camera_data: Vec<GpuCamera> = get_result_from_buffer(device, &staging_buffer);
+        assert_eq!(camera_data[0].origin, [0., 0., 10.]);
     }
 }

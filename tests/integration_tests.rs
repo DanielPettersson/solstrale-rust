@@ -212,9 +212,10 @@ fn test_render_scene_without_light() {
     let scene = create_simple_test_scene(render_config, false);
 
     let (output_sender, _) = channel();
+    let (_, camera_config_receiver) = channel();
     let (_, abort_receiver) = channel();
 
-    let res = ray_trace(scene, &output_sender, &abort_receiver, device, queue);
+    let res = ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, device, queue, false);
 
     match res {
         Ok(_) => panic!("There should be an error"),
@@ -637,13 +638,14 @@ use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
     let (device, queue) = get_wgpu_device_and_queue();
     let (output_sender, output_receiver) = channel();
+    let (_, camera_config_receiver) = channel();
     let (_, abort_receiver) = channel();
 
     let width = scene.render_config.width as u32;
     let height = scene.render_config.height as u32;
 
     thread::spawn(move || {
-        ray_trace(scene, &output_sender, &abort_receiver, device, queue).unwrap();
+        ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, device, queue, false).unwrap();
     });
 
     let mut output_buffer = None;
