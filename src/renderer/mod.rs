@@ -305,7 +305,7 @@ impl<'a> Renderer<'a> {
             width,
             height,
             sample_count: 0,
-            max_depth: 5,
+            max_depth: 10,
             background_color: [
                 scene.background_color.x as f32,
                 scene.background_color.y as f32,
