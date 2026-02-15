@@ -418,6 +418,7 @@ impl<'a> Renderer<'a> {
 
         let mut sample = 1;
         loop {
+            let sample_start_time = SystemTime::now();
             if abort.try_recv().is_ok() {
                 return Ok(());
             }
@@ -489,6 +490,14 @@ impl<'a> Renderer<'a> {
                 ),
                 output_buffer: self.output_buffer.clone(),
             })?;
+
+            if now
+                .duration_since(sample_start_time)
+                .unwrap_or(Duration::from_millis(0))
+                > Duration::from_millis(10)
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
 
             sample += 1;
         }
