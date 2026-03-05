@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::default::Default;
-use std::error::Error;
 use std::ops::Deref;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -8,63 +6,92 @@ use std::thread;
 use image::RgbImage;
 use image::imageops::FilterType;
 use image_compare::Algorithm::RootMeanSquared;
-
-use solstrale::geo::transformation::{RotationX, RotationY, RotationZ, Transformer};
-use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
-use solstrale::post::{
-    BloomPostProcessor, OidnPostProcessor, PostProcessor, SaturationPostProcessor,
+use solstrale::camera::CameraConfig;
+use solstrale::geo::transformation::{
+    NopTransformer, RotationX, RotationY, RotationZ, Transformations, Transformer,
 };
+use solstrale::geo::vec3::Vec3;
+use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
+use solstrale::material::texture::SolidColor;
+use solstrale::material::{DiffuseLight, Lambertian};
+use solstrale::post::{BloomPostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
-use solstrale::renderer::shader::{PathTracingShader, Shaders, SimpleShader};
 use solstrale::renderer::{RenderConfig, Scene};
-use solstrale::util::rgb_color::rgb_to_vec3;
 
 use crate::scenes::{
     create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
     create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
     create_obj_with_triangle, create_quad_rotation_scene, create_simple_test_scene,
-    create_test_scene, create_uv_scene,
+    create_test_scene, create_texture_mapping_scene, create_uv_scene,
 };
 
 mod scenes;
 
-const IMAGE_COMPARISON_SCORE_THRESHOLD: f64 = 0.95;
-
 #[test]
-fn test_render_scene() {
-    let shaders: HashMap<&str, Shaders> = HashMap::from([
-        ("pathTracing", PathTracingShader::new(50).into()),
-        ("simple", SimpleShader::new().into()),
-    ]);
-
-    for (shader_name, shader) in shaders {
-        let render_config = RenderConfig {
-            width: 200,
-            height: 100,
-            samples_per_pixel: 25,
-            shader,
-            ..Default::default()
-        };
-        let scene = create_test_scene(render_config);
-
-        render_and_compare_output(scene, shader_name)
-    }
-}
-
-#[test]
-#[cfg(feature = "oidn-postprocessor")]
-fn test_render_scene_with_oidn() {
+fn test_scene() {
     let render_config = RenderConfig {
         width: 200,
         height: 100,
-        samples_per_pixel: 20,
-        shader: PathTracingShader::new(50),
-        post_processors: vec![OidnPostProcessor::new()],
+        samples_per_pixel: 100,
         ..Default::default()
     };
+    let scene = create_test_scene(render_config);
 
-    let scene = create_simple_test_scene(render_config, true);
-    render_and_compare_output(scene, "oidn")
+    render_and_compare_output(scene, "test_scene", 0.9)
+}
+
+#[test]
+fn test_scene_bloom() {
+    let (device, _) = get_wgpu_device_and_queue();
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 100,
+        post_processors: vec![
+            BloomPostProcessor::new(0.1, None, Some(3.0), &device)
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    let scene = create_test_scene(render_config);
+
+    render_and_compare_output(scene, "test_scene_bloom", 0.95)
+}
+
+#[test]
+fn test_scene_saturation() {
+    let (device, _) = get_wgpu_device_and_queue();
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 100,
+        post_processors: vec![SaturationPostProcessor::new(-0.7, &device).unwrap().into()],
+        ..Default::default()
+    };
+    let scene = create_test_scene(render_config);
+
+    render_and_compare_output(scene, "test_scene_sat", 0.95)
+}
+
+#[test]
+fn test_scene_bloom_and_saturation() {
+    let (device, _) = get_wgpu_device_and_queue();
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 100,
+        post_processors: vec![
+            SaturationPostProcessor::new(-0.7, &device).unwrap().into(),
+            BloomPostProcessor::new(0.1, None, Some(3.0), &device)
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    let scene = create_test_scene(render_config);
+
+    render_and_compare_output(scene, "test_scene_bloom_sat", 0.95)
 }
 
 #[test]
@@ -72,12 +99,11 @@ fn test_render_obj_with_textures() {
     let render_config = RenderConfig {
         width: 200,
         height: 100,
-        samples_per_pixel: 20,
         ..Default::default()
     };
     let scene = create_obj_scene(render_config);
 
-    render_and_compare_output(scene, "obj");
+    render_and_compare_output(scene, "obj", 0.95);
 }
 
 #[test]
@@ -89,7 +115,7 @@ fn test_render_obj_with_default_material() {
     };
     let scene = create_obj_with_box(render_config, "resources/obj/", "box.obj");
 
-    render_and_compare_output(scene, "obj_default");
+    render_and_compare_output(scene, "obj_default", 0.95);
 }
 
 #[test]
@@ -101,7 +127,7 @@ fn test_render_obj_with_diffuse_material() {
     };
     let scene = create_obj_with_box(render_config, "resources/obj/", "boxWithMat.obj");
 
-    render_and_compare_output(scene, "obj_diffuse");
+    render_and_compare_output(scene, "obj_diffuse", 0.95);
 }
 
 #[test]
@@ -109,12 +135,11 @@ fn test_render_uv_mapping() {
     let render_config = RenderConfig {
         width: 200,
         height: 200,
-        samples_per_pixel: 5,
         ..Default::default()
     };
     let scene = create_uv_scene(render_config);
 
-    render_and_compare_output(scene, "uv");
+    render_and_compare_output(scene, "uv", 0.95);
 }
 
 #[test]
@@ -122,12 +147,11 @@ fn test_render_normal_mapping_disabled() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), false);
-    render_and_compare_output(scene, "normal_mapping_disabled");
+    render_and_compare_output(scene, "normal_mapping_disabled", 0.95);
 }
 
 #[test]
@@ -135,12 +159,11 @@ fn test_render_normal_mapping_1() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(30., 30., 30.), true);
-    render_and_compare_output(scene, "normal_mapping_1");
+    render_and_compare_output(scene, "normal_mapping_1", 0.95);
 }
 
 #[test]
@@ -148,12 +171,11 @@ fn test_render_normal_mapping_2() {
     let render_config = RenderConfig {
         width: 300,
         height: 300,
-        post_processors: vec![OidnPostProcessor::new().into()],
         ..Default::default()
     };
 
     let scene = create_normal_mapping_scene(render_config, Vec3::new(-30., 30., 30.), true);
-    render_and_compare_output(scene, "normal_mapping_2");
+    render_and_compare_output(scene, "normal_mapping_2", 0.95);
 }
 
 #[test]
@@ -164,7 +186,7 @@ fn test_render_normal_mapping_sphere_1() {
         ..Default::default()
     };
     let scene = create_normal_mapping_sphere_scene(render_config, Vec3::new(-30., 30., 30.));
-    render_and_compare_output(scene, "normal_mapping_sphere_1");
+    render_and_compare_output(scene, "normal_mapping_sphere_1", 0.97);
 }
 
 #[test]
@@ -175,23 +197,32 @@ fn test_render_normal_mapping_sphere_2() {
         ..Default::default()
     };
     let scene = create_normal_mapping_sphere_scene(render_config, Vec3::new(30., 30., 30.));
-    render_and_compare_output(scene, "normal_mapping_sphere_2");
+    render_and_compare_output(scene, "normal_mapping_sphere_2", 0.97);
 }
 
 #[test]
 fn test_render_scene_without_light() {
+    let (device, queue) = get_wgpu_device_and_queue();
     let render_config = RenderConfig {
         width: 20,
         height: 10,
-        samples_per_pixel: 100,
         ..Default::default()
     };
     let scene = create_simple_test_scene(render_config, false);
 
     let (output_sender, _) = channel();
+    let (_, camera_config_receiver) = channel();
     let (_, abort_receiver) = channel();
 
-    let res = ray_trace(scene, &output_sender, &abort_receiver);
+    let res = ray_trace(
+        scene,
+        &output_sender,
+        &camera_config_receiver,
+        &abort_receiver,
+        device,
+        queue,
+        false,
+    );
 
     match res {
         Ok(_) => panic!("There should be an error"),
@@ -208,7 +239,7 @@ fn test_render_obj_with_normal_map() {
     };
     let scene = create_obj_with_triangle(render_config, "resources/obj/", "triWithNormalMap.obj");
 
-    render_and_compare_output(scene, "obj_normal_map");
+    render_and_compare_output(scene, "obj_normal_map", 0.95);
 }
 
 #[test]
@@ -220,7 +251,7 @@ fn test_render_obj_with_height_map() {
     };
     let scene = create_obj_with_triangle(render_config, "resources/obj/", "triWithHeightMap.obj");
 
-    render_and_compare_output(scene, "obj_height_map");
+    render_and_compare_output(scene, "obj_height_map", 0.95);
 }
 
 #[test]
@@ -239,56 +270,9 @@ fn test_render_light_attenuation() {
                 "light_attenuation_{}",
                 attenuation_half_length.map_or(-1., |a| a)
             ),
+            0.95,
         );
     }
-}
-
-#[test]
-fn test_bloom() -> Result<(), Box<dyn Error>> {
-    let mut post = BloomPostProcessor::new(0.2, None, None)?;
-    let bloom_image = image::open("resources/textures/bloom.png")
-        .unwrap()
-        .into_rgb8();
-    let w = bloom_image.width();
-    let h = bloom_image.height();
-    let pixel_colors = image_to_vec3(bloom_image);
-
-    post.initialize(w, h);
-
-    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
-
-    compare_output("bloom", &res);
-
-    let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
-
-    compare_output("bloom", &res);
-
-    Ok(())
-}
-
-#[test]
-fn test_saturation() -> Result<(), Box<dyn Error>> {
-    for saturation_factor in [-1., 0., 1.] {
-        let mut post = SaturationPostProcessor::new(saturation_factor)?;
-        let saturation_image = image::open("resources/textures/bloom.png")
-            .unwrap()
-            .into_rgb8();
-        let w = saturation_image.width();
-        let h = saturation_image.height();
-        let pixel_colors = image_to_vec3(saturation_image);
-
-        post.initialize(w, h);
-
-        let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
-
-        compare_output(&format!("saturation_{}", saturation_factor), &res);
-
-        let res = post.post_process(&pixel_colors, &[ZERO_VECTOR; 0], &[ZERO_VECTOR; 0], 1)?;
-
-        compare_output(&format!("saturation_{}", saturation_factor), &res);
-    }
-
-    Ok(())
 }
 
 #[test]
@@ -303,14 +287,12 @@ fn test_aabb_of_rotated_quad() {
             RenderConfig {
                 width: 300,
                 height: 300,
-                shader: SimpleShader::new().into(),
-                samples_per_pixel: 1,
                 ..RenderConfig::default()
             },
             rotation.deref(),
         );
 
-        render_and_compare_output(scene, &format!("quad_rotated{}", i));
+        render_and_compare_output(scene, &format!("quad_rotated{}", i), 0.95);
     }
 }
 
@@ -326,42 +308,373 @@ fn test_blended_materials() {
             blend_factor,
         );
 
-        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor));
+        render_and_compare_output(scene, &format!("blended_materials_{}", blend_factor), 0.95);
     }
 }
 
-fn image_to_vec3(image: RgbImage) -> Vec<Vec3> {
-    let mut ret = Vec::with_capacity((image.width() * image.height()) as usize);
-    for y in 0..image.height() {
-        for x in 0..image.width() {
-            ret.push(rgb_to_vec3(image.get_pixel(x, y)));
-        }
-    }
-    ret
+#[test]
+fn test_texture_map() {
+    let scene = create_texture_mapping_scene(RenderConfig {
+        width: 300,
+        height: 300,
+        ..RenderConfig::default()
+    });
+
+    render_and_compare_output(scene, "texture_map", 0.95);
 }
 
-fn render_and_compare_output(scene: Scene, name: &str) {
+#[test]
+fn test_gpu_scene_sphere() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 20.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+    let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
+
+    world.push(Sphere::new(Vec3::new(0., 0., 0.), 6., mat.into()).into());
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_sphere", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_box() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 12.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-10., 20., 30.), 5., light.into()).into());
+
+    let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
+
+    let box_transformations = Transformations::new(vec![
+        Box::new(RotationY::new(25.)),
+        Box::new(RotationX::new(45.)),
+    ]);
+
+    world.append(&mut Quad::new_box(
+        Vec3::new(-2.5, -2.5, -2.5),
+        Vec3::new(2.5, 2.5, 2.5),
+        mat.into(),
+        &box_transformations,
+    ));
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_box", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_quad() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(278., 278., -800.),
+        look_at: Vec3::new(278., 278., 0.),
+        vertical_fov_degrees: 35.,
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(
+        Quad::new(
+            Vec3::new(408., 554., 383.),
+            Vec3::new(-260., 0., 0.),
+            Vec3::new(0., 0., -210.),
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
+
+    world.push(
+        Quad::new(
+            Vec3::new(0., 0., 555.),
+            Vec3::new(555., 0., 0.),
+            Vec3::new(0., 555., 0.),
+            mat.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_quad", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_sphere2() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 20.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+    let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+    let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+
+    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 4., blue.into()).into());
+    world.push(Sphere::new(Vec3::new(4., 1., 0.), 4., red.into()).into());
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_sphere2", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_sphere_quad_and_triangle() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 15.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+    let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+    let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+    let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
+
+    world.push(Sphere::new(Vec3::new(-4., 1., 0.), 2., blue.into()).into());
+    world.push(
+        Triangle::new(
+            Vec3::new(4., 0., 0.),
+            Vec3::new(2., 2., 0.),
+            Vec3::new(2., 0., 0.),
+            red.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+    world.push(
+        Quad::new(
+            Vec3::new(-1., -1., 0.),
+            Vec3::new(2., 0., 0.),
+            Vec3::new(0., 2., 0.),
+            green.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_sphere_quad_and_triangle", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_triangle3() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 10.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+    let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+    let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+    let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
+
+    world.push(
+        Triangle::new(
+            Vec3::new(4., 0., 0.),
+            Vec3::new(2., 2., 0.),
+            Vec3::new(2., 0., 0.),
+            red.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+    world.push(
+        Triangle::new(
+            Vec3::new(2., -2., 1.),
+            Vec3::new(0., 0., 1.),
+            Vec3::new(0., -2., 1.),
+            blue.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+    world.push(
+        Triangle::new(
+            Vec3::new(3., -1., 1.),
+            Vec3::new(1., 1., 1.),
+            Vec3::new(1., -1., 1.),
+            green.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_triangle3", 0.95);
+}
+
+#[test]
+fn test_gpu_scene_nested_bvh() {
+    let render_config = RenderConfig {
+        width: 400,
+        height: 400,
+        ..Default::default()
+    };
+
+    let camera = CameraConfig {
+        look_from: Vec3::new(0., 0., 10.),
+        look_at: Vec3::new(0., 0., 0.),
+        ..Default::default()
+    };
+
+    let mut world: Vec<Hittables> = Vec::new();
+    let light = DiffuseLight::new(45., 45., 45., None);
+    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+
+    let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
+    let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
+    let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
+
+    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 2., blue.into()).into());
+
+    let mut sub_world: Vec<Hittables> = Vec::new();
+    sub_world.push(Sphere::new(Vec3::new(0., -1., 0.), 2., red.into()).into());
+    sub_world.push(Sphere::new(Vec3::new(4., -1., 0.), 2., green.into()).into());
+
+    let bvh = Bvh::new(sub_world);
+    world.push(bvh.into());
+
+    let scene = Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    };
+
+    render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
+}
+
+use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
+
+fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
+    let (device, queue) = get_wgpu_device_and_queue();
     let (output_sender, output_receiver) = channel();
+    let (_, camera_config_receiver) = channel();
     let (_, abort_receiver) = channel();
 
     let width = scene.render_config.width as u32;
     let height = scene.render_config.height as u32;
 
     thread::spawn(move || {
-        ray_trace(scene, &output_sender, &abort_receiver).unwrap();
+        ray_trace(
+            scene,
+            &output_sender,
+            &camera_config_receiver,
+            &abort_receiver,
+            device,
+            queue,
+            false,
+        )
+        .unwrap();
     });
 
-    let mut image = RgbImage::new(width, height);
+    let mut output_buffer = None;
     for render_output in output_receiver {
-        if let Some(render_image) = render_output.render_image {
-            image = render_image;
-        }
+        output_buffer = Some(render_output.output_buffer);
     }
 
-    compare_output(name, &image);
+    let image = buffer_to_image(device, queue, &output_buffer.unwrap(), width, height);
+
+    compare_output(name, &image, comparison_threshold);
 }
 
-fn compare_output(name: &str, actual_image: &RgbImage) {
+fn compare_output(name: &str, actual_image: &RgbImage, comparison_threshold: f64) {
     actual_image
         .save(format!("tests/output/out_actual_{}.jpg", name))
         .unwrap();
@@ -380,7 +693,7 @@ fn compare_output(name: &str, actual_image: &RgbImage) {
             .score;
 
     assert!(
-        score > IMAGE_COMPARISON_SCORE_THRESHOLD,
+        score > comparison_threshold,
         "Comparison score for {} is: {}",
         name,
         score

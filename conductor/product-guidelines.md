@@ -13,6 +13,6 @@
 ## Performance & Engineering Standards
 - **Strict Efficiency:**
     - Adhere to low-level optimization patterns as a default standard.
-    - Minimize heap allocations in the hot path (rendering loop).
     - Prioritize data locality and cache-friendly structures.
     - Leverage multithreading (Rayon) effectively for all parallelizable workloads.
+    - Use the GPU where possible for maximum performance.

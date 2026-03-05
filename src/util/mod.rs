@@ -6,7 +6,8 @@ pub mod gaussian;
 pub mod height_map;
 pub mod interval;
 pub mod rgb_color;
-pub(crate) mod wgpu_util;
+pub mod texture_processing;
+pub mod wgpu_util;
 
 /// Converts an angle in degrees to radians
 pub fn degrees_to_radians(degrees: f64) -> f64 {

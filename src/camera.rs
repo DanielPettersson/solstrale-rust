@@ -1,7 +1,6 @@
 //! Provides a camera used by raytracer to shoot rays into the scene
 
-use crate::geo::vec3::{Vec3, ZERO_VECTOR, random_in_unit_disc};
-use crate::geo::{Ray, Uv};
+use crate::geo::vec3::{Vec3, ZERO_VECTOR};
 use crate::util::degrees_to_radians;
 
 /// Contains all needed parameters for constructing a camera
@@ -33,13 +32,13 @@ impl Default for CameraConfig {
 /// Contains all data needed to describe a cameras position, field of view and
 /// where it is pointing
 pub struct Camera {
-    origin: Vec3,
-    lower_left_corner: Vec3,
-    horizontal: Vec3,
-    vertical: Vec3,
-    u: Vec3,
-    v: Vec3,
-    lens_radius: f64,
+    pub(crate) origin: Vec3,
+    pub(crate) lower_left_corner: Vec3,
+    pub(crate) horizontal: Vec3,
+    pub(crate) vertical: Vec3,
+    pub(crate) u: Vec3,
+    pub(crate) v: Vec3,
+    pub(crate) lens_radius: f64,
 }
 
 impl Camera {
@@ -71,20 +70,5 @@ impl Camera {
             v,
             lens_radius: c.aperture_size / 2.,
         }
-    }
-
-    /// A function for generating a ray for a certain u/v for the raytraced image
-    pub fn get_ray(&self, uv: Uv) -> Ray {
-        let offset = if self.lens_radius > 0. {
-            let rd = random_in_unit_disc() * self.lens_radius;
-            self.u * rd.x + self.v * rd.y
-        } else {
-            ZERO_VECTOR
-        };
-
-        let r_dir = self.lower_left_corner + (self.horizontal * uv.u) + (self.vertical * uv.v)
-            - self.origin
-            - offset;
-        Ray::new(self.origin + offset, r_dir)
     }
 }

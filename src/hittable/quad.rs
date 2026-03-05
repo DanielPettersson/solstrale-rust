@@ -1,30 +1,22 @@
-use std::ops::RangeInclusive;
-
 use crate::combine_aabbs;
-use crate::geo::Ray;
-use crate::geo::Uv;
+use crate::geo::Aabb;
 use crate::geo::transformation::Transformer;
-use crate::geo::vec3::{ALMOST_ZERO, Vec3};
-use crate::geo::{Aabb, Onb};
+use crate::geo::vec3::Vec3;
 use crate::hittable::{Hittable, Hittables};
-use crate::material::{Material, Materials, RayHit};
-use crate::random::random_normal_float;
-use crate::util::interval::{Interval, RAY_INTERVAL};
-
-const ZERO_TO_ONE: RangeInclusive<f32> = 0. ..=1.;
+use crate::material::{Material, Materials};
 
 /// A rectangular flat hittable object
 #[derive(Clone, Debug)]
 pub struct Quad {
-    q: Vec3,
-    u: Vec3,
-    v: Vec3,
-    normal: Vec3,
-    d: f64,
-    w: Vec3,
-    mat: Materials,
+    pub(crate) q: Vec3,
+    pub(crate) u: Vec3,
+    pub(crate) v: Vec3,
+    pub(crate) normal: Vec3,
+    pub(crate) d: f64,
+    pub(crate) w: Vec3,
+    pub(crate) mat: Materials,
     b_box: Aabb,
-    area: f64,
+    pub(crate) area: f64,
 }
 
 impl Quad {
@@ -136,70 +128,6 @@ impl Quad {
 }
 
 impl Hittable for Quad {
-    fn pdf_value(&self, origin: Vec3, direction: Vec3) -> f64 {
-        let ray = Ray::new(origin, direction);
-
-        match self.hit(&ray, &RAY_INTERVAL) {
-            None => 0.,
-            Some(rec) => {
-                let distance_squared = rec.ray_length * rec.ray_length * direction.length_squared();
-                let cosine = (direction.dot(rec.normal) / direction.length()).abs();
-                distance_squared / (cosine * self.area)
-            }
-        }
-    }
-
-    fn random_direction(&self, origin: Vec3) -> Vec3 {
-        let p = self.q + self.u * random_normal_float() + self.v * random_normal_float();
-        p - origin
-    }
-
-    fn hit(&self, r: &Ray, ray_length: &Interval) -> Option<RayHit<'_>> {
-        let denom = self.normal.dot(r.direction);
-
-        // No hit if the ray is parallel to the plane
-        if denom.abs() < ALMOST_ZERO {
-            return None;
-        }
-
-        // No hit if the hit point parameter t is outside the ray length interval.
-        let t = (self.d - self.normal.dot(r.origin)) / denom;
-        if !ray_length.contains(t) {
-            return None;
-        }
-
-        // Determine the hit point lies within the planar shape using its plane coordinates.
-        let hit_point = r.at(t);
-        let planar_hit_point_vector = hit_point - self.q;
-        let u = self.w.dot(planar_hit_point_vector.cross(self.v)) as f32;
-        let v = self.w.dot(self.u.cross(planar_hit_point_vector)) as f32;
-
-        // Is hit point outside of primitive
-        if !ZERO_TO_ONE.contains(&u) || !ZERO_TO_ONE.contains(&v) {
-            return None;
-        }
-
-        let front_face = r.direction.dot(self.normal) < 0.;
-        let normal = if front_face {
-            self.normal
-        } else {
-            self.normal.neg()
-        };
-
-        Some(RayHit::new(
-            hit_point,
-            Onb {
-                tangent: self.u.unit(),
-                bi_tangent: self.v.unit(),
-                normal,
-            },
-            &self.mat,
-            t,
-            Uv::new(u, v),
-            front_face,
-        ))
-    }
-
     fn bounding_box(&self) -> &Aabb {
         &self.b_box
     }

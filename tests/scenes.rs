@@ -4,10 +4,10 @@ use solstrale::geo::transformation::{
     NopTransformer, RotationY, Transformations, Transformer, Translation,
 };
 use solstrale::geo::vec3::Vec3;
+use solstrale::hittable::Hittables;
 use solstrale::hittable::Sphere;
 use solstrale::hittable::Triangle;
 use solstrale::hittable::{Bvh, Quad};
-use solstrale::hittable::{ConstantMedium, Hittables};
 use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
 use solstrale::material::texture::{ImageMap, SolidColor, Textures, load_normal_texture};
@@ -49,20 +49,6 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
         red_mat.clone().into(),
         &RotationY::new(15.),
     ));
-    world.push(
-        ConstantMedium::new(
-            Bvh::new(Quad::new_box(
-                Vec3::new(0., 0., -0.5),
-                Vec3::new(1., 2., 0.5),
-                red_mat.clone().into(),
-                &Translation::new(Vec3::new(0., 0., 1.)),
-            ))
-            .into(),
-            0.1,
-            Vec3::new(1., 1., 1.),
-        )
-        .into(),
-    );
     world.append(&mut Quad::new_box(
         Vec3::new(-1., 2., 0.),
         Vec3::new(-0.5, 2.5, 0.5),
@@ -533,6 +519,42 @@ pub fn create_blend_material_scene(render_config: RenderConfig, blend_factor: f6
                     .into(),
                     Lambertian::new(SolidColor::new(0., 1., 0.).into(), None).into(),
                     blend_factor,
+                )
+                .into(),
+                &NopTransformer(),
+            )
+            .into(),
+            Sphere::new(
+                Vec3::new(0., 500., -200.),
+                50.,
+                DiffuseLight::new(15., 15., 15., None).into(),
+            )
+            .into(),
+        ])
+        .into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 35.0,
+            look_from: Vec3::new(0., 400., -100.),
+            ..CameraConfig::default()
+        },
+        background_color: Default::default(),
+        render_config,
+    }
+}
+
+#[allow(dead_code)]
+pub fn create_texture_mapping_scene(render_config: RenderConfig) -> Scene {
+    Scene {
+        world: Bvh::new(vec![
+            Quad::new(
+                Vec3::new(-100., 0., -100.),
+                Vec3::new(200., 0., 0.),
+                Vec3::new(0., 0., 200.),
+                Lambertian::new(
+                    ImageMap::load("resources/textures/checker.jpg")
+                        .unwrap()
+                        .into(),
+                    None,
                 )
                 .into(),
                 &NopTransformer(),

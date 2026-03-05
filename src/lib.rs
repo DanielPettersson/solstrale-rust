@@ -1,19 +1,23 @@
 #![warn(missing_docs)]
-//! A multithreaded Monte Carlo path tracing library that as such has features like:
+//! A WGPU-based GPU Monte Carlo path tracing library, with features like:
+//!
+//! ### Core Engine
 //! * Global illumination
 //! * Caustics
 //! * Reflection
 //! * Refraction
 //! * Soft shadows
-//!
-//! Additionally, the library has:
-//! * Loading of obj models with included materials
-//! * Multithreaded Bvh creation to greatly speed up rendering
-//! * Post-processing of rendered images by:
-//!   * [Open Image Denoise](https://www.openimagedenoise.org/)
-//!   * Bloom filter
 //! * Bump mapping
 //! * Light attenuation
+//!
+//! ### Performance & Loading
+//! * Loading of obj models with included materials
+//! * Multithreaded BVH creation using Rayon to greatly speed up rendering
+//!
+//! ### Post-Processing
+//! Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
+//! * Bloom filter
+//! * Saturation filter
 //!
 //! ## Example:
 //! ```rust
@@ -27,7 +31,7 @@
 //! # use solstrale::material::texture::SolidColor;
 //! # use solstrale::ray_trace;
 //! # use solstrale::renderer::{RenderConfig, Scene};
-//! # use solstrale::renderer::shader::PathTracingShader;
+//! # use solstrale::util::wgpu_util::get_wgpu_device_and_queue;
 //! let camera = CameraConfig {
 //!     vertical_fov_degrees: 20.,
 //!     aperture_size: 0.1,
@@ -47,15 +51,18 @@
 //!     render_config: RenderConfig::default(),
 //! };
 //!
+//! let (device, queue) = get_wgpu_device_and_queue();
+//!
 //! let (output_sender, output_receiver) = channel();
+//! let (_, camera_config_receiver) = channel();
 //! let (_, abort_receiver) = channel();
 //!
 //! thread::spawn(move || {
-//!     ray_trace(scene, &output_sender, &abort_receiver).unwrap();
+//!     ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, &device, &queue, false).unwrap();
 //! });
 //!
 //! for render_output in output_receiver {
-//!     let _image = render_output.render_image;
+//!     let _buffer = render_output.output_buffer;
 //! }
 //! ```
 //!
@@ -68,7 +75,8 @@
 //! ## Credits
 //! The ray tracing is inspired by the excellent [Ray Tracing in One Weekend Book Series](https://github.com/RayTracing/raytracing.github.io) by Peter Shirley
 
-use crate::renderer::{RenderProgress, Renderer, Scene};
+use crate::renderer::{RenderProgress, Scene};
+use renderer::Renderer;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -77,9 +85,7 @@ pub mod geo;
 pub mod hittable;
 pub mod loader;
 pub mod material;
-pub mod pdf;
 pub mod post;
-pub mod random;
 pub mod renderer;
 pub mod util;
 
@@ -89,11 +95,17 @@ pub mod util;
 /// # Arguments
 /// * `scene` - A scene describing how, and what should be rendered
 /// * `output` - Channel where render progress will be sent
+/// * `camera_config` - Channel to send updated camera configurations
 /// * `abort` - Channel to send abort signals to the renderer
+/// * `idle` - If true, the renderer will keep listening for camera updates after finishing the initial samples
 pub fn ray_trace<'a>(
     scene: Scene,
     output: &'a Sender<RenderProgress>,
+    camera_config: &'a Receiver<crate::camera::CameraConfig>,
     abort: &'a Receiver<bool>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    idle: bool,
 ) -> Result<(), Box<dyn Error>> {
-    Renderer::new(scene)?.render(output, abort)
+    Renderer::new(scene, device, queue)?.render(output, camera_config, abort, idle)
 }

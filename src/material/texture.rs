@@ -150,6 +150,11 @@ impl ImageMap {
             max_y: h as f32 - 1.,
         }
     }
+
+    /// Returns the underlying image
+    pub fn get_image(&self) -> Arc<RgbImage> {
+        self.image.clone()
+    }
 }
 
 impl Texture for ImageMap {

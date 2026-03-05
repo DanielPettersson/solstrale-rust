@@ -5,12 +5,10 @@
 
 ## Graphics & Rendering
 - **Path Tracing Engine:** Custom-built Monte Carlo path tracer.
-- **WGPU:** Used for GPU-accelerated post-processing effects (Bloom, Saturation) via compute shaders.
-- **Open Image Denoise (OIDN):** Integration for high-quality AI denoising of rendered frames.
+- **WGPU:** Used for GPU-accelerated path tracing and post-processing effects (Bloom, Saturation) via compute shaders.
 
 ## Performance & Concurrency
-- **Rayon:** Utilized for data-parallelism, specifically in multithreaded BVH construction and CPU-based rendering tasks.
-- **Fastrand:** Low-overhead random number generation critical for Monte Carlo simulations.
+- **Rayon:** Utilized for data-parallelism, specifically in multithreaded BVH construction.
 
 ## Data & I/O
 - **image:** Crate for handling image encoding and decoding (PNG, JPG).
