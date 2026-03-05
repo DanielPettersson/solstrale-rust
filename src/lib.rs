@@ -1,19 +1,23 @@
 #![warn(missing_docs)]
-//! A multithreaded Monte Carlo path tracing library that as such has features like:
+//! A WGPU-based GPU Monte Carlo path tracing library, with features like:
+//!
+//! ### Core Engine
 //! * Global illumination
 //! * Caustics
 //! * Reflection
 //! * Refraction
 //! * Soft shadows
-//!
-//! Additionally, the library has:
-//! * Loading of obj models with included materials
-//! * Multithreaded Bvh creation to greatly speed up rendering
-//! * Post-processing of rendered images by:
-//!   * [Open Image Denoise](https://www.openimagedenoise.org/)
-//!   * Bloom filter
 //! * Bump mapping
 //! * Light attenuation
+//!
+//! ### Performance & Loading
+//! * Loading of obj models with included materials
+//! * Multithreaded BVH creation using Rayon to greatly speed up rendering
+//!
+//! ### Post-Processing
+//! Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
+//! * Bloom filter
+//! * Saturation filter
 //!
 //! ## Example:
 //! ```rust
