@@ -3,8 +3,8 @@
 use crate::hittable::Hittable;
 use crate::post::PostProcessor;
 use std::error::Error;
-use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, SystemTime};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
 
 use crate::camera::{Camera, CameraConfig};
 use crate::geo::vec3::Vec3;
@@ -34,16 +34,17 @@ pub struct RenderConfig {
     pub samples_per_pixel: u32,
     /// Maximum number of ray bounces before a path is cut off.
     pub max_depth: u32,
-    /// Samples traced per GPU dispatch.
+    /// Samples traced per GPU dispatch, used as the starting point and the
+    /// upper bound for the batch size.
     ///
     /// Larger batches amortise dispatch overhead and collapse the per-sample
     /// read-modify-write of the accumulation buffer, at the cost of coarser
-    /// progress reporting and slower response to camera changes.
+    /// progress reporting and slower response to camera changes. The renderer
+    /// tunes the actual size down from here to keep a single dispatch within
+    /// [`TARGET_DISPATCH`].
     pub samples_per_batch: u32,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
-    /// Describes at which points in time the render progress should contain an image
-    pub render_image_strategy: RenderImageStrategy,
 }
 
 impl Default for RenderConfig {
@@ -55,7 +56,6 @@ impl Default for RenderConfig {
             max_depth: 10,
             samples_per_batch: 4,
             post_processors: vec![],
-            render_image_strategy: RenderImageStrategy::OnlyFinal,
         }
     }
 }
@@ -84,37 +84,62 @@ pub struct RenderProgress {
     pub output_buffer: wgpu::Buffer,
 }
 
-#[derive(Copy, Clone)]
-/// When should [`RenderProgress`] contain an image of the rendering
-pub enum RenderImageStrategy {
-    /// Every sample should contain an image
-    EverySample,
-    /// Only include an image if at least "duration" has elapsed since last time
-    /// Plus always include the final image
-    Interval(Duration),
-    /// Only include image in last rendered sample
-    OnlyFinal,
-}
+/// Wall clock budget for a single dispatch.
+///
+/// A caller that renders interactively hands us the same device and queue its
+/// user interface draws on, so a dispatch that overruns a display frame is a
+/// dropped frame for whoever is waiting behind us. Roughly one vsync interval.
+const TARGET_DISPATCH: Duration = Duration::from_millis(12);
 
-impl RenderImageStrategy {
-    /// Is it time to generate a new render image for the output channel?
-    pub fn should_generate_image(
-        &self,
-        sample: u32,
-        total_samples: u32,
-        now: SystemTime,
-        last_image_generated_time: SystemTime,
-    ) -> bool {
-        match self {
-            RenderImageStrategy::EverySample => true,
-            RenderImageStrategy::Interval(d) => {
-                sample == total_samples
-                    || now
-                        .duration_since(last_image_generated_time)
-                        .unwrap_or(Duration::from_millis(0))
-                        > *d
+/// Ceiling on the adaptive batch size, so a very cheap scene does not end up
+/// reporting progress once a second.
+const MAX_BATCH: u32 = 64;
+
+/// Ray depth used while the camera is being moved.
+///
+/// Mid-drag the thing that matters is seeing where the camera now points, and
+/// losing most of the indirect light for a moment is far less distracting than
+/// losing the frame rate. Ignored for a scene whose own depth is already this
+/// shallow, so no restart is paid for nothing.
+const INTERACTIVE_MAX_DEPTH: u32 = 3;
+
+/// How long after the last camera update the full ray depth is restored.
+const INTERACTION_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Length of a single wait slice.
+///
+/// Waits are sliced rather than indefinite so that `abort` is still observed
+/// while a dispatch is in flight, and so a wedged submission cannot hang the
+/// render thread forever. Doubles as the idle poll interval.
+const POLL_SLICE: Duration = Duration::from_millis(50);
+
+/// Blocks until `index` has finished executing on the GPU.
+///
+/// Returns `Ok(false)` if an abort arrived while waiting.
+///
+/// Note this is a native-only guarantee: on WebGPU `PollType::Wait` is a no-op
+/// and callbacks are driven by the window event loop instead.
+fn wait_for_submission(
+    device: &wgpu::Device,
+    index: &wgpu::SubmissionIndex,
+    abort: &Receiver<bool>,
+) -> Result<bool, Box<dyn Error>> {
+    loop {
+        match device.poll(wgpu::PollType::Wait {
+            submission_index: Some(index.clone()),
+            timeout: Some(POLL_SLICE),
+        }) {
+            Ok(_) => return Ok(true),
+            Err(wgpu::PollError::Timeout) => {
+                if abort.try_recv().is_ok() {
+                    return Ok(false);
+                }
+                // Still running. Recording the next dispatch here would defeat
+                // the point of waiting, so go around again.
             }
-            RenderImageStrategy::OnlyFinal => sample == total_samples,
+            Err(e) => {
+                return Err(SimpleError::new(format!("Failed to poll device: {}", e)).into());
+            }
         }
     }
 }
@@ -454,47 +479,90 @@ impl<'a> Renderer<'a> {
         abort: &Receiver<bool>,
         idle_after_rendering: bool,
     ) -> Result<(), Box<dyn Error>> {
-        let mut render_start_time = SystemTime::now();
         let samples_per_pixel = self.samples_per_pixel;
         let workgroup_count_x = self.width.div_ceil(8);
         let workgroup_count_y = self.height.div_ceil(8);
 
         // Number of samples already accumulated into the output buffer.
         let mut completed = 0;
+        // Seeded from the configured batch size, then continuously re-tuned to
+        // keep a single dispatch inside TARGET_DISPATCH.
+        let mut batch_size = self.samples_per_batch.max(1);
+        // Moving average of what one sample costs. Dominated by the scene
+        // rather than by the view, so it deliberately survives camera changes
+        // and only has to re-converge when the view changes character.
+        let mut ms_per_sample: Option<f64> = None;
+        // A camera config picked up while idling, handled at the top of the
+        // next iteration together with any that arrived after it.
+        let mut idle_camera_config = None;
+        // Full ray depth, and the reduced one used while the camera moves.
+        let full_max_depth = self.render_config.max_depth;
+        let interactive_max_depth = INTERACTIVE_MAX_DEPTH.min(full_max_depth);
+        let mut last_camera_update: Option<Instant> = None;
+
         loop {
             if abort.try_recv().is_ok() {
                 return Ok(());
             }
 
-            let mut latest_camera_config = None;
+            let mut latest_camera_config = idle_camera_config.take();
             while let Ok(config) = camera_config.try_recv() {
                 latest_camera_config = Some(config);
             }
 
             if let Some(config) = latest_camera_config {
                 self.update_camera(&config);
+                // Restart the accumulation. The output buffer deliberately is
+                // not cleared: the shader overwrites every pixel it covers when
+                // sample_count is zero, so clearing only costs a dispatch and
+                // leaves a window in which a caller blitting the buffer sees
+                // black.
                 completed = 0;
-                render_start_time = SystemTime::now();
+                // Get an image of the new view out as fast as possible, then
+                // grow back into the budget. Carrying a large batch across the
+                // restart would spend a whole dispatch before showing anything
+                // of where the camera now points.
+                batch_size = 1;
+                last_camera_update = Some(Instant::now());
+            }
 
-                // Clear the output buffer when the camera moves
-                let mut encoder = self
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                encoder.clear_buffer(&self.output_buffer, 0, None);
-                self.queue.submit([encoder.finish()]);
+            // Trade ray depth for responsiveness while the camera is moving,
+            // and restore it once the view has settled. Both directions change
+            // what a sample means, so the accumulation restarts either way --
+            // on the way in it has restarted already.
+            let interacting =
+                last_camera_update.is_some_and(|at| at.elapsed() < INTERACTION_TIMEOUT);
+            if !interacting {
+                last_camera_update = None;
+            }
+
+            let wanted_max_depth = if interacting {
+                interactive_max_depth
+            } else {
+                full_max_depth
+            };
+            if self.render_config.max_depth != wanted_max_depth {
+                self.render_config.max_depth = wanted_max_depth;
+                completed = 0;
             }
 
             if completed >= samples_per_pixel {
-                if idle_after_rendering {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                } else {
+                if !idle_after_rendering {
                     break;
                 }
+                // Block on the channel rather than polling it, so a converged
+                // image costs nothing and reacts the moment a camera update
+                // arrives.
+                match camera_config.recv_timeout(POLL_SLICE) {
+                    Ok(config) => idle_camera_config = Some(config),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+                continue;
             }
 
             // Never overshoot the requested sample count.
-            let batch = self.samples_per_batch.min(samples_per_pixel - completed);
+            let batch = batch_size.min(samples_per_pixel - completed);
             self.render_config.sample_count = completed;
             self.render_config.samples_per_batch = batch;
             self.queue.write_buffer(
@@ -522,20 +590,37 @@ impl<'a> Renderer<'a> {
             }
 
             let command_buffer = encoder.finish();
-            self.queue.submit([command_buffer]);
+            let dispatch_start = Instant::now();
+            let submission = self.queue.submit([command_buffer]);
+
+            // Back-pressure. Submissions on a queue execute in order, so
+            // anything left queued here is added directly to the frame latency
+            // of a caller sharing the device -- and without a wait this loop
+            // runs thousands of iterations ahead of the GPU. Waiting also means
+            // the progress reported below describes work that has actually
+            // completed.
+            if !wait_for_submission(self.device, &submission, abort)? {
+                return Ok(());
+            }
+            let dispatch_time = dispatch_start.elapsed();
 
             completed += batch;
 
-            let now = SystemTime::now();
+            let sample_ms = dispatch_time.as_secs_f64() * 1000. / batch as f64;
+            let ema = ms_per_sample.map_or(sample_ms, |prev| prev * 0.8 + sample_ms * 0.2);
+            ms_per_sample = Some(ema);
+
+            let target = (TARGET_DISPATCH.as_secs_f64() * 1000. / ema.max(1e-3)) as u32;
+            // Grow at most by doubling, so a single anomalously cheap dispatch
+            // cannot blow the batch size up and stall the next frame.
+            batch_size = target.clamp(1, (batch_size * 2).min(MAX_BATCH));
 
             output.send(RenderProgress {
                 progress: completed as f64 / samples_per_pixel as f64,
-                fps: Some(calculate_fps(render_start_time, now, completed)),
+                fps: Some(1000. / ema),
                 estimated_time_left: calculate_estimated_time_left(
-                    render_start_time,
-                    now,
-                    completed,
-                    samples_per_pixel,
+                    ema,
+                    samples_per_pixel - completed,
                 ),
                 output_buffer: self.output_buffer.clone(),
             })?;
@@ -545,28 +630,11 @@ impl<'a> Renderer<'a> {
     }
 }
 
-fn calculate_fps(render_start_time: SystemTime, now: SystemTime, samples_done: u32) -> f64 {
-    let time_since_start = now
-        .duration_since(render_start_time)
-        .unwrap_or(Duration::from_millis(1));
-
-    samples_done as f64 / time_since_start.as_secs_f64()
-}
-
-fn calculate_estimated_time_left(
-    render_start_time: SystemTime,
-    now: SystemTime,
-    samples_done: u32,
-    total_samples: u32,
-) -> Duration {
-    let time_since_start = now
-        .duration_since(render_start_time)
-        .unwrap_or(Duration::from_millis(1));
-    let samples_left = total_samples - samples_done;
-
-    time_since_start
-        .div_f32(samples_done as f32)
-        .mul_f32(samples_left as f32)
+/// Time left, from the measured cost of a sample rather than from the elapsed
+/// time of the run. Restarting the accumulation on a camera change therefore
+/// does not throw the estimate off.
+fn calculate_estimated_time_left(ms_per_sample: f64, samples_left: u32) -> Duration {
+    Duration::from_secs_f64(ms_per_sample / 1000. * samples_left as f64)
 }
 
 fn camera_to_gpu(camera_inst: &Camera) -> GpuCamera {
@@ -646,29 +714,18 @@ fn create_and_upload_buffer<T: bytemuck::Pod>(
 
 #[cfg(test)]
 mod test {
-    use crate::renderer::{calculate_estimated_time_left, calculate_fps};
-    use std::time::{Duration, SystemTime};
-    #[test]
-    fn test_calculate_fps() {
-        let render_start = SystemTime::UNIX_EPOCH + Duration::from_millis(900);
-        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1000);
-
-        let fps = calculate_fps(render_start, now, 5);
-        assert_eq!(fps, 50.);
-    }
+    use crate::renderer::calculate_estimated_time_left;
+    use std::time::Duration;
 
     #[test]
     fn test_calculate_estimated_time_left() {
-        let render_start = SystemTime::UNIX_EPOCH;
-        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1000);
-
-        let mut time_left = calculate_estimated_time_left(render_start, now, 1, 100);
+        let mut time_left = calculate_estimated_time_left(1000., 99);
         assert_eq!(time_left, Duration::from_secs(99));
 
-        time_left = calculate_estimated_time_left(render_start, now, 50, 100);
+        time_left = calculate_estimated_time_left(20., 50);
         assert_eq!(time_left, Duration::from_secs(1));
 
-        time_left = calculate_estimated_time_left(render_start, now, 100, 100);
+        time_left = calculate_estimated_time_left(20., 0);
         assert_eq!(time_left, Duration::from_secs(0));
     }
 
