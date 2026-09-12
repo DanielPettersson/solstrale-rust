@@ -99,6 +99,10 @@ const MAT_BLEND = 4u;
 const CLAMPING_THRESHOLD = 3.5;
 
 const PI = 3.14159265359;
+
+// Offset used to push ray origins off the surface they start from, and to stop
+// shadow rays short of the light they are aimed at.
+const RAY_EPS = 0.001;
 const TWO_PI = 6.28318530718;
 
 // Path depth at which Russian roulette starts. Below it every path survives,
@@ -364,37 +368,88 @@ fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
     return sum / f32(config.light_count);
 }
 
-fn light_random_direction(origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
-    if (config.light_count == 0u) { return vec3<f32>(1.0, 0.0, 0.0); }
-    let idx = u32(rand_float(state) * f32(config.light_count));
-    let light = lights[min(idx, config.light_count - 1u)];
+// One sample of the direct-lighting strategy: pick a light uniformly, sample a
+// point on it, and report what a shadow ray would need to reach it.
+struct LightSample {
+    // Unit vector from the shading point toward the sampled point.
+    direction: vec3<f32>,
+    // Distance to the sampled point, so the shadow ray can stop short of it.
+    distance: f32,
+    emission: vec3<f32>,
+    attenuation_factor: f32,
+    valid: bool,
+}
+
+fn sample_light(origin: vec3<f32>, state: ptr<function, u32>) -> LightSample {
+    var ls: LightSample;
+    ls.direction = vec3<f32>(0.0, 1.0, 0.0);
+    ls.distance = 0.0;
+    ls.emission = vec3<f32>(0.0);
+    ls.attenuation_factor = 0.0;
+    ls.valid = false;
+
+    if (config.light_count == 0u) { return ls; }
+
+    let idx = min(u32(rand_float(state) * f32(config.light_count)), config.light_count - 1u);
+    let light = lights[idx];
+
+    var to_light = vec3<f32>(0.0);
+    if (light.prim_type == 0u) {
+        to_light = sphere_random_direction(spheres[light.prim_index], origin, state);
+    } else if (light.prim_type == 1u) {
+        to_light = triangle_random_direction(triangle_pos[light.prim_index], origin, state);
+    } else {
+        to_light = quad_random_direction(quad_pos[light.prim_index], origin, state);
+    }
+
+    let len_sq = dot(to_light, to_light);
+    if (len_sq < 1e-12) { return ls; }
+    let dir = to_light * inverseSqrt(len_sq);
+
+    // Intersect the chosen light itself: sphere sampling yields a direction
+    // rather than a point, and we need the distance either way so the shadow
+    // ray can stop just short of the light instead of hitting it.
+    let probe = Ray(origin, dir);
+    var t_hit = 0.0;
+    var bary = vec2<f32>(0.0);
+    var normal = vec3<f32>(0.0);
+    var mat_idx = 0u;
 
     if (light.prim_type == 0u) {
-        return sphere_random_direction(spheres[light.prim_index], origin, state);
+        if (!hit_sphere_t(probe, spheres[light.prim_index], RAY_EPS, 1e20, &t_hit)) { return ls; }
+        let sph = spheres[light.prim_index];
+        normal = (ray_at(probe, t_hit) - sph.center_and_radius.xyz) / sph.center_and_radius.w;
+        mat_idx = sph.material_index;
     } else if (light.prim_type == 1u) {
-        return triangle_random_direction(triangle_pos[light.prim_index], origin, state);
-    } else if (light.prim_type == 2u) {
-        return quad_random_direction(quad_pos[light.prim_index], origin, state);
+        if (!hit_triangle_t(probe, triangle_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
+        let attr = triangle_attr[light.prim_index];
+        normal = attr.normal;
+        mat_idx = attr.material_index;
+    } else {
+        if (!hit_quad_t(probe, quad_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
+        normal = quad_pos[light.prim_index].normal;
+        mat_idx = quad_attr[light.prim_index].material_index;
     }
-    return vec3<f32>(1.0, 0.0, 0.0);
+
+    // Lights emit from their front face only, matching what a BSDF path sees
+    // when it lands on one. Sampling the back is a valid direction with a real
+    // PDF, it just carries no radiance -- so the MIS weights stay consistent.
+    if (dot(dir, normal) >= 0.0) { return ls; }
+
+    let material = materials[mat_idx];
+    let emission = select(vec3<f32>(0.0), material.emission, material.mat_type == MAT_DIFFUSE_LIGHT);
+
+    ls.direction = dir;
+    ls.distance = t_hit;
+    ls.emission = emission;
+    ls.attenuation_factor = material.attenuation_factor;
+    ls.valid = true;
+    return ls;
 }
 
 fn cosine_pdf_value(normal: vec3<f32>, direction: vec3<f32>) -> f32 {
     let cos_theta = dot(normalize(direction), normal);
-    return max(0.0, cos_theta / 3.14159265359);
-}
-
-fn mixture_pdf_value(origin: vec3<f32>, normal: vec3<f32>, direction: vec3<f32>) -> f32 {
-    return 0.5 * cosine_pdf_value(normal, direction) + 0.5 * light_pdf_value(origin, direction);
-}
-
-fn mixture_pdf_generate(origin: vec3<f32>, normal: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
-    if (rand_float(state) < 0.5) {
-        return light_random_direction(origin, state);
-    } else {
-        let uvw = onb_from_w(normal);
-        return onb_local(uvw, random_cosine_direction(state));
-    }
+    return max(0.0, cos_theta / PI);
 }
 
 fn reflect(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
@@ -414,16 +469,19 @@ fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
     return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
 }
 
-struct ScatterRecord {
-    attenuation: vec3<f32>,
-    scattered: Ray,
-    emitted: vec3<f32>,
+// A hit surface with its material fully resolved: blend chosen, albedo and
+// shading normal sampled from textures.
+struct Surface {
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    emission: vec3<f32>,
     attenuation_factor: f32,
-    is_scattered: bool,
-    pdf_value: f32,
+    fuzz: f32,
+    refraction_index: f32,
+    mat_type: u32,
 }
 
-fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<function, ScatterRecord>) -> bool {
+fn resolve_surface(rec: HitRecord, state: ptr<function, u32>) -> Surface {
     var mat_idx = rec.material_index;
     for (var i = 0u; i < 10u; i++) {
         let material = materials[mat_idx];
@@ -439,74 +497,31 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     }
 
     let material = materials[mat_idx];
-    (*s_rec).emitted = vec3<f32>(0.0);
-    (*s_rec).is_scattered = true;
-    (*s_rec).attenuation_factor = 0.0;
-    (*s_rec).pdf_value = 1.0;
 
-    var albedo = material.albedo;
+    var surface: Surface;
+    surface.mat_type = material.mat_type;
+    surface.emission = material.emission;
+    surface.attenuation_factor = material.attenuation_factor;
+    surface.fuzz = material.fuzz;
+    surface.refraction_index = material.refraction_index;
+
+    surface.albedo = material.albedo;
     if (material.texture_index >= 0) {
         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
         let uv_atlas = material.albedo_offset + uv * material.albedo_scale;
-        albedo = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
+        surface.albedo = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
     }
 
-    var normal = rec.normal;
+    surface.normal = rec.normal;
     if (material.normal_texture_index >= 0) {
-         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
-         let uv_atlas = material.normal_offset + uv * material.normal_scale;
-         let map_color = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
-         let map_n = map_color * 2.0 - 1.0;
-         normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
+        let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
+        let uv_atlas = material.normal_offset + uv * material.normal_scale;
+        let map_color = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
+        let map_n = map_color * 2.0 - 1.0;
+        surface.normal = normalize(map_n.x * rec.tangent + map_n.y * rec.bi_tangent + map_n.z * rec.normal);
     }
 
-    if (material.mat_type == MAT_LAMBERTIAN) { // Lambertian
-        let direction = mixture_pdf_generate(rec.p, normal, state);
-        (*s_rec).scattered = Ray(rec.p, direction);
-        (*s_rec).attenuation = albedo;
-        let scattering_pdf = cosine_pdf_value(normal, direction);
-        let pdf_val = mixture_pdf_value(rec.p, normal, direction);
-        (*s_rec).pdf_value = scattering_pdf / pdf_val;
-        return true;
-    } else if (material.mat_type == MAT_METAL) { // Metal
-        let reflected = reflect(normalize(r_in.direction), normal);
-        (*s_rec).scattered = Ray(rec.p, reflected + material.fuzz * random_in_unit_sphere(state));
-        (*s_rec).attenuation = albedo;
-        return dot((*s_rec).scattered.direction, normal) > 0.0;
-    } else if (material.mat_type == MAT_DIELECTRIC) { // Dielectric
-        (*s_rec).attenuation = vec3<f32>(1.0, 1.0, 1.0);
-        var refraction_ratio = material.refraction_index;
-        if (rec.front_face) {
-            refraction_ratio = 1.0 / material.refraction_index;
-        }
-
-        let unit_direction = normalize(r_in.direction);
-        let cos_theta = min(dot(-unit_direction, normal), 1.0);
-        let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-
-        let cannot_refract = refraction_ratio * sin_theta > 1.0;
-        var direction: vec3<f32>;
-
-        if (cannot_refract || reflectance(cos_theta, refraction_ratio) > rand_float(state)) {
-            direction = reflect(unit_direction, normal);
-        } else {
-            direction = refract(unit_direction, normal, refraction_ratio);
-        }
-
-        (*s_rec).scattered = Ray(rec.p, direction);
-        return true;
-    } else if (material.mat_type == MAT_DIFFUSE_LIGHT) { // DiffuseLight
-        if (rec.front_face) {
-            (*s_rec).emitted = material.emission;
-        } else {
-            (*s_rec).emitted = vec3<f32>(0.0);
-        }
-        (*s_rec).is_scattered = false;
-        (*s_rec).attenuation_factor = material.attenuation_factor;
-        return true;
-    }
-
-    return false;
+    return surface;
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +759,89 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, hit_ref: ptr<function, HitRef>) -> 
     return hit_anything;
 }
 
+// Does any primitive of this leaf block the segment?
+fn leaf_occluded(r: Ray, leaf: u32, t_max: f32) -> bool {
+    let count = (leaf >> LEAF_COUNT_SHIFT) & LEAF_COUNT_MASK;
+    let offset = leaf & LEAF_OFFSET_MASK;
+
+    for (var i = 0u; i < count; i++) {
+        let prim_ref = prim_refs[offset + i];
+        let prim_type = prim_ref >> PRIM_TYPE_SHIFT;
+        let prim_idx = prim_ref & PRIM_INDEX_MASK;
+
+        var t_hit = 0.0;
+        var bary = vec2<f32>(0.0);
+        if (prim_type == 0u) {
+            if (hit_sphere_t(r, spheres[prim_idx], RAY_EPS, t_max, &t_hit)) { return true; }
+        } else if (prim_type == 1u) {
+            if (hit_triangle_t(r, triangle_pos[prim_idx], RAY_EPS, t_max, &t_hit, &bary)) { return true; }
+        } else {
+            if (hit_quad_t(r, quad_pos[prim_idx], RAY_EPS, t_max, &t_hit, &bary)) { return true; }
+        }
+    }
+    return false;
+}
+
+// Any-hit traversal for shadow rays.
+//
+// Cheaper than world_hit in three ways: it returns on the first blocker instead
+// of tracking the closest, it never resolves shading attributes, and it needs
+// no front-to-back ordering because any hit is as good as any other. With NEE
+// roughly half of all rays are shadow rays, so this pays for itself.
+fn occluded(origin: vec3<f32>, direction: vec3<f32>, t_max: f32) -> bool {
+    if (arrayLength(&nodes) == 0u || t_max <= RAY_EPS) { return false; }
+
+    let inv_dir = ray_inv_dir(direction);
+    let r = Ray(origin, direction);
+
+    var stack: array<u32, 32>;
+    var stack_ptr = 0u;
+    var node_idx = 0u;
+
+    loop {
+        let node = nodes[node_idx];
+
+        var t_left = 0.0;
+        var t_right = 0.0;
+        let left_hit = hit_aabb(origin, inv_dir, node.left_min, node.left_max, RAY_EPS, t_max, &t_left);
+        let right_hit = hit_aabb(origin, inv_dir, node.right_min, node.right_max, RAY_EPS, t_max, &t_right);
+
+        var left_next = NO_NODE;
+        var right_next = NO_NODE;
+
+        if (left_hit) {
+            if ((node.left_meta & LEAF_FLAG) != 0u) {
+                if (leaf_occluded(r, node.left_meta, t_max)) { return true; }
+            } else {
+                left_next = node.left_meta;
+            }
+        }
+        if (right_hit) {
+            if ((node.right_meta & LEAF_FLAG) != 0u) {
+                if (leaf_occluded(r, node.right_meta, t_max)) { return true; }
+            } else {
+                right_next = node.right_meta;
+            }
+        }
+
+        if (left_next != NO_NODE) {
+            if (right_next != NO_NODE) {
+                stack[stack_ptr] = right_next;
+                stack_ptr++;
+            }
+            node_idx = left_next;
+        } else if (right_next != NO_NODE) {
+            node_idx = right_next;
+        } else {
+            if (stack_ptr == 0u) { break; }
+            stack_ptr--;
+            node_idx = stack[stack_ptr];
+        }
+    }
+
+    return false;
+}
+
 // Expands the winning primitive into full shading data. Called once per ray,
 // not once per candidate intersection.
 fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
@@ -794,10 +892,16 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
     return rec;
 }
 
-// 8x8 tiles rather than 64 pixels of one scanline: neighbouring rays in a
-// workgroup then stay coherent through the first bounce or two, which is where
-// BVH traversal divergence actually costs.
 // Traces one path for the given pixel and sample index.
+//
+// Next-event estimation with multiple importance sampling: at every diffuse
+// vertex the direct lighting is estimated with an explicit shadow ray, and the
+// BSDF-sampled continuation is weighted so that a path which happens to land on
+// a light is not counted twice. Both strategies use the balance heuristic, for
+// which `w / pdf` collapses to `1 / (pdf_light + pdf_bsdf)`.
+//
+// Specular bounces (metal, dielectric) have no light-sampling counterpart, so
+// they skip NEE and the emitter they reach is taken at full weight.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * config.width + pixel.x;
     var rng_state = pcg_hash(index ^ (sample_index * 0x9E3779B9u));
@@ -814,41 +918,113 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let ray_direction = camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin - offset;
     var r = Ray(camera.origin + offset, ray_direction);
 
-    var accumulated_color = vec3<f32>(0.0);
-    var current_attenuation = vec3<f32>(1.0);
-    var accumulated_ray_length = 0.0;
+    var radiance = vec3<f32>(0.0);
+    var throughput = vec3<f32>(1.0);
+    var path_length = 0.0;
+
+    // State describing how the current ray was generated, needed to weight an
+    // emitter it may land on. The camera ray counts as specular: a directly
+    // visible light is seen at full brightness.
+    var prev_specular = true;
+    var prev_bsdf_pdf = 0.0;
 
     for (var depth = 0u; depth < config.max_depth; depth++) {
         var hit_ref: HitRef;
-        if (world_hit(r, 0.001, 10000.0, &hit_ref)) {
-            let rec = resolve_hit(r, hit_ref);
-            var s_rec: ScatterRecord;
-            if (scatter(r, rec, &rng_state, &s_rec)) {
-                accumulated_ray_length += rec.t;
-
-                var emitted = s_rec.emitted;
-                if (s_rec.attenuation_factor > 0.0) {
-                    emitted *= 1.0 / (1.0 + s_rec.attenuation_factor * accumulated_ray_length);
-                }
-
-                accumulated_color += emitted * current_attenuation;
-
-                if (s_rec.is_scattered) {
-                    current_attenuation *= s_rec.attenuation * s_rec.pdf_value;
-                    r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        } else {
-            accumulated_color += config.background_color * current_attenuation;
+        if (!world_hit(r, RAY_EPS, 10000.0, &hit_ref)) {
+            radiance += config.background_color * throughput;
             break;
         }
 
-        let max_attenuation = max(current_attenuation.x, max(current_attenuation.y, current_attenuation.z));
-        if (max_attenuation < 0.0001) {
+        let rec = resolve_hit(r, hit_ref);
+        let surface = resolve_surface(rec, &rng_state);
+        path_length += rec.t;
+
+        if (surface.mat_type == MAT_DIFFUSE_LIGHT) {
+            if (rec.front_face) {
+                var emitted = surface.emission;
+                if (surface.attenuation_factor > 0.0) {
+                    emitted *= 1.0 / (1.0 + surface.attenuation_factor * path_length);
+                }
+
+                // Weight against the direct-lighting strategy that could also
+                // have produced this direction, unless the previous bounce was
+                // specular and no such strategy exists.
+                var weight = 1.0;
+                if (!prev_specular) {
+                    let pdf_light = light_pdf_value(r.origin, r.direction);
+                    weight = prev_bsdf_pdf / (prev_bsdf_pdf + pdf_light);
+                }
+                radiance += throughput * emitted * weight;
+            }
+            break;
+        }
+
+        if (surface.mat_type == MAT_LAMBERTIAN) {
+            // --- Direct lighting (next-event estimation) ---
+            let ls = sample_light(rec.p, &rng_state);
+            let cos_light = dot(surface.normal, ls.direction);
+            if (ls.valid && cos_light > 0.0) {
+                let pdf_light = light_pdf_value(rec.p, ls.direction);
+                if (pdf_light > 0.0) {
+                    let pdf_bsdf = cos_light / PI;
+                    // Shadow ray last: everything above is cheaper to reject on.
+                    if (!occluded(rec.p, ls.direction, ls.distance - RAY_EPS)) {
+                        var emitted = ls.emission;
+                        if (ls.attenuation_factor > 0.0) {
+                            emitted *= 1.0 / (1.0 + ls.attenuation_factor * (path_length + ls.distance));
+                        }
+                        let brdf = surface.albedo / PI;
+                        radiance += throughput * brdf * cos_light * emitted / (pdf_light + pdf_bsdf);
+                    }
+                }
+            }
+
+            // --- BSDF continuation ---
+            let uvw = onb_from_w(surface.normal);
+            let direction = onb_local(uvw, random_cosine_direction(&rng_state));
+            let cos_theta = dot(surface.normal, direction);
+            if (cos_theta <= 0.0) { break; }
+
+            // Cosine sampling cancels the BRDF and the cosine exactly, leaving
+            // the albedo: (albedo/PI) * cos / (cos/PI).
+            throughput *= surface.albedo;
+            prev_bsdf_pdf = cos_theta / PI;
+            prev_specular = false;
+            r = Ray(rec.p, normalize(direction));
+        } else if (surface.mat_type == MAT_METAL) {
+            let reflected = reflect(normalize(r.direction), surface.normal);
+            let direction = reflected + surface.fuzz * random_in_unit_sphere(&rng_state);
+            if (dot(direction, surface.normal) <= 0.0) { break; }
+
+            throughput *= surface.albedo;
+            prev_specular = true;
+            r = Ray(rec.p, normalize(direction));
+        } else if (surface.mat_type == MAT_DIELECTRIC) {
+            var refraction_ratio = surface.refraction_index;
+            if (rec.front_face) {
+                refraction_ratio = 1.0 / surface.refraction_index;
+            }
+
+            let unit_direction = normalize(r.direction);
+            let cos_theta = min(dot(-unit_direction, surface.normal), 1.0);
+            let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+            var direction: vec3<f32>;
+            if (refraction_ratio * sin_theta > 1.0
+                || reflectance(cos_theta, refraction_ratio) > rand_float(&rng_state)) {
+                direction = reflect(unit_direction, surface.normal);
+            } else {
+                direction = refract(unit_direction, surface.normal, refraction_ratio);
+            }
+
+            prev_specular = true;
+            r = Ray(rec.p, normalize(direction));
+        } else {
+            break;
+        }
+
+        let max_throughput = max(throughput.x, max(throughput.y, throughput.z));
+        if (max_throughput < 0.0001) {
             break;
         }
 
@@ -856,16 +1032,16 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         // up to compensate, which keeps the estimator unbiased while cutting
         // the average path length.
         if (depth >= RR_MIN_DEPTH) {
-            let survival = clamp(max_attenuation, RR_MIN_SURVIVAL, 1.0);
+            let survival = clamp(max_throughput, RR_MIN_SURVIVAL, 1.0);
             if (rand_float(&rng_state) > survival) {
                 break;
             }
-            current_attenuation /= survival;
+            throughput /= survival;
         }
     }
 
     // Firefly clamp, per sample.
-    return min(accumulated_color, vec3<f32>(CLAMPING_THRESHOLD));
+    return min(radiance, vec3<f32>(CLAMPING_THRESHOLD));
 }
 
 // 8x8 tiles rather than 64 pixels of one scanline: neighbouring rays in a

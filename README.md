@@ -14,15 +14,24 @@ A WGPU-based GPU Monte Carlo path tracing library, with features like:
 * Soft shadows
 * Bump mapping
 * Light attenuation
+* Next-event estimation with multiple importance sampling, for much lower noise
+  per sample on scenes lit by discrete lights
+* Russian roulette path termination
 
 ### Performance & Loading
 * Loading of obj models with included materials
-* Multithreaded BVH creation using Rayon to greatly speed up rendering
+* Multithreaded BVH construction using Rayon, with a binned SAH split heuristic
+  and front-to-back ordered GPU traversal
 
 ### Post-Processing
 Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
 * Bloom filter
 * Saturation filter
+
+## Requirements
+A GPU adapter supporting compute shaders and at least 12 storage buffers per
+shader stage. Native backends (Vulkan, Metal, DX12) exceed this comfortably; the
+WebGPU downlevel default of 8 does not.
 
 ## Installation
 To build the library, ensure you have Rust installed and run:
@@ -80,6 +89,36 @@ fn main() {
         // Handle render progress and output buffer
         let _progress = render_output.progress;
     }
+}
+```
+
+## Configuration
+`RenderConfig` controls how a scene is rendered:
+
+| Field | Default | Description |
+|---|---|---|
+| `width`, `height` | 300 x 200 | Output resolution in pixels |
+| `samples_per_pixel` | 50 | Paths traced per pixel |
+| `max_depth` | 10 | Maximum ray bounces before a path is cut off |
+| `samples_per_batch` | 4 | Samples traced per GPU dispatch |
+| `post_processors` | none | Filters applied to the final image |
+
+`samples_per_batch` trades reporting granularity for throughput: larger batches
+amortise dispatch overhead and collapse the per-sample read-modify-write of the
+accumulation buffer, but render progress is reported less often and camera
+changes take longer to take effect.
+
+## Upgrading to 0.3
+`RenderConfig` gained `max_depth` and `samples_per_batch`, so code constructing it
+with an exhaustive struct literal needs updating. Spreading the defaults keeps it
+working across future additions:
+
+```rust
+RenderConfig {
+    width: 800,
+    height: 600,
+    samples_per_pixel: 200,
+    ..Default::default()
 }
 ```
 
