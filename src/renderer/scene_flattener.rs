@@ -1,33 +1,57 @@
 //! Utilities for flattening the scene graph into linear buffers for the GPU
 
+use crate::geo::Aabb;
 use crate::geo::Uv;
 use crate::geo::vec3::{Vec3, ZERO_VECTOR};
-use crate::hittable::{Bvh, BvhItem, Hittable, Hittables};
+use crate::hittable::{Bvh, Hittable, Hittables, LEAF_FLAG};
 use crate::material::texture::{Texture, Textures};
 use crate::material::{Material, Materials};
 use crate::renderer::Scene;
 use crate::renderer::gpu_data::{
-    BvhNode as GpuBvhNode, LightRef, Material as GpuMaterial, Quad as GpuQuad, Sphere as GpuSphere,
-    Triangle as GpuTriangle,
+    BvhNode as GpuBvhNode, LightRef, Material as GpuMaterial, PRIM_TYPE_SHIFT, QuadAttr, QuadPos,
+    Sphere as GpuSphere, TriangleAttr, TrianglePos,
 };
 use crate::util::texture_processing::{AtlasLayout, TexturePacker};
 use image::RgbImage;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Interning caches used while flattening.
+///
+/// Without these the flattener emits one `GpuMaterial` per *primitive* and
+/// re-scans the texture list linearly per material, so a large mesh sharing a
+/// single material produced megabytes of duplicate material records that
+/// thrashed the material fetch in `scatter`.
+#[derive(Default)]
+struct FlattenCaches {
+    /// Byte image of an already-emitted `GpuMaterial` -> its index.
+    material_ids: HashMap<Vec<u8>, u32>,
+    /// `Arc::as_ptr` of a decoded texture -> its index in `unique_textures`.
+    texture_ids: HashMap<usize, usize>,
+}
 
 /// Container for all scene data flattened for the GPU
 pub struct SceneData {
     /// Flattened BVH nodes
     pub nodes: Vec<GpuBvhNode>,
+    /// Primitive references indexed by BVH leaves: type in bits 31..30, index in bits 29..0
+    pub prim_refs: Vec<u32>,
     /// Spheres
     pub spheres: Vec<GpuSphere>,
-    /// Triangles
-    pub triangles: Vec<GpuTriangle>,
-    /// Quads
-    pub quads: Vec<GpuQuad>,
+    /// Triangle geometry, read during BVH traversal
+    pub triangle_pos: Vec<TrianglePos>,
+    /// Triangle shading attributes, read once per ray after traversal
+    pub triangle_attr: Vec<TriangleAttr>,
+    /// Quad geometry, read during BVH traversal
+    pub quad_pos: Vec<QuadPos>,
+    /// Quad shading attributes, read once per ray after traversal
+    pub quad_attr: Vec<QuadAttr>,
     /// Materials
     pub materials: Vec<GpuMaterial>,
-    /// Textures
-    pub textures: Vec<RgbImage>,
+    /// Unique decoded textures, shared with the scene (not copied).
+    pub textures: Vec<Arc<RgbImage>>,
+    /// Atlas placement for `textures`, computed once here and reused by the renderer.
+    pub atlas_layout: Option<AtlasLayout>,
     /// Light sources
     pub lights: Vec<LightRef>,
 }
@@ -36,14 +60,19 @@ pub struct SceneData {
 pub fn flatten_scene(scene: &Scene) -> SceneData {
     let mut data = SceneData {
         nodes: Vec::new(),
+        prim_refs: Vec::new(),
         spheres: Vec::new(),
-        triangles: Vec::new(),
-        quads: Vec::new(),
+        triangle_pos: Vec::new(),
+        triangle_attr: Vec::new(),
+        quad_pos: Vec::new(),
+        quad_attr: Vec::new(),
         materials: Vec::new(),
         textures: Vec::new(),
+        atlas_layout: None,
         lights: Vec::new(),
     };
 
+    let mut caches = FlattenCaches::default();
     let mut unique_textures: Vec<Arc<RgbImage>> = Vec::new();
     collect_unique_textures(&scene.world, &mut unique_textures);
 
@@ -65,38 +94,39 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     // Process world
     match &scene.world {
         Hittables::Bvh(bvh) => {
-            process_node(bvh, &mut data, &unique_textures, atlas_layout.as_ref());
+            emit_bvh(bvh, &mut data, &unique_textures, atlas_layout.as_ref(), &mut caches);
         }
-        _ => {
+        world => {
+            // A bare primitive as the whole scene: emit a root whose left child
+            // is a one-primitive leaf and whose right child is an empty leaf.
             let (prim_index, prim_type) = add_primitive(
-                &scene.world,
+                world,
                 &mut data,
                 &unique_textures,
                 atlas_layout.as_ref(),
+                &mut caches,
             );
-            let bbox = scene.world.bounding_box();
+            data.prim_refs
+                .push((prim_type << PRIM_TYPE_SHIFT) | prim_index);
 
-            let flag = 0x80000000;
+            let bbox = world.bounding_box();
             data.nodes.push(GpuBvhNode {
-                min_and_left: [
-                    (bbox.x.min as f32).to_bits(),
-                    (bbox.y.min as f32).to_bits(),
-                    (bbox.z.min as f32).to_bits(),
-                    prim_index,
-                ],
-                max_and_right: [
-                    (bbox.x.max as f32).to_bits(),
-                    (bbox.y.max as f32).to_bits(),
-                    (bbox.z.max as f32).to_bits(),
-                    prim_type | flag,
-                ],
+                left_min: aabb_min(bbox),
+                left_meta: leaf_meta(0, 1),
+                left_max: aabb_max(bbox),
+                right_meta: leaf_meta(0, 0),
+                right_min: [0.0; 3],
+                _pad0: 0,
+                right_max: [0.0; 3],
+                _pad1: 0,
             });
         }
     }
 
-    // For now, we still return the list of unique textures.
-    // In Phase 3, we will blit them into a single atlas image.
-    data.textures = unique_textures.iter().map(|img| (**img).clone()).collect();
+    // Hand the renderer the shared Arcs and the layout we already computed above;
+    // it used to deep-copy every decoded image and re-run the identical packing.
+    data.textures = unique_textures;
+    data.atlas_layout = atlas_layout;
 
     data
 }
@@ -107,20 +137,10 @@ fn collect_unique_textures(hittable: &Hittables, unique_textures: &mut Vec<Arc<R
         Hittables::Triangle(t) => collect_material_textures(&t.mat, unique_textures),
         Hittables::Quad(q) => collect_material_textures(&q.mat, unique_textures),
         Hittables::Bvh(bvh) => {
-            collect_unique_textures_item(&bvh.left, unique_textures);
-            collect_unique_textures_item(&bvh.right, unique_textures);
+            for prim in &bvh.prims {
+                collect_unique_textures(prim, unique_textures);
+            }
         }
-    }
-}
-
-fn collect_unique_textures_item(item: &BvhItem, unique_textures: &mut Vec<Arc<RgbImage>>) {
-    match item {
-        BvhItem::Node(bvh) => {
-            collect_unique_textures_item(&bvh.left, unique_textures);
-            collect_unique_textures_item(&bvh.right, unique_textures);
-        }
-        BvhItem::Leaf(hittable) => collect_unique_textures(hittable, unique_textures),
-        BvhItem::None => {}
     }
 }
 
@@ -166,82 +186,52 @@ fn collect_texture(tex: &Textures, unique_textures: &mut Vec<Arc<RgbImage>>) {
     }
 }
 
-fn process_node(
+/// Copies a built [`Bvh`] into the flat GPU buffers.
+///
+/// `bvh.prims` is already in leaf order, so emitting them in order makes
+/// `prim_refs` line up exactly with the leaf offsets the builder baked into the
+/// node metas -- no index rewriting is needed.
+fn emit_bvh(
     bvh: &Bvh,
     data: &mut SceneData,
     unique_textures: &[Arc<RgbImage>],
     atlas_layout: Option<&AtlasLayout>,
-) -> u32 {
-    let index = data.nodes.len() as u32;
-    // Reserve slot
-    data.nodes.push(GpuBvhNode {
-        min_and_left: [0; 4],
-        max_and_right: [0; 4],
-    });
+    caches: &mut FlattenCaches,
+) {
+    data.prim_refs.reserve(bvh.prims.len());
+    for prim in &bvh.prims {
+        let (prim_index, prim_type) =
+            add_primitive(prim, data, unique_textures, atlas_layout, caches);
+        data.prim_refs
+            .push((prim_type << PRIM_TYPE_SHIFT) | prim_index);
+    }
 
-    let left_idx = process_item(&bvh.left, data, unique_textures, atlas_layout);
-    let right_idx = process_item(&bvh.right, data, unique_textures, atlas_layout);
-
-    let bbox = bvh.bounding_box();
-
-    data.nodes[index as usize] = GpuBvhNode {
-        min_and_left: [
-            (bbox.x.min as f32).to_bits(),
-            (bbox.y.min as f32).to_bits(),
-            (bbox.z.min as f32).to_bits(),
-            left_idx,
-        ],
-        max_and_right: [
-            (bbox.x.max as f32).to_bits(),
-            (bbox.y.max as f32).to_bits(),
-            (bbox.z.max as f32).to_bits(),
-            right_idx,
-        ],
-    };
-
-    index
+    data.nodes.reserve(bvh.nodes.len());
+    for node in &bvh.nodes {
+        data.nodes.push(GpuBvhNode {
+            left_min: aabb_min(&node.left_box),
+            left_meta: node.left_meta,
+            left_max: aabb_max(&node.left_box),
+            right_meta: node.right_meta,
+            right_min: aabb_min(&node.right_box),
+            _pad0: 0,
+            right_max: aabb_max(&node.right_box),
+            _pad1: 0,
+        });
+    }
 }
 
-fn process_item(
-    item: &BvhItem,
-    data: &mut SceneData,
-    unique_textures: &[Arc<RgbImage>],
-    atlas_layout: Option<&AtlasLayout>,
-) -> u32 {
-    match item {
-        BvhItem::Node(bvh) => process_node(bvh, data, unique_textures, atlas_layout),
-        BvhItem::Leaf(hittable) => {
-            if let Hittables::Bvh(bvh) = &**hittable {
-                return process_node(bvh, data, unique_textures, atlas_layout);
-            }
+fn aabb_min(a: &Aabb) -> [f32; 3] {
+    [a.x.min as f32, a.y.min as f32, a.z.min as f32]
+}
 
-            let (prim_index, prim_type) =
-                add_primitive(hittable, data, unique_textures, atlas_layout);
+fn aabb_max(a: &Aabb) -> [f32; 3] {
+    [a.x.max as f32, a.y.max as f32, a.z.max as f32]
+}
 
-            let index = data.nodes.len() as u32;
-            let bbox = hittable.bounding_box();
-
-            let flag = 0x80000000;
-
-            data.nodes.push(GpuBvhNode {
-                min_and_left: [
-                    (bbox.x.min as f32).to_bits(),
-                    (bbox.y.min as f32).to_bits(),
-                    (bbox.z.min as f32).to_bits(),
-                    prim_index,
-                ],
-                max_and_right: [
-                    (bbox.x.max as f32).to_bits(),
-                    (bbox.y.max as f32).to_bits(),
-                    (bbox.z.max as f32).to_bits(),
-                    prim_type | flag,
-                ],
-            });
-
-            index
-        }
-        BvhItem::None => 0x0FFFFFFF,
-    }
+/// Packs an inline leaf the same way the builder does.
+fn leaf_meta(offset: u32, count: u32) -> u32 {
+    LEAF_FLAG | (count << 24) | (offset & 0x00FF_FFFF)
 }
 
 fn add_primitive(
@@ -249,11 +239,12 @@ fn add_primitive(
     data: &mut SceneData,
     unique_textures: &[Arc<RgbImage>],
     atlas_layout: Option<&AtlasLayout>,
+    caches: &mut FlattenCaches,
 ) -> (u32, u32) {
     match hittable {
         Hittables::Sphere(s) => {
             let index = data.spheres.len() as u32;
-            let mat_idx = add_material(&s.mat, data, unique_textures, atlas_layout);
+            let mat_idx = add_material(&s.mat, data, unique_textures, atlas_layout, caches);
             data.spheres.push(GpuSphere {
                 center_and_radius: [
                     s.center.x as f32,
@@ -273,28 +264,29 @@ fn add_primitive(
             (index, 0) // Type 0 = Sphere
         }
         Hittables::Triangle(t) => {
-            let index = data.triangles.len() as u32;
-            let mat_idx = add_material(&t.mat, data, unique_textures, atlas_layout);
-            let v1 = t.v0 + t.v0v1;
-            let v2 = t.v0 + t.v0v2;
-            data.triangles.push(GpuTriangle {
+            let index = data.triangle_pos.len() as u32;
+            let mat_idx = add_material(&t.mat, data, unique_textures, atlas_layout, caches);
+            // Edges go to the GPU as-is; the shader used to re-derive them from
+            // absolute vertices that this function had reconstructed from edges.
+            data.triangle_pos.push(TrianglePos {
                 v0: to_array(t.v0),
-                area: t.area as f32,
-                v1: to_array(v1),
+                _pad0: 0.0,
+                e1: to_array(t.v0v1),
                 _pad1: 0.0,
-                v2: to_array(v2),
+                e2: to_array(t.v0v2),
                 _pad2: 0.0,
+            });
+            data.triangle_attr.push(TriangleAttr {
                 normal: to_array(t.normal),
                 material_index: mat_idx,
+                tangent: to_array(t.tangent),
+                area: t.area as f32,
+                bi_tangent: to_array(t.bi_tangent),
+                _pad0: 0.0,
                 uv0: [t.uv0.u, t.uv0.v],
                 uv1: [t.uv1.u, t.uv1.v],
                 uv2: [t.uv2.u, t.uv2.v],
-                _pad_align_tangent: [0.0; 2],
-                tangent: to_array(t.tangent),
-                _pad3: 0.0,
-                bi_tangent: to_array(t.bi_tangent),
-                _pad4: 0.0,
-                _pad5: [0.0; 4],
+                _pad1: [0.0; 2],
             });
             if t.mat.is_light() {
                 data.lights.push(LightRef {
@@ -305,26 +297,25 @@ fn add_primitive(
             (index, 1) // Type 1 = Triangle
         }
         Hittables::Quad(q) => {
-            let index = data.quads.len() as u32;
-            let mat_idx = add_material(&q.mat, data, unique_textures, atlas_layout);
-            data.quads.push(GpuQuad {
+            let index = data.quad_pos.len() as u32;
+            let mat_idx = add_material(&q.mat, data, unique_textures, atlas_layout, caches);
+            data.quad_pos.push(QuadPos {
                 q: to_array(q.q),
-                area: q.area as f32,
-                u: to_array(q.u),
-                _pad1: 0.0,
-                v: to_array(q.v),
-                _pad2: 0.0,
-                normal: to_array(q.normal),
-                _pad3: 0.0,
-                w: to_array(q.w),
                 d: q.d as f32,
-                material_index: mat_idx,
-                _pad_align_tangent: [0.0; 3],
+                u: to_array(q.u),
+                _pad0: 0.0,
+                v: to_array(q.v),
+                _pad1: 0.0,
+                normal: to_array(q.normal),
+                _pad2: 0.0,
+                w: to_array(q.w),
+                _pad3: 0.0,
+            });
+            data.quad_attr.push(QuadAttr {
                 tangent: to_array(q.u.unit()),
-                _pad_align_bitangent: 0.0,
+                area: q.area as f32,
                 bi_tangent: to_array(q.v.unit()),
-                _pad_end: 0.0,
-                _pad4: [0; 4],
+                material_index: mat_idx,
             });
             if q.mat.is_light() {
                 data.lights.push(LightRef {
@@ -343,6 +334,7 @@ fn add_material(
     data: &mut SceneData,
     unique_textures: &[Arc<RgbImage>],
     atlas_layout: Option<&AtlasLayout>,
+    caches: &mut FlattenCaches,
 ) -> u32 {
     let (
         albedo_tex,
@@ -400,8 +392,8 @@ fn add_material(
             0.0,
         ),
         Materials::Blend(b) => {
-            let idx1 = add_material(&b.material_1, data, unique_textures, atlas_layout);
-            let idx2 = add_material(&b.material_2, data, unique_textures, atlas_layout);
+            let idx1 = add_material(&b.material_1, data, unique_textures, atlas_layout, caches);
+            let idx2 = add_material(&b.material_2, data, unique_textures, atlas_layout, caches);
             (
                 None,
                 None,
@@ -421,15 +413,14 @@ fn add_material(
 
     let (texture_index, albedo_offset, albedo_scale) = albedo_tex
         .or(emission_tex)
-        .map(|t| get_texture_info(t, unique_textures, atlas_layout))
+        .map(|t| get_texture_info(t, unique_textures, atlas_layout, caches))
         .unwrap_or((-1, [0.0; 2], [1.0; 2]));
 
     let (normal_texture_index, normal_offset, normal_scale) = normal_tex
-        .map(|t| get_texture_info(t, unique_textures, atlas_layout))
+        .map(|t| get_texture_info(t, unique_textures, atlas_layout, caches))
         .unwrap_or((-1, [0.0; 2], [1.0; 2]));
 
-    let index = data.materials.len() as u32;
-    data.materials.push(GpuMaterial {
+    let gpu_material = GpuMaterial {
         albedo: to_array(albedo),
         attenuation_factor,
         emission: to_array(emission),
@@ -445,7 +436,19 @@ fn add_material(
         albedo_scale,
         normal_offset,
         normal_scale,
-    });
+    };
+
+    // Intern on the exact byte image. `GpuMaterial` is `Pod` (no uninit padding),
+    // so bytewise equality is exactly "identical to the GPU". Blend children are
+    // resolved above, so their indices are already interned and stable by now.
+    let key = bytemuck::bytes_of(&gpu_material);
+    if let Some(&existing) = caches.material_ids.get(key) {
+        return existing;
+    }
+
+    let index = data.materials.len() as u32;
+    caches.material_ids.insert(key.to_vec(), index);
+    data.materials.push(gpu_material);
 
     index
 }
@@ -454,11 +457,24 @@ fn get_texture_info(
     tex: &Textures,
     unique_textures: &[Arc<RgbImage>],
     atlas_layout: Option<&AtlasLayout>,
+    caches: &mut FlattenCaches,
 ) -> (i32, [f32; 2], [f32; 2]) {
     if let Textures::ImageMap(im) = tex {
         let img = im.get_image();
-        for (i, existing) in unique_textures.iter().enumerate() {
-            if Arc::ptr_eq(existing, &img) {
+        let found = match caches.texture_ids.get(&(Arc::as_ptr(&img) as usize)) {
+            Some(&i) => Some(i),
+            None => {
+                let i = unique_textures
+                    .iter()
+                    .position(|existing| Arc::ptr_eq(existing, &img));
+                if let Some(i) = i {
+                    caches.texture_ids.insert(Arc::as_ptr(&img) as usize, i);
+                }
+                i
+            }
+        };
+        if let Some(i) = found {
+            {
                 if let Some(layout) = atlas_layout {
                     let rect = &layout.placements[i];
                     return (
@@ -494,6 +510,7 @@ mod tests {
     use crate::hittable::{Bvh, Hittables, Sphere};
     use crate::material::texture::SolidColor;
     use crate::material::{Lambertian, Materials};
+    use crate::hittable::LEAF_FLAG;
     use crate::renderer::scene_flattener::flatten_scene;
     use crate::renderer::{RenderConfig, Scene};
 
@@ -513,24 +530,22 @@ mod tests {
 
         assert_eq!(data.spheres.len(), 1);
         assert_eq!(data.materials.len(), 1);
-        assert_eq!(data.nodes.len(), 2);
+        // A single primitive fits in one leaf, so there is exactly one node.
+        assert_eq!(data.nodes.len(), 1);
+        assert_eq!(data.prim_refs.len(), 1);
 
         // Check sphere data
         let s = &data.spheres[0];
         assert_eq!(s.center_and_radius, [0.0, 0.0, -2.0, 1.0]);
         assert_eq!(s.material_index, 0);
 
-        // Check root node (inner)
-        let n0 = &data.nodes[0];
-        assert_eq!(n0.min_and_left[3], 1);
-        assert_eq!(n0.max_and_right[3], 0x0FFFFFFF);
+        // The one prim_ref points at sphere 0, type 0.
+        assert_eq!(data.prim_refs[0], 0);
 
-        // Check leaf node
-        let n1 = &data.nodes[1];
-        // left_child_index should point to sphere index (0)
-        assert_eq!(n1.min_and_left[3], 0);
-        // right_child_index should have flag set and type 0 (Sphere)
-        assert_eq!(n1.max_and_right[3], 0x80000000 | 0);
+        // Root: left child is a one-primitive leaf at offset 0, right is empty.
+        let n0 = &data.nodes[0];
+        assert_eq!(n0.left_meta, LEAF_FLAG | (1 << 24));
+        assert_eq!(n0.right_meta, LEAF_FLAG);
     }
 
     #[test]
@@ -552,15 +567,11 @@ mod tests {
 
         let data = flatten_scene(&scene);
 
-        // We expect:
-        // 1. Root Bvh Node
-        // 2. Nested Bvh Node
-        // 3. Leaf Bvh Node (containing the sphere)
-        // Total: 3 nodes
-        // Spheres: 1
-
+        // Nested BVHs are expanded into one global tree, so the nesting leaves
+        // no trace: this is the same single-sphere scene as above.
         assert_eq!(data.spheres.len(), 1, "Should have 1 sphere");
-        assert_eq!(data.nodes.len(), 3, "Should have 3 nodes");
+        assert_eq!(data.nodes.len(), 1, "Nested BVH should be flattened away");
+        assert_eq!(data.prim_refs.len(), 1);
     }
 
     #[test]

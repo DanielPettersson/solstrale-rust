@@ -139,4 +139,8 @@ impl Hittable for Quad {
             vec![]
         }
     }
+
+    fn has_lights(&self) -> bool {
+        self.mat.is_light()
+    }
 }

@@ -8,48 +8,69 @@ struct Sphere {
     material_index: u32,
 }
 
-struct Triangle {
+// Geometry read by the traversal inner loop. Edges rather than absolute
+// vertices, because that is what Moeller-Trumbore wants and what the CPU has.
+struct TrianglePos {
     v0: vec3<f32>,
-    area: f32,
-    v1: vec3<f32>,
+    _pad0: f32,
+    e1: vec3<f32>,
     _pad1: f32,
-    v2: vec3<f32>,
+    e2: vec3<f32>,
     _pad2: f32,
+}
+
+// Shading attributes, read once per ray after traversal has settled on a hit.
+struct TriangleAttr {
     normal: vec3<f32>,
     material_index: u32,
+    tangent: vec3<f32>,
+    area: f32,
+    bi_tangent: vec3<f32>,
+    _pad0: f32,
     uv0: vec2<f32>,
     uv1: vec2<f32>,
     uv2: vec2<f32>,
-    tangent: vec3<f32>,
-    _pad3: f32,
-    bi_tangent: vec3<f32>,
-    _pad4: f32,
-    _pad5: vec4<f32>,
+    _pad1: vec2<f32>,
 }
 
-struct Quad {
+struct QuadPos {
     Q: vec3<f32>,
-    area: f32,
-    u: vec3<f32>,
-    _pad1: f32,
-    v: vec3<f32>,
-    _pad2: f32,
-    normal: vec3<f32>,
-    _pad3: f32,
-    w: vec3<f32>,
     d: f32,
-    material_index: u32,
+    u: vec3<f32>,
+    _pad0: f32,
+    v: vec3<f32>,
+    _pad1: f32,
+    normal: vec3<f32>,
+    _pad2: f32,
+    w: vec3<f32>,
+    _pad3: f32,
+}
+
+struct QuadAttr {
     tangent: vec3<f32>,
-    _pad_align_bitangent: f32,
+    area: f32,
     bi_tangent: vec3<f32>,
-    _pad_end: f32,
-    _pad4: vec4<u32>,
+    material_index: u32,
 }
 
 struct BvhNode {
-    min_and_left: vec4<u32>,
-    max_and_right: vec4<u32>,
+    left_min: vec3<f32>,
+    left_meta: u32,
+    left_max: vec3<f32>,
+    right_meta: u32,
+    right_min: vec3<f32>,
+    _pad0: u32,
+    right_max: vec3<f32>,
+    _pad1: u32,
 }
+
+const LEAF_FLAG = 0x80000000u;
+const LEAF_COUNT_SHIFT = 24u;
+const LEAF_COUNT_MASK = 0x7Fu;
+const LEAF_OFFSET_MASK = 0x00FFFFFFu;
+
+const PRIM_TYPE_SHIFT = 30u;
+const PRIM_INDEX_MASK = 0x3FFFFFFFu;
 
 struct Material {
     albedo: vec3<f32>,
@@ -77,6 +98,16 @@ const MAT_BLEND = 4u;
 
 const CLAMPING_THRESHOLD = 3.5;
 
+const PI = 3.14159265359;
+const TWO_PI = 6.28318530718;
+
+// Path depth at which Russian roulette starts. Below it every path survives,
+// so the cheap early bounces that carry most of the energy are never cut.
+const RR_MIN_DEPTH = 3u;
+// Floor on the survival probability, so a dark path still terminates promptly
+// without the weight correction exploding.
+const RR_MIN_SURVIVAL = 0.05;
+
 struct Camera {
     origin: vec3<f32>,
     lens_radius: f32,
@@ -90,15 +121,32 @@ struct Camera {
 struct RenderConfig {
     width: u32,
     height: u32,
+    // Samples already accumulated before this dispatch.
     sample_count: u32,
     max_depth: u32,
     background_color: vec3<f32>,
     light_count: u32,
+    samples_per_batch: u32,
+    // Scalar pads, not a vec3: a vec3 here would align to 16 and push the
+    // struct to 64 bytes, which no longer matches the Rust mirror.
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct LightRef {
     prim_type: u32,
     prim_index: u32,
+}
+
+// What traversal actually tracks: enough to identify the winning primitive and
+// reconstruct its shading data afterwards, and nothing more. Keeping this
+// small is what removes the ~25-float HitRecord copy from the inner loop.
+struct HitRef {
+    t: f32,
+    prim_type: u32,
+    prim_idx: u32,
+    bary: vec2<f32>,
 }
 
 struct HitRecord {
@@ -122,10 +170,10 @@ var<storage, read> nodes: array<BvhNode>;
 var<storage, read> spheres: array<Sphere>;
 
 @group(0) @binding(3)
-var<storage, read> triangles: array<Triangle>;
+var<storage, read> triangle_pos: array<TrianglePos>;
 
 @group(0) @binding(4)
-var<storage, read> quads: array<Quad>;
+var<storage, read> quad_pos: array<QuadPos>;
 
 @group(0) @binding(5)
 var<storage, read> materials: array<Material>;
@@ -145,6 +193,15 @@ var texture_sampler: sampler;
 @group(0) @binding(10)
 var<storage, read> lights: array<LightRef>;
 
+@group(0) @binding(11)
+var<storage, read> prim_refs: array<u32>;
+
+@group(0) @binding(12)
+var<storage, read> triangle_attr: array<TriangleAttr>;
+
+@group(0) @binding(13)
+var<storage, read> quad_attr: array<QuadAttr>;
+
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -160,24 +217,30 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.origin + t * r.direction;
 }
 
+// Closed-form samplers.
+//
+// These were rejection loops of up to 100 iterations. On a GPU every lane in a
+// wavefront waits for its unluckiest neighbour, so a loop with a ~48% per-
+// iteration rejection rate costs far more than the arithmetic below.
+
+fn random_unit_vector(state: ptr<function, u32>) -> vec3<f32> {
+    let z = 1.0 - 2.0 * rand_float(state);
+    let r = sqrt(max(0.0, 1.0 - z * z));
+    let phi = TWO_PI * rand_float(state);
+    return vec3<f32>(r * cos(phi), r * sin(phi), z);
+}
+
 fn random_in_unit_sphere(state: ptr<function, u32>) -> vec3<f32> {
-    for (var i = 0u; i < 100u; i++) {
-        let p = vec3<f32>(rand_float(state) * 2.0 - 1.0, rand_float(state) * 2.0 - 1.0, rand_float(state) * 2.0 - 1.0);
-        if (dot(p, p) < 1.0) { return p; }
-    }
-    return vec3<f32>(0.0);
+    // cbrt of a uniform variate makes the radius uniform by volume.
+    let dir = random_unit_vector(state);
+    return dir * pow(rand_float(state), 1.0 / 3.0);
 }
 
 fn random_in_unit_disk(state: ptr<function, u32>) -> vec3<f32> {
-    for (var i = 0u; i < 100u; i++) {
-        let p = vec3<f32>(rand_float(state) * 2.0 - 1.0, rand_float(state) * 2.0 - 1.0, 0.0);
-        if (dot(p, p) < 1.0) { return p; }
-    }
-    return vec3<f32>(0.0);
-}
-
-fn random_unit_vector(state: ptr<function, u32>) -> vec3<f32> {
-    return normalize(random_in_unit_sphere(state));
+    // sqrt of a uniform variate makes the radius uniform by area.
+    let r = sqrt(rand_float(state));
+    let phi = TWO_PI * rand_float(state);
+    return vec3<f32>(r * cos(phi), r * sin(phi), 0.0);
 }
 
 struct ONB {
@@ -229,18 +292,18 @@ fn random_to_sphere(radius: f32, distance_squared: f32, state: ptr<function, u32
     return vec3<f32>(x, y, z);
 }
 
-fn triangle_random_direction(t: Triangle, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+fn triangle_random_direction(t: TrianglePos, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
     var a = rand_float(state);
     var b = rand_float(state);
     if (a + b > 1.0) {
         a = 1.0 - a;
         b = 1.0 - b;
     }
-    let p = t.v0 + a * (t.v1 - t.v0) + b * (t.v2 - t.v0);
+    let p = t.v0 + a * t.e1 + b * t.e2;
     return p - origin;
 }
 
-fn quad_random_direction(q: Quad, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+fn quad_random_direction(q: QuadPos, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
     let p = q.Q + q.u * rand_float(state) + q.v * rand_float(state);
     return p - origin;
 }
@@ -253,17 +316,26 @@ fn sphere_random_direction(s: Sphere, origin: vec3<f32>, state: ptr<function, u3
     return onb_local(uvw, random_to_sphere(radius, dot(direction, direction), state));
 }
 
+// Evaluates the mixture PDF's light term.
+//
+// Uses the distance-only intersection variants: this runs for every light on
+// every diffuse bounce, and the full UV/tangent work the shared hit routines
+// used to do was discarded here every single time.
 fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
     if (config.light_count == 0u) { return 0.0; }
 
+    let r = Ray(origin, direction);
+    let dir_len = length(direction);
+    let dir_len_sq = dot(direction, direction);
     var sum = 0.0;
+
     for (var i = 0u; i < config.light_count; i++) {
         let light = lights[i];
-        let r = Ray(origin, direction);
-        var rec: HitRecord;
+        var t_hit = 0.0;
+        var bary = vec2<f32>(0.0);
 
         if (light.prim_type == 0u) { // Sphere
-            if (hit_sphere(r, spheres[light.prim_index], 0.001, 1e20, &rec)) {
+            if (hit_sphere_t(r, spheres[light.prim_index], 0.001, 1e20, &t_hit)) {
                 let s = spheres[light.prim_index];
                 let center = s.center_and_radius.xyz;
                 let radius = s.center_and_radius.w;
@@ -273,18 +345,19 @@ fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
                 sum += 1.0 / solid_angle;
             }
         } else if (light.prim_type == 1u) { // Triangle
-            if (hit_triangle(r, triangles[light.prim_index], 0.001, 1e20, &rec)) {
-                let tri = triangles[light.prim_index];
-                let dist_sq = rec.t * rec.t * dot(direction, direction);
-                let cosine = abs(dot(direction, rec.normal) / length(direction));
-                sum += dist_sq / (cosine * tri.area);
+            if (hit_triangle_t(r, triangle_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
+                let attr = triangle_attr[light.prim_index];
+                let dist_sq = t_hit * t_hit * dir_len_sq;
+                let cosine = abs(dot(direction, attr.normal) / dir_len);
+                sum += dist_sq / (cosine * attr.area);
             }
         } else if (light.prim_type == 2u) { // Quad
-            if (hit_quad(r, quads[light.prim_index], 0.001, 1e20, &rec)) {
-                let q = quads[light.prim_index];
-                let dist_sq = rec.t * rec.t * dot(direction, direction);
-                let cosine = abs(dot(direction, rec.normal) / length(direction));
-                sum += dist_sq / (cosine * q.area);
+            if (hit_quad_t(r, quad_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
+                let attr = quad_attr[light.prim_index];
+                let normal = quad_pos[light.prim_index].normal;
+                let dist_sq = t_hit * t_hit * dir_len_sq;
+                let cosine = abs(dot(direction, normal) / dir_len);
+                sum += dist_sq / (cosine * attr.area);
             }
         }
     }
@@ -299,9 +372,9 @@ fn light_random_direction(origin: vec3<f32>, state: ptr<function, u32>) -> vec3<
     if (light.prim_type == 0u) {
         return sphere_random_direction(spheres[light.prim_index], origin, state);
     } else if (light.prim_type == 1u) {
-        return triangle_random_direction(triangles[light.prim_index], origin, state);
+        return triangle_random_direction(triangle_pos[light.prim_index], origin, state);
     } else if (light.prim_type == 2u) {
-        return quad_random_direction(quads[light.prim_index], origin, state);
+        return quad_random_direction(quad_pos[light.prim_index], origin, state);
     }
     return vec3<f32>(1.0, 0.0, 0.0);
 }
@@ -436,10 +509,19 @@ fn scatter(r_in: Ray, rec: HitRecord, state: ptr<function, u32>, s_rec: ptr<func
     return false;
 }
 
-fn hit_sphere(r: Ray, s: Sphere, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> bool {
+// ---------------------------------------------------------------------------
+// Intersection
+//
+// Traversal only needs the distance and (for triangles/quads) the surface
+// parameters. UVs, tangent frames and the sphere's acos/atan2 mapping used to
+// be computed for every candidate hit and then thrown away by the next closer
+// one; they are now derived once, in resolve_hit, from the winning primitive.
+// ---------------------------------------------------------------------------
+
+fn hit_sphere_t(r: Ray, s: Sphere, t_min: f32, t_max: f32, t_out: ptr<function, f32>) -> bool {
     let center = s.center_and_radius.xyz;
     let radius = s.center_and_radius.w;
-    
+
     let oc = r.origin - center;
     let a = dot(r.direction, r.direction);
     let half_b = dot(oc, r.direction);
@@ -457,34 +539,20 @@ fn hit_sphere(r: Ray, s: Sphere, t_min: f32, t_max: f32, rec: ptr<function, HitR
         }
     }
 
-    (*rec).t = root;
-    (*rec).p = ray_at(r, root);
-    let outward_normal = ((*rec).p - center) / radius;
-    (*rec).front_face = dot(r.direction, outward_normal) < 0.0;
-    if ((*rec).front_face) {
-        (*rec).normal = outward_normal;
-    } else {
-        (*rec).normal = -outward_normal;
-    }
-    (*rec).material_index = s.material_index;
-
-    let theta = acos(-outward_normal.y);
-    let phi = atan2(-outward_normal.z, outward_normal.x) + 3.14159265359;
-    let u = phi / (2.0 * 3.14159265359);
-    let v = theta / 3.14159265359;
-    (*rec).uv = vec2<f32>(u, v);
-
-    (*rec).tangent = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), outward_normal));
-    (*rec).bi_tangent = cross(outward_normal, (*rec).tangent);
-
+    *t_out = root;
     return true;
 }
 
-fn hit_triangle(r: Ray, t: Triangle, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> bool {
-    let v0v1 = t.v1 - t.v0;
-    let v0v2 = t.v2 - t.v0;
-    let p_vec = cross(r.direction, v0v2);
-    let det = dot(v0v1, p_vec);
+fn hit_triangle_t(
+    r: Ray,
+    t: TrianglePos,
+    t_min: f32,
+    t_max: f32,
+    t_out: ptr<function, f32>,
+    bary_out: ptr<function, vec2<f32>>,
+) -> bool {
+    let p_vec = cross(r.direction, t.e2);
+    let det = dot(t.e1, p_vec);
 
     if (abs(det) < 1e-8) { return false; }
 
@@ -493,33 +561,26 @@ fn hit_triangle(r: Ray, t: Triangle, t_min: f32, t_max: f32, rec: ptr<function, 
     let u = dot(t_vec, p_vec) * inv_det;
     if (u < 0.0 || u > 1.0) { return false; }
 
-    let q_vec = cross(t_vec, v0v1);
+    let q_vec = cross(t_vec, t.e1);
     let v = dot(r.direction, q_vec) * inv_det;
     if (v < 0.0 || u + v > 1.0) { return false; }
 
-    let tt = dot(v0v2, q_vec) * inv_det;
+    let tt = dot(t.e2, q_vec) * inv_det;
     if (tt < t_min || tt > t_max) { return false; }
 
-    (*rec).t = tt;
-    (*rec).p = ray_at(r, tt);
-    (*rec).front_face = dot(r.direction, t.normal) < 0.0;
-    if ((*rec).front_face) {
-        (*rec).normal = t.normal;
-    } else {
-        (*rec).normal = -t.normal;
-    }
-    (*rec).material_index = t.material_index;
-
-    let w = 1.0 - u - v;
-    (*rec).uv = w * t.uv0 + u * t.uv1 + v * t.uv2;
-
-    (*rec).tangent = t.tangent;
-    (*rec).bi_tangent = t.bi_tangent;
-
+    *t_out = tt;
+    *bary_out = vec2<f32>(u, v);
     return true;
 }
 
-fn hit_quad(r: Ray, q: Quad, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> bool {
+fn hit_quad_t(
+    r: Ray,
+    q: QuadPos,
+    t_min: f32,
+    t_max: f32,
+    t_out: ptr<function, f32>,
+    ab_out: ptr<function, vec2<f32>>,
+) -> bool {
     let denom = dot(q.normal, r.direction);
     if (abs(denom) < 1e-8) { return false; }
 
@@ -533,125 +594,216 @@ fn hit_quad(r: Ray, q: Quad, t_min: f32, t_max: f32, rec: ptr<function, HitRecor
 
     if (alpha < 0.0 || alpha > 1.0 || beta < 0.0 || beta > 1.0) { return false; }
 
-    (*rec).t = t;
-    (*rec).p = p;
-    (*rec).front_face = dot(r.direction, q.normal) < 0.0;
-    if ((*rec).front_face) {
-        (*rec).normal = q.normal;
-    } else {
-        (*rec).normal = -q.normal;
-    }
-    (*rec).material_index = q.material_index;
-    (*rec).uv = vec2<f32>(alpha, beta);
-
-    (*rec).tangent = q.tangent;
-    (*rec).bi_tangent = q.bi_tangent;
-
+    *t_out = t;
+    *ab_out = vec2<f32>(alpha, beta);
     return true;
 }
 
-fn hit_aabb(r: Ray, min_val: vec3<f32>, max_val: vec3<f32>, t_min_in: f32, t_max_in: f32) -> bool {
-    var t_min = t_min_in;
-    var t_max = t_max_in;
-    
-    let inv_dir = 1.0 / (r.direction + vec3<f32>(1e-9));
-    let t0 = (min_val - r.origin) * inv_dir;
-    let t1 = (max_val - r.origin) * inv_dir;
-    
-    let t_near = min(t0, t1);
-    let t_far = max(t0, t1);
-    
-    t_min = max(t_min, max(t_near.x, max(t_near.y, t_near.z)));
-    t_max = min(t_max, min(t_far.x, min(t_far.y, t_far.z)));
-    
-    return t_min < t_max;
+// Reciprocal of the ray direction, computed once per ray.
+//
+// Exact zeros are replaced by a tiny magnitude so the slab test cannot produce
+// 0 * inf -> NaN on an axis-parallel ray. The sign of the substitute does not
+// matter: t_near/t_far are a min/max pair, and both signs yield the correct
+// "inside the slab / never enters" answer for a direction that does not move.
+fn ray_inv_dir(direction: vec3<f32>) -> vec3<f32> {
+    let tiny = vec3<f32>(1e-20);
+    return 1.0 / select(direction, tiny, abs(direction) < tiny);
 }
 
-fn world_hit(r: Ray, t_min: f32, t_max: f32, rec: ptr<function, HitRecord>) -> bool {
+// Slab test that also reports the entry distance, which is what orders the
+// two children of a node.
+fn hit_aabb(
+    origin: vec3<f32>,
+    inv_dir: vec3<f32>,
+    min_val: vec3<f32>,
+    max_val: vec3<f32>,
+    t_min_in: f32,
+    t_max_in: f32,
+    t_entry: ptr<function, f32>,
+) -> bool {
+    let t0 = (min_val - origin) * inv_dir;
+    let t1 = (max_val - origin) * inv_dir;
+
+    let t_near = min(t0, t1);
+    let t_far = max(t0, t1);
+
+    let enter = max(t_min_in, max(t_near.x, max(t_near.y, t_near.z)));
+    let exit = min(t_max_in, min(t_far.x, min(t_far.y, t_far.z)));
+
+    *t_entry = enter;
+    return enter <= exit;
+}
+
+// Intersects the primitives of one inline leaf, tightening closest_so_far.
+fn hit_leaf(
+    r: Ray,
+    leaf: u32,
+    t_min: f32,
+    closest_so_far: ptr<function, f32>,
+    hit_ref: ptr<function, HitRef>,
+) -> bool {
+    let count = (leaf >> LEAF_COUNT_SHIFT) & LEAF_COUNT_MASK;
+    let offset = leaf & LEAF_OFFSET_MASK;
+
+    var hit_any = false;
+    for (var i = 0u; i < count; i++) {
+        let prim_ref = prim_refs[offset + i];
+        let prim_type = prim_ref >> PRIM_TYPE_SHIFT;
+        let prim_idx = prim_ref & PRIM_INDEX_MASK;
+
+        var t_hit = 0.0;
+        var bary = vec2<f32>(0.0);
+        var hit = false;
+        if (prim_type == 0u) {
+            hit = hit_sphere_t(r, spheres[prim_idx], t_min, *closest_so_far, &t_hit);
+        } else if (prim_type == 1u) {
+            hit = hit_triangle_t(r, triangle_pos[prim_idx], t_min, *closest_so_far, &t_hit, &bary);
+        } else if (prim_type == 2u) {
+            hit = hit_quad_t(r, quad_pos[prim_idx], t_min, *closest_so_far, &t_hit, &bary);
+        }
+
+        if (hit) {
+            hit_any = true;
+            *closest_so_far = t_hit;
+            (*hit_ref).t = t_hit;
+            (*hit_ref).prim_type = prim_type;
+            (*hit_ref).prim_idx = prim_idx;
+            (*hit_ref).bary = bary;
+        }
+    }
+    return hit_any;
+}
+
+// Sentinel for "this child slot has nothing to descend into".
+const NO_NODE = 0xFFFFFFFFu;
+
+fn world_hit(r: Ray, t_min: f32, t_max: f32, hit_ref: ptr<function, HitRef>) -> bool {
+    if (arrayLength(&nodes) == 0u) { return false; }
+
+    let inv_dir = ray_inv_dir(r.direction);
+
     var hit_anything = false;
     var closest_so_far = t_max;
-    
-    let num_nodes = arrayLength(&nodes);
-    if (num_nodes == 0u) { return false; }
 
-    var stack: array<u32, 64>;
+    // Only farther children are ever pushed, so the tree depth bounds this and
+    // 32 entries covers any balanced tree far beyond the addressable
+    // primitive count.
+    var stack: array<u32, 32>;
     var stack_ptr = 0u;
-    stack[stack_ptr] = 0u;
-    stack_ptr++;
+    var node_idx = 0u;
 
-    var safety_counter = 0u;
-    while (stack_ptr > 0u && safety_counter < 1000u) {
-        safety_counter++;
-        stack_ptr--;
-        let node_idx = stack[stack_ptr];
-        
-        if (node_idx == 0x0FFFFFFFu) { continue; }
-        
+    loop {
         let node = nodes[node_idx];
 
-        let node_min = vec3<f32>(
-            bitcast<f32>(node.min_and_left.x),
-            bitcast<f32>(node.min_and_left.y),
-            bitcast<f32>(node.min_and_left.z)
-        );
-        let node_max = vec3<f32>(
-            bitcast<f32>(node.max_and_right.x),
-            bitcast<f32>(node.max_and_right.y),
-            bitcast<f32>(node.max_and_right.z)
-        );
+        var t_left = 0.0;
+        var t_right = 0.0;
+        let left_hit = hit_aabb(r.origin, inv_dir, node.left_min, node.left_max, t_min, closest_so_far, &t_left);
+        let right_hit = hit_aabb(r.origin, inv_dir, node.right_min, node.right_max, t_min, closest_so_far, &t_right);
 
-        if (hit_aabb(r, node_min, node_max, t_min, closest_so_far)) {
-            let left_idx = node.min_and_left.w;
-            let right_idx = node.max_and_right.w;
-            
-            let is_leaf = (right_idx & 0x80000000u) != 0u;
-            if (is_leaf) {
-                let prim_type = right_idx & 0x7FFFFFFFu;
-                let prim_idx = left_idx;
-                var temp_rec: HitRecord;
-                var hit = false;
+        var left_next = NO_NODE;
+        var right_next = NO_NODE;
 
-                if (prim_type == 0u) {
-                    hit = hit_sphere(r, spheres[prim_idx], t_min, closest_so_far, &temp_rec);
-                } else if (prim_type == 1u) {
-                    hit = hit_triangle(r, triangles[prim_idx], t_min, closest_so_far, &temp_rec);
-                } else if (prim_type == 2u) {
-                    hit = hit_quad(r, quads[prim_idx], t_min, closest_so_far, &temp_rec);
-                }
-
-                if (hit) {
-                    hit_anything = true;
-                    closest_so_far = temp_rec.t;
-                    *rec = temp_rec;
-                }
+        // Leaves are resolved in place; they never occupy a stack slot.
+        if (left_hit) {
+            if ((node.left_meta & LEAF_FLAG) != 0u) {
+                if (hit_leaf(r, node.left_meta, t_min, &closest_so_far, hit_ref)) { hit_anything = true; }
             } else {
-                if (stack_ptr < 62u) {
-                    stack[stack_ptr] = right_idx;
-                    stack_ptr++;
-                    stack[stack_ptr] = left_idx;
-                    stack_ptr++;
-                }
+                left_next = node.left_meta;
             }
+        }
+        if (right_hit) {
+            if ((node.right_meta & LEAF_FLAG) != 0u) {
+                if (hit_leaf(r, node.right_meta, t_min, &closest_so_far, hit_ref)) { hit_anything = true; }
+            } else {
+                right_next = node.right_meta;
+            }
+        }
+
+        if (left_next != NO_NODE && right_next != NO_NODE) {
+            // Descend into the nearer child, defer the farther one.
+            if (t_left <= t_right) {
+                stack[stack_ptr] = right_next;
+                stack_ptr++;
+                node_idx = left_next;
+            } else {
+                stack[stack_ptr] = left_next;
+                stack_ptr++;
+                node_idx = right_next;
+            }
+        } else if (left_next != NO_NODE) {
+            node_idx = left_next;
+        } else if (right_next != NO_NODE) {
+            node_idx = right_next;
+        } else {
+            if (stack_ptr == 0u) { break; }
+            stack_ptr--;
+            node_idx = stack[stack_ptr];
         }
     }
 
     return hit_anything;
 }
 
-@compute @workgroup_size(64)
-fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let index = global_id.x;
-    if (index >= arrayLength(&output_buffer)) {
-        return;
+// Expands the winning primitive into full shading data. Called once per ray,
+// not once per candidate intersection.
+fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
+    var rec: HitRecord;
+    rec.t = hit_ref.t;
+    rec.p = ray_at(r, hit_ref.t);
+
+    if (hit_ref.prim_type == 0u) {
+        let s = spheres[hit_ref.prim_idx];
+        let center = s.center_and_radius.xyz;
+        let radius = s.center_and_radius.w;
+        let outward_normal = (rec.p - center) / radius;
+
+        rec.front_face = dot(r.direction, outward_normal) < 0.0;
+        rec.normal = select(-outward_normal, outward_normal, rec.front_face);
+        rec.material_index = s.material_index;
+
+        let theta = acos(-outward_normal.y);
+        let phi = atan2(-outward_normal.z, outward_normal.x) + 3.14159265359;
+        rec.uv = vec2<f32>(phi / (2.0 * 3.14159265359), theta / 3.14159265359);
+
+        rec.tangent = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), outward_normal));
+        rec.bi_tangent = cross(outward_normal, rec.tangent);
+    } else if (hit_ref.prim_type == 1u) {
+        let attr = triangle_attr[hit_ref.prim_idx];
+        let u = hit_ref.bary.x;
+        let v = hit_ref.bary.y;
+        let w = 1.0 - u - v;
+
+        rec.front_face = dot(r.direction, attr.normal) < 0.0;
+        rec.normal = select(-attr.normal, attr.normal, rec.front_face);
+        rec.material_index = attr.material_index;
+        rec.uv = w * attr.uv0 + u * attr.uv1 + v * attr.uv2;
+        rec.tangent = attr.tangent;
+        rec.bi_tangent = attr.bi_tangent;
+    } else {
+        let attr = quad_attr[hit_ref.prim_idx];
+        let normal = quad_pos[hit_ref.prim_idx].normal;
+
+        rec.front_face = dot(r.direction, normal) < 0.0;
+        rec.normal = select(-normal, normal, rec.front_face);
+        rec.material_index = attr.material_index;
+        rec.uv = hit_ref.bary;
+        rec.tangent = attr.tangent;
+        rec.bi_tangent = attr.bi_tangent;
     }
 
-    var rng_state = index + config.sample_count * 712371u;
-    
-    let x = f32(index % config.width);
-    let y = f32(index / config.width);
+    return rec;
+}
 
-    let u = (x + rand_float(&rng_state)) / f32(config.width - 1u);
-    let v = 1.0 - (y + rand_float(&rng_state)) / f32(config.height - 1u);
+// 8x8 tiles rather than 64 pixels of one scanline: neighbouring rays in a
+// workgroup then stay coherent through the first bounce or two, which is where
+// BVH traversal divergence actually costs.
+// Traces one path for the given pixel and sample index.
+fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
+    let index = pixel.y * config.width + pixel.x;
+    var rng_state = pcg_hash(index ^ (sample_index * 0x9E3779B9u));
+
+    let u = (f32(pixel.x) + rand_float(&rng_state)) / f32(config.width - 1u);
+    let v = 1.0 - (f32(pixel.y) + rand_float(&rng_state)) / f32(config.height - 1u);
 
     var offset = vec3<f32>(0.0);
     if (camera.lens_radius > 0.0) {
@@ -667,19 +819,20 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var accumulated_ray_length = 0.0;
 
     for (var depth = 0u; depth < config.max_depth; depth++) {
-        var rec: HitRecord;
-        if (world_hit(r, 0.001, 10000.0, &rec)) {
+        var hit_ref: HitRef;
+        if (world_hit(r, 0.001, 10000.0, &hit_ref)) {
+            let rec = resolve_hit(r, hit_ref);
             var s_rec: ScatterRecord;
             if (scatter(r, rec, &rng_state, &s_rec)) {
                 accumulated_ray_length += rec.t;
-                
+
                 var emitted = s_rec.emitted;
                 if (s_rec.attenuation_factor > 0.0) {
                     emitted *= 1.0 / (1.0 + s_rec.attenuation_factor * accumulated_ray_length);
                 }
-                
+
                 accumulated_color += emitted * current_attenuation;
-                
+
                 if (s_rec.is_scattered) {
                     current_attenuation *= s_rec.attenuation * s_rec.pdf_value;
                     r = Ray(s_rec.scattered.origin, normalize(s_rec.scattered.direction));
@@ -694,18 +847,54 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
             break;
         }
 
-        if (max(current_attenuation.x, max(current_attenuation.y, current_attenuation.z)) < 0.0001) {
+        let max_attenuation = max(current_attenuation.x, max(current_attenuation.y, current_attenuation.z));
+        if (max_attenuation < 0.0001) {
             break;
         }
-    }
-    
-    accumulated_color = min(accumulated_color, vec3<f32>(CLAMPING_THRESHOLD));
 
-    if (config.sample_count <= 1u) {
-        output_buffer[index] = vec4<f32>(accumulated_color, 1.0);
+        // Russian roulette: terminate dim paths early and scale the survivors
+        // up to compensate, which keeps the estimator unbiased while cutting
+        // the average path length.
+        if (depth >= RR_MIN_DEPTH) {
+            let survival = clamp(max_attenuation, RR_MIN_SURVIVAL, 1.0);
+            if (rand_float(&rng_state) > survival) {
+                break;
+            }
+            current_attenuation /= survival;
+        }
+    }
+
+    // Firefly clamp, per sample.
+    return min(accumulated_color, vec3<f32>(CLAMPING_THRESHOLD));
+}
+
+// 8x8 tiles rather than 64 pixels of one scanline: neighbouring rays in a
+// workgroup then stay coherent through the first bounce or two, which is where
+// BVH traversal divergence actually costs.
+@compute @workgroup_size(8, 8)
+fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if (global_id.x >= config.width || global_id.y >= config.height) {
+        return;
+    }
+    let index = global_id.y * config.width + global_id.x;
+    let pixel = global_id.xy;
+
+    // Several samples per dispatch, summed in registers, so the 16-byte-per-pixel
+    // accumulation buffer is read and written once per batch rather than once
+    // per sample.
+    let batch = max(config.samples_per_batch, 1u);
+    var batch_sum = vec3<f32>(0.0);
+    for (var s = 0u; s < batch; s++) {
+        batch_sum += trace_sample(pixel, config.sample_count + s);
+    }
+
+    let completed = f32(config.sample_count);
+    let total = completed + f32(batch);
+
+    if (config.sample_count == 0u) {
+        output_buffer[index] = vec4<f32>(batch_sum / f32(batch), 1.0);
     } else {
-        let weight = 1.0 / f32(config.sample_count);
         let prev_color = output_buffer[index].xyz;
-        output_buffer[index] = vec4<f32>(prev_color * (1.0 - weight) + accumulated_color * weight, 1.0);
+        output_buffer[index] = vec4<f32>((prev_color * completed + batch_sum) / total, 1.0);
     }
 }

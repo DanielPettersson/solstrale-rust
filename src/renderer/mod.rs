@@ -13,7 +13,7 @@ use crate::post::PostProcessors;
 use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
 use crate::util::wgpu_util::{
-    add_compute_pass, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
+    add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
     storage_binding, texture_binding, uniform_binding,
 };
 use image::{DynamicImage, Rgb, RgbImage};
@@ -32,6 +32,14 @@ pub struct RenderConfig {
     pub height: usize,
     /// Number of times each pixel should be sampled
     pub samples_per_pixel: u32,
+    /// Maximum number of ray bounces before a path is cut off.
+    pub max_depth: u32,
+    /// Samples traced per GPU dispatch.
+    ///
+    /// Larger batches amortise dispatch overhead and collapse the per-sample
+    /// read-modify-write of the accumulation buffer, at the cost of coarser
+    /// progress reporting and slower response to camera changes.
+    pub samples_per_batch: u32,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
     /// Describes at which points in time the render progress should contain an image
@@ -44,6 +52,8 @@ impl Default for RenderConfig {
             width: 300,
             height: 200,
             samples_per_pixel: 50,
+            max_depth: 10,
+            samples_per_batch: 4,
             post_processors: vec![],
             render_image_strategy: RenderImageStrategy::OnlyFinal,
         }
@@ -112,8 +122,12 @@ impl RenderImageStrategy {
 /// Renderer is a central part of the raytracer responsible for controlling the
 /// process reporting back progress to the caller
 pub struct Renderer<'a> {
-    #[allow(dead_code)]
-    scene: Scene,
+    /// Only the sample count is retained from the scene. Holding the whole
+    /// `Scene` kept the entire CPU scene graph and every decoded texture
+    /// resident for the life of the render -- on an integrated GPU that is
+    /// the GPU's memory too.
+    samples_per_pixel: u32,
+    samples_per_batch: u32,
     width: u32,
     height: u32,
     #[allow(dead_code)]
@@ -126,9 +140,13 @@ pub struct Renderer<'a> {
     #[allow(dead_code)]
     spheres_buffer: wgpu::Buffer,
     #[allow(dead_code)]
-    triangles_buffer: wgpu::Buffer,
+    triangle_pos_buffer: wgpu::Buffer,
     #[allow(dead_code)]
-    quads_buffer: wgpu::Buffer,
+    triangle_attr_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    quad_pos_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    quad_attr_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     materials_buffer: wgpu::Buffer,
     #[allow(dead_code)]
@@ -137,6 +155,8 @@ pub struct Renderer<'a> {
     config_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     lights_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    prim_refs_buffer: wgpu::Buffer,
     post_processors: Vec<PostProcessors>,
     render_config: GpuRenderConfig,
     device: &'a wgpu::Device,
@@ -150,7 +170,7 @@ impl<'a> Renderer<'a> {
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
     ) -> Result<Self, Box<dyn Error>> {
-        if scene.world.get_lights().is_empty() {
+        if !scene.world.has_lights() {
             return Err(Box::new(SimpleError::new(
                 "Scene should have at least one light",
             )));
@@ -172,6 +192,13 @@ impl<'a> Renderer<'a> {
             &scene_data.nodes,
             BufferUsages::STORAGE,
         );
+        let prim_refs_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Prim Refs Buffer",
+            &scene_data.prim_refs,
+            BufferUsages::STORAGE,
+        );
         let spheres_buffer = create_and_upload_buffer(
             device,
             queue,
@@ -179,18 +206,32 @@ impl<'a> Renderer<'a> {
             &scene_data.spheres,
             BufferUsages::STORAGE,
         );
-        let triangles_buffer = create_and_upload_buffer(
+        let triangle_pos_buffer = create_and_upload_buffer(
             device,
             queue,
-            "Triangles Buffer",
-            &scene_data.triangles,
+            "Triangle Positions Buffer",
+            &scene_data.triangle_pos,
             BufferUsages::STORAGE,
         );
-        let quads_buffer = create_and_upload_buffer(
+        let triangle_attr_buffer = create_and_upload_buffer(
             device,
             queue,
-            "Quads Buffer",
-            &scene_data.quads,
+            "Triangle Attributes Buffer",
+            &scene_data.triangle_attr,
+            BufferUsages::STORAGE,
+        );
+        let quad_pos_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Quad Positions Buffer",
+            &scene_data.quad_pos,
+            BufferUsages::STORAGE,
+        );
+        let quad_attr_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Quad Attributes Buffer",
+            &scene_data.quad_attr,
             BufferUsages::STORAGE,
         );
         let materials_buffer = create_and_upload_buffer(
@@ -208,29 +249,19 @@ impl<'a> Renderer<'a> {
             BufferUsages::STORAGE,
         );
 
-        // Create texture atlas
-        let (max_atlas_width, max_atlas_height) = (8192, 8192);
+        // Blit the atlas using the layout `flatten_scene` already computed.
+        // This used to re-run the identical packing here and rely on it being
+        // deterministic.
         let mut atlas_image;
 
-        if !scene_data.textures.is_empty() {
-            let packer = crate::util::texture_processing::TexturePacker::new(
-                max_atlas_width,
-                max_atlas_height,
-            );
-            let dims: Vec<(u32, u32)> = scene_data
-                .textures
-                .iter()
-                .map(|img| (img.width(), img.height()))
-                .collect();
-            let layout = packer.pack(&dims).expect("Failed to pack textures in renderer - this should have been caught in flatten_scene");
-
+        if let Some(layout) = scene_data.atlas_layout.as_ref() {
             atlas_image = RgbImage::new(layout.width, layout.height);
 
             for placement in layout.placements.iter() {
                 let texture = &scene_data.textures[placement.original_index];
                 image::imageops::replace(
                     &mut atlas_image,
-                    texture,
+                    texture.as_ref(),
                     placement.x as i64,
                     placement.y as i64,
                 );
@@ -305,13 +336,15 @@ impl<'a> Renderer<'a> {
             width,
             height,
             sample_count: 0,
-            max_depth: 10,
+            max_depth: scene.render_config.max_depth.max(1),
             background_color: [
                 scene.background_color.x as f32,
                 scene.background_color.y as f32,
                 scene.background_color.z as f32,
             ],
             light_count: scene_data.lights.len() as u32,
+            samples_per_batch: scene.render_config.samples_per_batch.max(1),
+            _pad: [0; 3],
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -335,6 +368,9 @@ impl<'a> Renderer<'a> {
                 texture_binding(wgpu::TextureViewDimension::D2), // 8: texture array
                 sampler_binding(),         // 9: sampler
                 storage_binding(true, 0),  // 10: lights
+                storage_binding(true, 0),  // 11: primitive references
+                storage_binding(true, 0),  // 12: triangle attributes
+                storage_binding(true, 0),  // 13: quad attributes
             ],
         );
 
@@ -356,14 +392,17 @@ impl<'a> Renderer<'a> {
                 wgpu::BindingResource::Buffer(output_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(nodes_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(spheres_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(triangles_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(quads_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(triangle_pos_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(quad_pos_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(materials_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(camera_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(config_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::TextureView(&texture_view),
                 wgpu::BindingResource::Sampler(&sampler),
                 wgpu::BindingResource::Buffer(lights_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(prim_refs_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(triangle_attr_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(quad_attr_buffer.as_entire_buffer_binding()),
             ],
         );
 
@@ -373,21 +412,25 @@ impl<'a> Renderer<'a> {
         }
 
         Ok(Renderer {
-            scene,
             width,
             height,
             bind_group_layout,
+            samples_per_pixel: scene.render_config.samples_per_pixel,
+            samples_per_batch: scene.render_config.samples_per_batch.max(1),
             pipeline,
             output_buffer,
             bind_group,
             nodes_buffer,
             spheres_buffer,
-            triangles_buffer,
-            quads_buffer,
+            triangle_pos_buffer,
+            triangle_attr_buffer,
+            quad_pos_buffer,
+            quad_attr_buffer,
             materials_buffer,
             camera_buffer,
             config_buffer,
             lights_buffer,
+            prim_refs_buffer,
             post_processors,
             render_config,
             device,
@@ -412,11 +455,12 @@ impl<'a> Renderer<'a> {
         idle_after_rendering: bool,
     ) -> Result<(), Box<dyn Error>> {
         let mut render_start_time = SystemTime::now();
-        let samples_per_pixel = self.scene.render_config.samples_per_pixel;
-        let pixel_count = self.width * self.height;
-        let workgroup_count = pixel_count.div_ceil(64);
+        let samples_per_pixel = self.samples_per_pixel;
+        let workgroup_count_x = self.width.div_ceil(8);
+        let workgroup_count_y = self.height.div_ceil(8);
 
-        let mut sample = 1;
+        // Number of samples already accumulated into the output buffer.
+        let mut completed = 0;
         loop {
             if abort.try_recv().is_ok() {
                 return Ok(());
@@ -429,7 +473,7 @@ impl<'a> Renderer<'a> {
 
             if let Some(config) = latest_camera_config {
                 self.update_camera(&config);
-                sample = 1;
+                completed = 0;
                 render_start_time = SystemTime::now();
 
                 // Clear the output buffer when the camera moves
@@ -440,7 +484,7 @@ impl<'a> Renderer<'a> {
                 self.queue.submit([encoder.finish()]);
             }
 
-            if sample > samples_per_pixel {
+            if completed >= samples_per_pixel {
                 if idle_after_rendering {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
@@ -449,7 +493,10 @@ impl<'a> Renderer<'a> {
                 }
             }
 
-            self.render_config.sample_count = sample;
+            // Never overshoot the requested sample count.
+            let batch = self.samples_per_batch.min(samples_per_pixel - completed);
+            self.render_config.sample_count = completed;
+            self.render_config.samples_per_batch = batch;
             self.queue.write_buffer(
                 &self.config_buffer,
                 0,
@@ -460,14 +507,15 @@ impl<'a> Renderer<'a> {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-            add_compute_pass(
+            add_compute_pass_2d(
                 &mut encoder,
                 &self.pipeline,
                 &self.bind_group,
-                workgroup_count,
+                workgroup_count_x,
+                workgroup_count_y,
             );
 
-            if sample == samples_per_pixel {
+            if completed + batch >= samples_per_pixel {
                 for p in &self.post_processors {
                     p.post_process(&mut encoder, &self.output_buffer, self.device)?;
                 }
@@ -476,21 +524,21 @@ impl<'a> Renderer<'a> {
             let command_buffer = encoder.finish();
             self.queue.submit([command_buffer]);
 
+            completed += batch;
+
             let now = SystemTime::now();
 
             output.send(RenderProgress {
-                progress: sample as f64 / samples_per_pixel as f64,
-                fps: Some(calculate_fps(render_start_time, now, sample)),
+                progress: completed as f64 / samples_per_pixel as f64,
+                fps: Some(calculate_fps(render_start_time, now, completed)),
                 estimated_time_left: calculate_estimated_time_left(
                     render_start_time,
                     now,
-                    sample,
+                    completed,
                     samples_per_pixel,
                 ),
                 output_buffer: self.output_buffer.clone(),
             })?;
-
-            sample += 1;
         }
 
         Ok(())
