@@ -135,15 +135,6 @@ are auto-fixable with `cargo clippy --fix`.
 
 ## Tooling and API
 
-### There is no way to run the renderer
-
-No binary, no `src/bin/`, no `examples/`. `cargo run` does nothing — the only
-entry points are the test suite and the benchmark. For a project whose stated
-goal is learning path tracing and WGPU, being able to fly a camera around a scene
-is worth a lot, and it surfaces behaviour that batch benchmarks do not.
-
-The plumbing is already there and unused: the camera-update receiver, the abort
-channel and `idle_after_rendering` all exist to support an interactive viewer
 that nothing drives.
 
 ### `profile.sh` is broken
