@@ -1,5 +1,6 @@
 //! GPU data structures matching WGSL layout
 
+use crate::hittable::LEAF_FLAG;
 use bytemuck::{Pod, Zeroable};
 use std::fmt::Debug;
 
@@ -31,115 +32,152 @@ pub struct Sphere {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-/// Triangle structure matching WGSL layout
-pub struct Triangle {
+/// Triangle geometry touched by the traversal inner loop.
+///
+/// Split out from the shading attributes: the ray/triangle test needs only
+/// these 48 bytes, so keeping the 80 bytes of UVs, normal and tangent frame in
+/// a separate buffer cuts the bandwidth the inner loop pulls by roughly 3x.
+/// Edges are stored rather than absolute vertices because the CPU already has
+/// them and Moeller-Trumbore wants them directly.
+pub struct TrianglePos {
     /// First vertex
     pub v0: [f32; 3],
-    /// Area of the triangle
-    pub area: f32,
-    /// Second vertex
-    pub v1: [f32; 3],
-    /// Padding
+    /// Padding to keep vec3 alignment
+    pub _pad0: f32,
+    /// v1 - v0
+    pub e1: [f32; 3],
+    /// Padding to keep vec3 alignment
     pub _pad1: f32,
-    /// Third vertex
-    pub v2: [f32; 3],
-    /// Padding
+    /// v2 - v0
+    pub e2: [f32; 3],
+    /// Padding to keep vec3 alignment
     pub _pad2: f32,
-    /// Normal vector (precomputed)
-    pub normal: [f32; 3],
-    /// Index of the material
-    pub material_index: u32,
-    /// UV coordinate for v0
-    pub uv0: [f32; 2],
-    /// UV coordinate for v1
-    pub uv1: [f32; 2],
-    /// UV coordinate for v2
-    pub uv2: [f32; 2],
-    /// Padding to align tangent to 16 bytes (88->96)
-    pub _pad_align_tangent: [f32; 2],
-    /// Tangent vector
-    pub tangent: [f32; 3],
-    /// Padding
-    pub _pad3: f32,
-    /// Bi-tangent vector
-    pub bi_tangent: [f32; 3],
-    /// Padding
-    pub _pad4: f32,
-    /// Padding to 144 bytes
-    pub _pad5: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-/// Quad structure matching WGSL layout
-pub struct Quad {
+/// Triangle shading attributes, fetched once per ray after traversal settles.
+pub struct TriangleAttr {
+    /// Geometric normal
+    pub normal: [f32; 3],
+    /// Index of the material in the materials buffer
+    pub material_index: u32,
+    /// Tangent for normal mapping
+    pub tangent: [f32; 3],
+    /// Surface area, used for light sampling
+    pub area: f32,
+    /// Bi-tangent for normal mapping
+    pub bi_tangent: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad0: f32,
+    /// Texture coordinate at v0
+    pub uv0: [f32; 2],
+    /// Texture coordinate at v1
+    pub uv1: [f32; 2],
+    /// Texture coordinate at v2
+    pub uv2: [f32; 2],
+    /// Padding to 80 bytes
+    pub _pad1: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+/// Quad geometry touched by the traversal inner loop.
+pub struct QuadPos {
     /// Starting corner
     pub q: [f32; 3],
-    /// Area of the quad
-    pub area: f32,
-    /// U vector
-    pub u: [f32; 3],
-    /// Padding
-    pub _pad1: f32,
-    /// V vector
-    pub v: [f32; 3],
-    /// Padding
-    pub _pad2: f32,
-    /// Normal vector
-    pub normal: [f32; 3],
-    /// Padding
-    pub _pad3: f32,
-    /// w vector = n / dot(n, n)
-    pub w: [f32; 3],
-    /// d = dot(normal, Q)
+    /// Plane offset along the normal
     pub d: f32,
-    /// Index of the material
-    pub material_index: u32,
-    /// Padding to align tangent to 16 bytes (84->96)
-    pub _pad_align_tangent: [f32; 3],
-    /// Tangent vector
+    /// First edge vector
+    pub u: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad0: f32,
+    /// Second edge vector
+    pub v: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad1: f32,
+    /// Plane normal
+    pub normal: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad2: f32,
+    /// Precomputed planar basis constant
+    pub w: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad3: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+/// Quad shading attributes, fetched once per ray after traversal settles.
+pub struct QuadAttr {
+    /// Tangent for normal mapping
     pub tangent: [f32; 3],
-    /// Padding
-    pub _pad_align_bitangent: f32,
-    /// Bi-tangent vector
+    /// Surface area, used for light sampling
+    pub area: f32,
+    /// Bi-tangent for normal mapping
     pub bi_tangent: [f32; 3],
-    /// Padding
-    pub _pad_end: f32,
-    /// Padding to 144 bytes
-    pub _pad4: [u32; 4],
+    /// Index of the material in the materials buffer
+    pub material_index: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-/// BVH Node structure matching WGSL layout
+/// BVH node matching the WGSL layout: a two-child node carrying *both*
+/// children's bounding boxes.
+///
+/// Holding both boxes here is what lets the shader test the two children up
+/// front, descend into the nearer one without touching the stack, and push the
+/// farther one only when it can still contain a closer hit.
+///
+/// Each `*_meta` word is either a node index, or -- when [`LEAF_FLAG`] is set --
+/// an inline leaf: primitive count in bits 30..24, offset into `prim_refs` in
+/// bits 23..0. A leaf with count 0 is the empty child of a single-leaf root and
+/// intersects nothing.
 pub struct BvhNode {
-    /// Minimum point of the AABB (as u32 bits) + Left child index
-    pub min_and_left: [u32; 4],
-    /// Maximum point of the AABB (as u32 bits) + Right child index
-    pub max_and_right: [u32; 4],
+    /// Left child AABB minimum
+    pub left_min: [f32; 3],
+    /// Left child: node index, or packed inline leaf
+    pub left_meta: u32,
+    /// Left child AABB maximum
+    pub left_max: [f32; 3],
+    /// Right child: node index, or packed inline leaf
+    pub right_meta: u32,
+    /// Right child AABB minimum
+    pub right_min: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad0: u32,
+    /// Right child AABB maximum
+    pub right_max: [f32; 3],
+    /// Padding to keep vec3 alignment
+    pub _pad1: u32,
 }
 
 impl Debug for BvhNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let leaf = &self.max_and_right[3] & 0x80000000 != 0;
-        let prim_type = self.max_and_right[3] & 0x7FFFFFFF;
-
-        let type_name = match prim_type {
-            0 => "Sphere",
-            1 => "Triangle",
-            2 => "Quad",
-            _ => "",
-        };
+        fn child(meta: u32) -> String {
+            if meta & LEAF_FLAG != 0 {
+                format!(
+                    "leaf(offset: {}, count: {})",
+                    meta & 0x00FF_FFFF,
+                    (meta >> 24) & 0x7F
+                )
+            } else {
+                format!("node({})", meta)
+            }
+        }
 
         f.debug_struct("BvhNode")
-            .field("leaf", &leaf)
-            .field("idx", if leaf { &self.min_and_left[3] } else { &-1 })
-            .field("type", if leaf { &type_name } else { &"" })
-            .field("left_idx", if leaf { &-1 } else { &self.min_and_left[3] })
-            .field("right_idx", if leaf { &-1 } else { &self.max_and_right[3] })
+            .field("left", &child(self.left_meta))
+            .field("right", &child(self.right_meta))
             .finish()
     }
 }
+
+/// Reference to a primitive from a BVH leaf: type in bits 31..30, index into
+/// the per-type array in bits 29..0.
+pub const PRIM_TYPE_SHIFT: u32 = 30;
+/// Mask for the primitive index within a [`PRIM_TYPE_SHIFT`]-tagged reference.
+pub const PRIM_INDEX_MASK: u32 = (1 << PRIM_TYPE_SHIFT) - 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -225,7 +263,8 @@ pub struct GpuRenderConfig {
     pub width: u32,
     /// Height of the image
     pub height: u32,
-    /// Number of samples taken so far (used for RNG seed)
+    /// Number of samples already accumulated into the output buffer before
+    /// this dispatch. Also seeds the RNG.
     pub sample_count: u32,
     /// Maximum number of ray bounces
     pub max_depth: u32,
@@ -233,4 +272,8 @@ pub struct GpuRenderConfig {
     pub background_color: [f32; 3],
     /// Number of light sources in the scene
     pub light_count: u32,
+    /// Samples traced per dispatch, accumulated in-shader
+    pub samples_per_batch: u32,
+    /// Padding to 48 bytes
+    pub _pad: [u32; 3],
 }

@@ -1,7 +1,7 @@
 [package]
 name = "solstrale"
 description = "A Path tracing library"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/DanielPettersson/solstrale-rust"
@@ -30,6 +30,9 @@ once_cell = "1.21.3"
 [dev-dependencies]
 image-compare = "0.5.0"
 criterion = "0.8.1"
+# Same version as the normal dependency so cargo unifies them into one crate
+# instance; the benches need `device.poll` to await GPU work before stopping the timer.
+wgpu = "27.0.1"
 
 [[bench]]
 name = "solstrale_benchmark"

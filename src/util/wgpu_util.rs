@@ -47,11 +47,26 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
         return Err(SimpleError::new("Adapter does not support compute shaders").into());
     }
 
+    // The default limits cap storage buffers at 8 per stage, which the scene
+    // bindings alone now fill. Ask for what the adapter actually offers so the
+    // hot/cold primitive buffers fit; native backends expose far more.
+    let mut required_limits = adapter.limits();
+    if required_limits.max_storage_buffers_per_shader_stage < 12 {
+        return Err(SimpleError::new(format!(
+            "Adapter supports only {} storage buffers per stage, 12 are required",
+            required_limits.max_storage_buffers_per_shader_stage
+        ))
+        .into());
+    }
+    // Keep the rest conservative -- only the binding count needs raising.
+    required_limits.max_storage_buffers_per_shader_stage =
+        required_limits.max_storage_buffers_per_shader_stage.min(16);
+
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
         required_features: wgpu::Features::TEXTURE_BINDING_ARRAY
             | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
-        required_limits: wgpu::Limits::default(),
+        required_limits,
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         trace: wgpu::Trace::Off,
@@ -88,6 +103,29 @@ pub(crate) fn add_compute_pass(
     compute_pass.set_pipeline(pipeline);
     compute_pass.set_bind_group(0, bind_group, &[]);
     compute_pass.dispatch_workgroups(workgroup_count_x, 1, 1);
+}
+
+/// Dispatches over a 2-D workgroup grid.
+///
+/// The tracer needs this both for coherence (a workgroup covering an 8x8 tile
+/// of pixels traces far more similar rays than one covering 64 pixels of a
+/// single scanline) and for reach: a 1-D dispatch runs into
+/// `max_compute_workgroups_per_dimension` at ~4.2M pixels, so 4K was not
+/// renderable at all.
+pub(crate) fn add_compute_pass_2d(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    workgroup_count_x: u32,
+    workgroup_count_y: u32,
+) {
+    let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: None,
+        timestamp_writes: None,
+    });
+    compute_pass.set_pipeline(pipeline);
+    compute_pass.set_bind_group(0, bind_group, &[]);
+    compute_pass.dispatch_workgroups(workgroup_count_x, workgroup_count_y, 1);
 }
 
 pub(crate) fn compute_pipeline<'a>(

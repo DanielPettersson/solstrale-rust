@@ -1,0 +1,4 @@
+# Keep `cargo bench` / `cargo test --release` on the same codegen as build.sh.
+# Only affects the CPU side (BVH build, scene flattening, readback) -- the tracer is GPU.
+[build]
+rustflags = ["-C", "target-cpu=native"]

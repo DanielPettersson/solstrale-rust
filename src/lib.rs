@@ -9,10 +9,14 @@
 //! * Soft shadows
 //! * Bump mapping
 //! * Light attenuation
+//! * Next-event estimation with multiple importance sampling, for much lower noise
+//!   per sample on scenes lit by discrete lights
+//! * Russian roulette path termination
 //!
 //! ### Performance & Loading
 //! * Loading of obj models with included materials
-//! * Multithreaded BVH creation using Rayon to greatly speed up rendering
+//! * Multithreaded BVH construction using Rayon, with a binned SAH split heuristic
+//!   and front-to-back ordered GPU traversal
 //!
 //! ### Post-Processing
 //! Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):

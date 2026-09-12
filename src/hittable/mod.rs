@@ -8,7 +8,7 @@ mod triangle;
 
 use crate::geo::Aabb;
 pub use crate::hittable::bvh::Bvh;
-pub(crate) use crate::hittable::bvh::BvhItem;
+pub(crate) use crate::hittable::bvh::LEAF_FLAG;
 pub use crate::hittable::quad::Quad;
 pub use crate::hittable::sphere::Sphere;
 pub use crate::hittable::triangle::Triangle;
@@ -23,6 +23,12 @@ pub trait Hittable {
 
     /// Is the hittable a light? Or does it contain any lights?
     fn get_lights(&self) -> Vec<Hittables>;
+
+    /// Does this hittable contain at least one light?
+    ///
+    /// Exists so callers that only need a yes/no answer do not have to build
+    /// (and deep-clone into) the whole `get_lights` vector to ask.
+    fn has_lights(&self) -> bool;
 }
 
 #[enum_dispatch(Hittable)]

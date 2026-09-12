@@ -1,0 +1,205 @@
+# Outstanding work
+
+Suggestions raised during the performance and integrator work that were **not**
+implemented, plus limitations recorded deliberately so they don't get
+re-litigated later.
+
+Already done and not repeated here: the 24-item performance sweep (BVH2 node
+layout, binned SAH build, hot/cold primitive split, deferred shading, 2-D tiled
+dispatch, sample batching, Russian roulette, closed-form sampling) and
+next-event estimation with MIS.
+
+---
+
+## Recommended next
+
+### 1. Per-pixel adaptive sampling
+
+Track variance per pixel and stop sampling once it converges. The accumulation
+buffer is `vec4<f32>` and the `w` channel is currently written as a constant
+`1.0` (`ray_trace.wgsl`, end of `compute`) — it is free storage for a running
+sum of squares.
+
+Expect ~1.5–2x on typical scenes, since most pixels converge long before the
+noisy ones. No bias risk, and it composes with everything already done.
+
+### 2. A depth cutoff for NEE
+
+NEE costs 1.89x per sample and pays for itself 2–4x on scenes lit by discrete
+lights — but it is a **net ~13% loss** on scenes that are effectively ambient-lit
+(`create_test_scene` has three huge lights, one a radius-10 sphere at distance
+15, plus a bright background).
+
+Direct lighting matters most at the first bounce. Skipping NEE past depth 1–2
+would cut shadow-ray count sharply for a small variance increase, and would make
+the ambient-lit case a win rather than a loss. Worth a knob and a measurement.
+
+### 3. Revisit the firefly clamp
+
+`CLAMPING_THRESHOLD = 3.5` at `ray_trace.wgsl:99` is applied per sample, and
+`min(X, 3.5)` has expectation strictly below `E[X]` — so it biases the image
+darker. Measured on `create_test_scene` at 3000 spp:
+
+| | clamp 3.5 | clamp raised |
+|---|---|---|
+| Pre-NEE | 155.81 | 161.55 |
+| NEE + MIS | 159.16 | 161.61 |
+
+It was eating ~3.5% of the scene's energy before NEE and eats ~1.5% now. Raising
+it (or exposing it on `RenderConfig`) is cheap, but it changes every image, so it
+is a deliberate quality call rather than a free win.
+
+---
+
+## Renderer
+
+### Atlas mipmaps
+
+The atlas is `mip_level_count: 1` with `FilterMode::Nearest` everywhere
+(`renderer/mod.rs`). Incoherent bounce rays thrash the texture cache. Two real
+blockers make this a feature rather than an optimisation:
+
+- **LOD selection** needs ray differentials or ray cones, which the renderer does
+  not track. Any LOD without them is a guess trading sharpness for cache hits.
+- **Atlas bleeding**: mipmapping a packed atlas bleeds neighbouring textures into
+  each other at higher levels unless `TexturePacker::pack`
+  (`util/texture_processing.rs:61`) grows gutters between placements.
+
+### Light BVH or power-weighted light selection
+
+`light_pdf_value` (`ray_trace.wgsl:328`) loops over every light, and
+`sample_light` chooses one uniformly. Fine at 1–3 lights; an emissive mesh
+imported from an OBJ would make both terrible. Wants an alias table for
+power-weighted selection, and a light BVH for the PDF sum.
+
+### Denoiser
+
+OIDN was removed in the `wgpu-render` merge and nothing replaced it. There is no
+tone mapping either — just the hard clamp above plus `sqrt` gamma applied on the
+CPU during readback (`util/wgpu_util.rs`).
+
+### Instancing (BLAS/TLAS)
+
+Transforms are baked into vertices at construction, so repeated geometry costs
+full duplicate storage. Note that `Bvh::new` now **flattens nested BVHs into one
+global tree** — that was the right call absent instancing, but it is the decision
+to revisit if instancing is added, since a nested `Bvh` would then carry a
+transform and must stay a separate acceleration structure.
+
+---
+
+## Correctness and precision
+
+### Camera ray is not normalised
+
+`ray_trace.wgsl:918` builds the primary ray direction without normalising, so
+`rec.t` for the **first** path segment is in units of `|ray_direction|`
+(≈ the focus distance) rather than world units. Every later segment is
+normalised, so `path_length` mixes two scales.
+
+Only observable through the light-attenuation falloff, which is the one feature
+that depends on absolute path length. Pre-existing; left alone deliberately
+because fixing it shifts the `light_attenuation_*` images again.
+
+### OBJ material ids are narrowed to `i8`
+
+`loader/obj.rs:76` and `:118` cast the material index to `i8`, so an OBJ with
+more than 127 materials wraps and aliases materials onto each other.
+
+### Spheres cannot be transformed
+
+`Sphere::new` (`hittable/sphere.rs:17`) takes no `Transformer`, unlike `Triangle`
+and `Quad`. Scaling or rotating a sphere is therefore impossible through the
+normal scene-building path.
+
+---
+
+## CPU and loader
+
+### OBJ loading is serial and allocation-heavy
+
+In `loader/obj.rs`: `triangles` is built with `Vec::new()` and never reserved
+(`:81`), each triangle clones a `Materials` value (`:121-122`), and the
+construction loop has no rayon parallelism. Much less severe than it was — the
+BVH build no longer deep-clones — but still the slowest part of loading a large
+mesh.
+
+### Pre-existing clippy warnings
+
+CI runs clippy. Three warnings in the library (redundant `&` in `format!` in
+`loader/obj.rs`, `sort_by` that should be `sort_by_key` in
+`util/texture_processing.rs`), plus several in tests. All predate this work; most
+are auto-fixable with `cargo clippy --fix`.
+
+---
+
+## Tooling and API
+
+that nothing drives.
+
+### `profile.sh` is broken
+
+It runs `perf record ... target/release/profiling`, a binary that does not exist
+in this repo. Either delete it or repoint it at the bench harness.
+
+### `RenderImageStrategy` is dead
+
+`RenderImageStrategy` and `should_generate_image` (`renderer/mod.rs:89`, `:101`)
+have **zero call sites** — `render()` never consults them and unconditionally
+sends progress every batch. So `render_config.render_image_strategy` does
+nothing, and by extension the desktop app's `preview_interval` setting does
+nothing. Either wire it up or remove it.
+
+### Benchmark naming
+
+`bvh_traversal/<n> false` still wraps the world in a top-level `Bvh`, so the
+`use_bvh = false` case is not actually "no BVH" — it only skips the nested
+sub-BVH. Misleading as a comparison.
+
+### Sibling repo (`solstrale-desktop-rust`)
+
+Its `RenderConfig` construction was fixed to use `..Default::default()` so it is
+immune to future field additions, and this crate was bumped to `0.3.0` for the
+breaking change. Still open: consider exposing `max_depth` (and possibly
+`samples_per_batch`) in the desktop YAML config, which means touching the
+`HelpDocumentation` structure too. It pins `solstrale = "0.2.0"` from crates.io,
+so it is unaffected until this is published.
+
+---
+
+## Deliberately declined
+
+Recorded so they aren't reconsidered without new information.
+
+- **Single-light fast path for `light_pdf_value`.** `sample_light` already
+  intersects the chosen light, so its PDF could be computed without the extra
+  traversal when `light_count == 1`. Worth ~2%, but it duplicates the PDF formula
+  in two places where drift would silently bias the estimator. Not worth it.
+- **Wavefront path tracing.** Splitting the megakernel into stages would cut
+  material-branch divergence, but it is a full rewrite and premature — and the
+  benefit is smaller on a small-wavefront iGPU.
+
+---
+
+## Known limitations (by design)
+
+Correct but imperfect; documented so they read as choices rather than bugs.
+
+- **Dielectrics block NEE shadow rays.** Light through glass is found only by
+  BSDF-sampled paths, at full MIS weight. Unbiased, but caustics stay noisy —
+  the standard trade-off of naive NEE.
+- **`Blend` is never `is_light()`.** A blend containing a `DiffuseLight` is not in
+  the lights array, so it gets no NEE and is found by BSDF paths with weight 1.
+  Consistent and unbiased, because the MIS PDF covers exactly the same set.
+- **Rare MIS edge case.** A blend-emitter hit with a real light collinear behind
+  it can be slightly under-weighted, since the PDF sum counts lights at any
+  distance along the ray. Pre-existing structure, vanishingly rare.
+- **16.7M primitive cap.** The BVH leaf encoding uses a 24-bit offset
+  (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time.
+- **Golden images are lenient.** They downscale to 100x50 and compare RMS
+  similarity at 0.9–0.95, which tolerates large quality changes. Any future
+  integrator change needs a convergence check (render at 50/200/2000 spp and
+  confirm the mean is flat), not just a green test run. Note that output passes
+  through `sqrt` gamma, which is concave — so a *noisier* image has a lower mean
+  at identical linear radiance, and mean brightness must be compared at matched
+  convergence.

@@ -39,6 +39,10 @@ impl Hittable for Sphere {
             vec![]
         }
     }
+
+    fn has_lights(&self) -> bool {
+        self.mat.is_light()
+    }
 }
 
 impl Clone for Sphere {

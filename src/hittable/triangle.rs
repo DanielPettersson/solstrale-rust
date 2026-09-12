@@ -1,7 +1,7 @@
 use crate::geo::Aabb;
 use crate::geo::Uv;
 use crate::geo::transformation::Transformer;
-use crate::geo::vec3::Vec3;
+use crate::geo::vec3::{UNIT_Y, Vec3};
 use crate::hittable::{Hittable, Hittables};
 use crate::material::{Material, Materials};
 
@@ -70,9 +70,25 @@ impl Triangle {
         let delta_pos_2 = v2 - v0;
         let delta_uv_1 = uv1 - uv0;
         let delta_uv_2 = uv2 - uv0;
-        let r = 1. / (delta_uv_1.u * delta_uv_2.v - delta_uv_1.v * delta_uv_2.u);
-        let tangent = ((delta_pos_1 * delta_uv_2.v - delta_pos_2 * delta_uv_1.v) * r).unit();
-        let bi_tangent = ((delta_pos_2 * delta_uv_1.u - delta_pos_1 * delta_uv_2.u) * r).unit();
+        // Degenerate when the triangle has no UV area -- which is every triangle
+        // of an untextured OBJ, since they all carry (0,0) coordinates. Without
+        // this guard the reciprocal is infinite and both vectors come out NaN,
+        // and those NaNs were being uploaded to the GPU.
+        let det = delta_uv_1.u * delta_uv_2.v - delta_uv_1.v * delta_uv_2.u;
+        let (tangent, bi_tangent) = if det.abs() < f32::EPSILON {
+            // No UV frame to derive: fall back to an arbitrary basis orthogonal
+            // to the normal. Only ever used for normal mapping, which needs a
+            // UV frame to be meaningful anyway.
+            let a = if normal.x.abs() > 0.9 { UNIT_Y } else { Vec3::new(1., 0., 0.) };
+            let t = normal.cross(a).unit();
+            (t, normal.cross(t))
+        } else {
+            let r = 1. / det as f64;
+            (
+                ((delta_pos_1 * delta_uv_2.v as f64 - delta_pos_2 * delta_uv_1.v as f64) * r).unit(),
+                ((delta_pos_2 * delta_uv_1.u as f64 - delta_pos_1 * delta_uv_2.u as f64) * r).unit(),
+            )
+        };
 
         Triangle {
             v0,
@@ -102,5 +118,9 @@ impl Hittable for Triangle {
         } else {
             vec![]
         }
+    }
+
+    fn has_lights(&self) -> bool {
+        self.mat.is_light()
     }
 }
