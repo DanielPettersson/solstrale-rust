@@ -104,17 +104,6 @@ const TARGET_DISPATCH: Duration = Duration::from_millis(12);
 /// reporting progress once a second.
 const MAX_BATCH: u32 = 64;
 
-/// Ray depth used while the camera is being moved.
-///
-/// Mid-drag the thing that matters is seeing where the camera now points, and
-/// losing most of the indirect light for a moment is far less distracting than
-/// losing the frame rate. Ignored for a scene whose own depth is already this
-/// shallow, so no restart is paid for nothing.
-const INTERACTIVE_MAX_DEPTH: u32 = 3;
-
-/// How long after the last camera update the full ray depth is restored.
-const INTERACTION_TIMEOUT: Duration = Duration::from_millis(200);
-
 /// Length of a single wait slice.
 ///
 /// Waits are sliced rather than indefinite so that `abort` is still observed
@@ -521,10 +510,6 @@ impl<'a> Renderer<'a> {
         // A camera config picked up while idling, handled at the top of the
         // next iteration together with any that arrived after it.
         let mut idle_camera_config = None;
-        // Full ray depth, and the reduced one used while the camera moves.
-        let full_max_depth = self.render_config.max_depth;
-        let interactive_max_depth = INTERACTIVE_MAX_DEPTH.min(full_max_depth);
-        let mut last_camera_update: Option<Instant> = None;
 
         loop {
             if abort.try_recv().is_ok() {
@@ -549,27 +534,6 @@ impl<'a> Renderer<'a> {
                 // restart would spend a whole dispatch before showing anything
                 // of where the camera now points.
                 batch_size = 1;
-                last_camera_update = Some(Instant::now());
-            }
-
-            // Trade ray depth for responsiveness while the camera is moving,
-            // and restore it once the view has settled. Both directions change
-            // what a sample means, so the accumulation restarts either way --
-            // on the way in it has restarted already.
-            let interacting =
-                last_camera_update.is_some_and(|at| at.elapsed() < INTERACTION_TIMEOUT);
-            if !interacting {
-                last_camera_update = None;
-            }
-
-            let wanted_max_depth = if interacting {
-                interactive_max_depth
-            } else {
-                full_max_depth
-            };
-            if self.render_config.max_depth != wanted_max_depth {
-                self.render_config.max_depth = wanted_max_depth;
-                completed = 0;
             }
 
             if completed >= samples_per_pixel {
