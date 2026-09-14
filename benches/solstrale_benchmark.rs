@@ -1,5 +1,8 @@
 use std::hint::black_box;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::channel;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -10,6 +13,8 @@ use crate::scenes::{create_test_scene, new_bvh_test_scene};
 use solstrale::geo::transformation::NopTransformer;
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Triangle};
+use solstrale::loader::Loader;
+use solstrale::loader::obj::Obj;
 use solstrale::material::Lambertian;
 use solstrale::material::texture::SolidColor;
 use solstrale::ray_trace;
@@ -66,6 +71,136 @@ pub fn bvh_build_benchmark(c: &mut Criterion) {
         group.sample_size(10);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter_with_setup(|| triangle_cloud(n), |tris| black_box(Bvh::new(tris)));
+        });
+    }
+    group.finish();
+}
+
+/// Writes a deterministic grid mesh to a temp file and returns its path.
+///
+/// A grid rather than a triangle soup because the loader's cost depends on vertex
+/// *sharing*: every interior vertex here is used by six faces, the way a real scanned
+/// mesh behaves, which is what makes transforming per vertex rather than per corner
+/// worth anything. `vt` lines are emitted so `mesh.texcoords` is non-empty and the
+/// loader takes its textured branch.
+///
+/// The file is written once per size and reused, so generation never lands inside a
+/// timed closure.
+fn grid_obj(faces: usize) -> &'static PathBuf {
+    /// One `OnceLock` per size the benches ask for.
+    static FIXTURES: [(usize, OnceLock<PathBuf>); 2] =
+        [(50_000, OnceLock::new()), (250_000, OnceLock::new())];
+
+    let cell = &FIXTURES
+        .iter()
+        .find(|(n, _)| *n == faces)
+        .expect("no fixture slot for this size")
+        .1;
+
+    cell.get_or_init(|| {
+        // k*k cells, two triangles each.
+        let k = ((faces as f64 / 2.).sqrt()).ceil() as usize;
+        let path = std::env::temp_dir().join(format!("solstrale_bench_grid_{}.obj", faces));
+
+        let file = std::fs::File::create(&path).expect("failed to create bench fixture");
+        let mut w = BufWriter::new(file);
+
+        // Same cheap deterministic LCG as `triangle_cloud`, used to give the grid some
+        // height so it is not a degenerate plane for the BVH build underneath.
+        let mut state: u32 = 0x9E37_79B9;
+        let mut next = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 8) as f64 / 16777216.0
+        };
+
+        for z in 0..=k {
+            for x in 0..=k {
+                writeln!(w, "v {} {} {}", x as f64 * 0.1, next() * 2., z as f64 * 0.1)
+                    .expect("failed to write bench fixture");
+            }
+        }
+        for z in 0..=k {
+            for x in 0..=k {
+                writeln!(w, "vt {} {}", x as f64 / k as f64, z as f64 / k as f64)
+                    .expect("failed to write bench fixture");
+            }
+        }
+        let vert = |x: usize, z: usize| z * (k + 1) + x + 1; // OBJ indices are 1-based
+        for z in 0..k {
+            for x in 0..k {
+                let (a, b, c, d) = (
+                    vert(x, z),
+                    vert(x + 1, z),
+                    vert(x + 1, z + 1),
+                    vert(x, z + 1),
+                );
+                writeln!(w, "f {}/{} {}/{} {}/{}", a, a, b, b, c, c)
+                    .expect("failed to write bench fixture");
+                writeln!(w, "f {}/{} {}/{} {}/{}", a, a, c, c, d, d)
+                    .expect("failed to write bench fixture");
+            }
+        }
+        w.flush().expect("failed to flush bench fixture");
+        path
+    })
+}
+
+/// Splits a path into the (directory, filename) pair `Obj::new` wants.
+fn split_obj_path(path: &std::path::Path) -> (String, String) {
+    let dir = path.parent().unwrap().to_str().unwrap();
+    let file = path.file_name().unwrap().to_str().unwrap();
+    (format!("{}/", dir), file.to_string())
+}
+
+fn load_options() -> tobj::LoadOptions {
+    tobj::LoadOptions {
+        triangulate: true,
+        ..Default::default()
+    }
+}
+
+/// Times OBJ loading, split so the parse is visible on its own.
+///
+/// `total` minus `parse`, minus the `bvh_build` group at the matching size, is what the
+/// triangle-construction loop actually costs. That subtraction is the point: tobj's
+/// parser is single-threaded and allocates a `String` per line, so it is the serial
+/// floor no amount of rayon in the construction loop can get under.
+///
+/// Set `SOLSTRALE_BENCH_OBJ` to a path to measure a real mesh instead of the synthetic
+/// grid, e.g. `SOLSTRALE_BENCH_OBJ=/path/to/dragon.obj cargo bench -- obj_load`.
+pub fn obj_load_benchmark(c: &mut Criterion) {
+    let mut inputs: Vec<(String, PathBuf)> = [50_000usize, 250_000]
+        .iter()
+        .map(|&n| (n.to_string(), grid_obj(n).clone()))
+        .collect();
+
+    if let Ok(path) = std::env::var("SOLSTRALE_BENCH_OBJ") {
+        let path = PathBuf::from(path);
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("external")
+            .to_string();
+        inputs.push((name, path));
+    }
+
+    let mut group = c.benchmark_group("obj_load");
+    group.sample_size(10);
+
+    for (name, path) in &inputs {
+        let (dir, file) = split_obj_path(path);
+
+        group.bench_with_input(BenchmarkId::new("parse", name), path, |b, path| {
+            // `iter_with_large_drop` throughout: freeing ~80 MB of triangles and their
+            // Arcs is real work, but it is not load time. (`bvh_build` above does
+            // currently charge itself for that drop -- pre-existing, left alone.)
+            b.iter_with_large_drop(|| tobj::load_obj(path, &load_options()).unwrap());
+        });
+
+        group.bench_with_input(BenchmarkId::new("total", name), &(dir, file), |b, (d, f)| {
+            b.iter_with_large_drop(|| {
+                Obj::new(d, f).load(&NopTransformer(), None).unwrap()
+            });
         });
     }
     group.finish();
@@ -239,6 +374,7 @@ struct BvhInput {
 
 criterion_group!(
     benches,
+    obj_load_benchmark,
     bvh_build_benchmark,
     flatten_benchmark,
     bvh_traversal_benchmark,

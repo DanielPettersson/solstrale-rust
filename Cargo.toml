@@ -33,6 +33,9 @@ criterion = "0.8.1"
 # Same version as the normal dependency so cargo unifies them into one crate
 # instance; the benches need `device.poll` to await GPU work before stopping the timer.
 wgpu = "27.0.1"
+# Likewise unified with the normal dependency. The `obj_load` bench times tobj's parse
+# on its own, because it is the serial floor under everything the loader does after it.
+tobj = "4.0.3"
 
 [[bench]]
 name = "solstrale_benchmark"
