@@ -137,14 +137,6 @@ that nothing drives.
 It runs `perf record ... target/release/profiling`, a binary that does not exist
 in this repo. Either delete it or repoint it at the bench harness.
 
-### `RenderImageStrategy` is dead
-
-`RenderImageStrategy` and `should_generate_image` (`renderer/mod.rs:89`, `:101`)
-have **zero call sites** — `render()` never consults them and unconditionally
-sends progress every batch. So `render_config.render_image_strategy` does
-nothing, and by extension the desktop app's `preview_interval` setting does
-nothing. Either wire it up or remove it.
-
 ### Benchmark naming
 
 `bvh_traversal/<n> false` still wraps the world in a top-level `Bvh`, so the
