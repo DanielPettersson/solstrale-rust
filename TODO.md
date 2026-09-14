@@ -203,12 +203,16 @@ Correct but imperfect; documented so they read as choices rather than bugs.
 - **Rare MIS edge case.** A blend-emitter hit with a real light collinear behind
   it can be slightly under-weighted, since the PDF sum counts lights at any
   distance along the ray. Pre-existing structure, vanishingly rare.
-- **The BVH leaf permutation switches strategy at 400k primitives.**
-  `permute_in_place` (`hittable/bvh.rs`) beats the staging-vector gather only
-  while the primitive array fits in last-level cache; past that its random-access
-  swaps lose to the gather's sequential writes. The threshold was measured on a
-  96 MB-L3 part, so it is an upper bound — a machine with a smaller last-level
-  cache crosses over sooner and would want it lower.
+- **The BVH leaf permutation trades build time for peak memory above ~400k
+  primitives.** `permute_in_place` (`hittable/bvh.rs`) allocates nothing, where
+  the staging-vector gather it replaced allocated a second full-size primitive
+  array — 736.7 MB → 433.4 MB peak RSS on a 1M-primitive build. But all its work
+  is random-access swaps, so it only runs *faster* while the array fits in
+  last-level cache: −37% at 100k, +11% at 1M on a 96 MB-L3 part, crossing over
+  sooner on a machine with less cache. Taken deliberately — build time is paid
+  once at load, and the peak allocation is what decides whether a large scene
+  fits at all. Revisit only if load time on huge scenes starts mattering more
+  than footprint.
 - **16.7M primitive cap.** The BVH leaf encoding uses a 24-bit offset
   (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time.
 - **Golden images are lenient.** They downscale to 100x50 and compare RMS

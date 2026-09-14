@@ -21,10 +21,6 @@ pub(crate) const MAX_LEAF_PRIMS: usize = 4;
 /// Buckets used by the SAH sweep.
 const SAH_BUCKETS: usize = 16;
 
-/// Above this many primitives the leaf-order permutation is gathered through a staging
-/// vector rather than applied in place. See [`permute_in_place`] for why.
-const MAX_IN_PLACE_PERMUTE_PRIMS: usize = 400_000;
-
 /// Below this many primitives a subtree is built serially -- forking a rayon
 /// task per level costs more than it saves once the subtree is small.
 const PARALLEL_CUTOFF: usize = 8192;
@@ -143,12 +139,7 @@ impl Bvh {
             nodes
         };
 
-        let prims = if prims.len() <= MAX_IN_PLACE_PERMUTE_PRIMS {
-            permute_in_place(&mut prims, &indices);
-            prims
-        } else {
-            permute_by_gather(prims, &indices)
-        };
+        permute_in_place(&mut prims, &indices);
 
         Bvh {
             nodes,
@@ -170,12 +161,16 @@ fn collect_primitives(list: Vec<Hittables>, out: &mut Vec<Hittables>) {
 
 /// Reorders `prims` so that `prims[i]` ends up holding what `prims[indices[i]]` held.
 ///
-/// This allocates nothing and moves every primitive once, where [`permute_by_gather`]
-/// allocates a second full-size array and moves everything twice -- but it does all of
-/// its work as random-access swaps, where the gather at least writes sequentially. So it
-/// wins only while the primitive array still fits in last-level cache, which is what
-/// [`MAX_IN_PLACE_PERMUTE_PRIMS`] is guarding. Measured on `bvh_build` (a random spatial
-/// cloud, the worst case for locality) on a 96 MB-L3 part:
+/// This allocates nothing and moves every primitive once. It replaced a gather through a
+/// staging `Vec<Option<Hittables>>`, which allocated a second full-size array and moved
+/// everything twice. Building a 1M-primitive BVH peaked at 736.7 MB RSS that way and
+/// peaks at 433.4 MB now -- 303 MB, almost exactly the one redundant copy of the
+/// primitive array.
+///
+/// The trade is deliberate and is not a win at every size: all the work here is
+/// random-access swaps, where the gather at least wrote sequentially, so this only runs
+/// faster while the primitive array still fits in last-level cache. Measured on
+/// `bvh_build` (a random spatial cloud, the worst case for locality) on a 96 MB-L3 part:
 ///
 /// | primitives | array | gather | in place |
 /// |---|---|---|---|
@@ -184,9 +179,10 @@ fn collect_primitives(list: Vec<Hittables>, out: &mut Vec<Hittables>) {
 /// | 500k | 156 MB | **158.7 ms** | 161.4 ms |
 /// | 1M | 312 MB | **376.3 ms** | 421.7 ms |
 ///
-/// The crossover tracks cache size, not the primitive count as such, so a part with a
-/// smaller last-level cache crosses over sooner and this threshold is an upper bound
-/// rather than a universal optimum.
+/// So past roughly 400k primitives on that part -- sooner on one with a smaller
+/// last-level cache -- this costs ~11% of build time. That is the deliberate trade: build
+/// time is paid once at load, where the peak allocation is what decides whether a large
+/// scene fits at all.
 ///
 /// Note the direction. `indices[i]` is the *source* slot for destination `i`. Once slot
 /// `i` has been written, a later `indices[j]` still pointing at it is stale, so the chase
@@ -202,16 +198,6 @@ fn permute_in_place(prims: &mut [Hittables], indices: &[u32]) {
         }
         prims.swap(i, src);
     }
-}
-
-/// Same reordering as [`permute_in_place`], for primitive counts where that one's
-/// random-access swaps stop paying for themselves.
-fn permute_by_gather(prims: Vec<Hittables>, indices: &[u32]) -> Vec<Hittables> {
-    let mut slots: Vec<Option<Hittables>> = prims.into_iter().map(Some).collect();
-    indices
-        .iter()
-        .map(|&i| slots[i as usize].take().expect("index visited twice"))
-        .collect()
 }
 
 /// Builds a subtree, forking the two halves onto rayon while they are large
@@ -588,14 +574,9 @@ mod tests {
             let original_tags = tags(&original);
             let expected: Vec<u32> = indices.iter().map(|&i| original_tags[i as usize]).collect();
 
-            let mut prims = original.clone();
+            let mut prims = original;
             permute_in_place(&mut prims, &indices);
-            assert_eq!(expected, tags(&prims), "in place, n = {}", n);
-
-            // The two paths are selected by `MAX_IN_PLACE_PERMUTE_PRIMS` on size alone,
-            // so nothing else would notice if they disagreed.
-            let gathered = permute_by_gather(original, &indices);
-            assert_eq!(expected, tags(&gathered), "gather, n = {}", n);
+            assert_eq!(expected, tags(&prims), "n = {}", n);
         }
     }
 
