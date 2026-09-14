@@ -143,15 +143,6 @@ in this repo. Either delete it or repoint it at the bench harness.
 `use_bvh = false` case is not actually "no BVH" — it only skips the nested
 sub-BVH. Misleading as a comparison.
 
-### Sibling repo (`solstrale-desktop-rust`)
-
-Its `RenderConfig` construction was fixed to use `..Default::default()` so it is
-immune to future field additions, and this crate was bumped to `0.3.0` for the
-breaking change. Still open: consider exposing `max_depth` (and possibly
-`samples_per_batch`) in the desktop YAML config, which means touching the
-`HelpDocumentation` structure too. It pins `solstrale = "0.2.0"` from crates.io,
-so it is unaffected until this is published.
-
 ---
 
 ## Deliberately declined
