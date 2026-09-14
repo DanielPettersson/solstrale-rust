@@ -151,6 +151,45 @@ pub fn render_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+/// Adaptive sampling on vs. effectively disabled, at the same total sample
+/// budget -- isolates the win TODO.md's "per-pixel adaptive sampling" item
+/// describes from everything else `render_benchmark` already measures.
+/// Disabling is done by setting `min_samples_per_pixel` above the render's
+/// total sample count, so no pixel is ever eligible to be skipped, rather
+/// than adding a dedicated on/off flag to `RenderConfig`.
+pub fn adaptive_sampling_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("adaptive_sampling");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+
+    for adaptive in [true, false] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(if adaptive { "adaptive" } else { "forced_off" }),
+            &adaptive,
+            |b, &adaptive| {
+                b.iter_with_setup(
+                    || {
+                        create_test_scene(RenderConfig {
+                            // A larger sample budget than `render_benchmark`'s:
+                            // the win comes from quiet pixels converging long
+                            // before noisy ones, which only shows up once
+                            // there's enough headroom past convergence for it
+                            // to matter.
+                            samples_per_pixel: 2000,
+                            width: 400,
+                            height: 300,
+                            min_samples_per_pixel: if adaptive { 16 } else { u32::MAX },
+                            ..RenderConfig::default()
+                        })
+                    },
+                    render_and_sync,
+                )
+            },
+        );
+    }
+    group.finish();
+}
+
 /// Trace throughput against triangle count, with and without a BVH.
 pub fn bvh_traversal_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("bvh_traversal");
@@ -203,6 +242,7 @@ criterion_group!(
     bvh_build_benchmark,
     flatten_benchmark,
     bvh_traversal_benchmark,
-    render_benchmark
+    render_benchmark,
+    adaptive_sampling_benchmark
 );
 criterion_main!(benches);

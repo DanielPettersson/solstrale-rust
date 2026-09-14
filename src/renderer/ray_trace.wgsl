@@ -131,11 +131,13 @@ struct RenderConfig {
     background_color: vec3<f32>,
     light_count: u32,
     samples_per_batch: u32,
-    // Scalar pads, not a vec3: a vec3 here would align to 16 and push the
+    // Minimum samples a pixel must have before adaptive sampling may skip it.
+    min_samples_per_pixel: u32,
+    // Relative standard-error threshold below which a pixel is converged.
+    variance_threshold: f32,
+    // Scalar pad, not a vec3: a vec3 here would align to 16 and push the
     // struct to 64 bytes, which no longer matches the Rust mirror.
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
 }
 
 struct LightRef {
@@ -206,6 +208,11 @@ var<storage, read> triangle_attr: array<TriangleAttr>;
 @group(0) @binding(13)
 var<storage, read> quad_attr: array<QuadAttr>;
 
+// Actual samples accumulated per pixel so far. Diverges from the uniform
+// `sample_count` once adaptive sampling starts skipping converged pixels.
+@group(0) @binding(14)
+var<storage, read_write> sample_count_buffer: array<u32>;
+
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -219,6 +226,13 @@ fn rand_float(state: ptr<function, u32>) -> f32 {
 
 fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.origin + t * r.direction;
+}
+
+// Scalar proxy used for the per-pixel variance estimate that drives adaptive
+// sampling. Perceptual weighting doesn't matter here, only that it's a single
+// number cheap to accumulate.
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
 // Closed-form samplers.
@@ -1044,6 +1058,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     return min(radiance, vec3<f32>(CLAMPING_THRESHOLD));
 }
 
+// Floor on the luminance used as the denominator of the relative variance
+// check, so a near-black pixel's tiny absolute noise doesn't look enormous
+// relative to it and keep the pixel sampling forever.
+const ADAPTIVE_LUMINANCE_FLOOR = 1e-4;
+
 // 8x8 tiles rather than 64 pixels of one scanline: neighbouring rays in a
 // workgroup then stay coherent through the first bounce or two, which is where
 // BVH traversal divergence actually costs.
@@ -1055,22 +1074,45 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.y * config.width + global_id.x;
     let pixel = global_id.xy;
 
-    // Several samples per dispatch, summed in registers, so the 16-byte-per-pixel
-    // accumulation buffer is read and written once per batch rather than once
-    // per sample.
+    // A restart (accumulation reset on camera/depth change) discards whatever
+    // the buffers held for a previous, unrelated accumulation.
+    let restart = config.sample_count == 0u;
+    let n0 = select(sample_count_buffer[index], 0u, restart);
+    let prev = select(output_buffer[index], vec4<f32>(0.0), restart);
+    let prev_mean = prev.xyz;
+    let prev_sum_sq = prev.w;
+
+    // Skip pixels that have already converged: no trace_sample, no BVH
+    // traversal, no shadow rays for this dispatch. `min_samples_per_pixel` is
+    // floored at 1 so a variance check is never evaluated against n0 == 0.
+    let min_samples = max(config.min_samples_per_pixel, 1u);
+    if (n0 >= min_samples) {
+        let mean_luminance = luminance(prev_mean);
+        let variance = max(prev_sum_sq / f32(n0) - mean_luminance * mean_luminance, 0.0);
+        let standard_error = sqrt(variance / f32(n0));
+        if (standard_error <= config.variance_threshold * max(mean_luminance, ADAPTIVE_LUMINANCE_FLOOR)) {
+            return;
+        }
+    }
+
+    // Several samples per dispatch, summed in registers, so the accumulation
+    // buffers are read and written once per batch rather than once per sample.
     let batch = max(config.samples_per_batch, 1u);
     var batch_sum = vec3<f32>(0.0);
+    var batch_sum_sq = 0.0;
     for (var s = 0u; s < batch; s++) {
-        batch_sum += trace_sample(pixel, config.sample_count + s);
+        let sample = trace_sample(pixel, config.sample_count + s);
+        batch_sum += sample;
+        let l = luminance(sample);
+        batch_sum_sq += l * l;
     }
 
-    let completed = f32(config.sample_count);
-    let total = completed + f32(batch);
+    let total = n0 + batch;
+    let new_mean = (prev_mean * f32(n0) + batch_sum) / f32(total);
+    // Sum of squares is plain additive -- unlike the mean, it needs no
+    // reweighting when merging a batch onto a differing prior sample count.
+    let new_sum_sq = prev_sum_sq + batch_sum_sq;
 
-    if (config.sample_count == 0u) {
-        output_buffer[index] = vec4<f32>(batch_sum / f32(batch), 1.0);
-    } else {
-        let prev_color = output_buffer[index].xyz;
-        output_buffer[index] = vec4<f32>((prev_color * completed + batch_sum) / total, 1.0);
-    }
+    output_buffer[index] = vec4<f32>(new_mean, new_sum_sq);
+    sample_count_buffer[index] = total;
 }

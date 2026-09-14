@@ -6,24 +6,14 @@ re-litigated later.
 
 Already done and not repeated here: the 24-item performance sweep (BVH2 node
 layout, binned SAH build, hot/cold primitive split, deferred shading, 2-D tiled
-dispatch, sample batching, Russian roulette, closed-form sampling) and
-next-event estimation with MIS.
+dispatch, sample batching, Russian roulette, closed-form sampling), next-event
+estimation with MIS, and per-pixel adaptive sampling.
 
 ---
 
 ## Recommended next
 
-### 1. Per-pixel adaptive sampling
-
-Track variance per pixel and stop sampling once it converges. The accumulation
-buffer is `vec4<f32>` and the `w` channel is currently written as a constant
-`1.0` (`ray_trace.wgsl`, end of `compute`) — it is free storage for a running
-sum of squares.
-
-Expect ~1.5–2x on typical scenes, since most pixels converge long before the
-noisy ones. No bias risk, and it composes with everything already done.
-
-### 2. A depth cutoff for NEE
+### 1. A depth cutoff for NEE
 
 NEE costs 1.89x per sample and pays for itself 2–4x on scenes lit by discrete
 lights — but it is a **net ~13% loss** on scenes that are effectively ambient-lit
@@ -34,7 +24,7 @@ Direct lighting matters most at the first bounce. Skipping NEE past depth 1–2
 would cut shadow-ray count sharply for a small variance increase, and would make
 the ambient-lit case a win rather than a loss. Worth a knob and a measurement.
 
-### 3. Revisit the firefly clamp
+### 2. Revisit the firefly clamp
 
 `CLAMPING_THRESHOLD = 3.5` at `ray_trace.wgsl:99` is applied per sample, and
 `min(X, 3.5)` has expectation strictly below `E[X]` — so it biases the image
@@ -178,6 +168,14 @@ Recorded so they aren't reconsidered without new information.
 - **Wavefront path tracing.** Splitting the megakernel into stages would cut
   material-branch divergence, but it is a full rewrite and premature — and the
   benefit is smaller on a small-wavefront iGPU.
+- **Global early-exit for adaptive sampling.** Per-pixel adaptive sampling
+  (`ray_trace.wgsl`'s `compute`) skips converged pixels inside each dispatch,
+  but the CPU render loop still runs until `samples_per_pixel` batches are
+  issued, even once every pixel has converged. Stopping the whole render early
+  would need a new atomic-reduction pattern (a global "pixels still active"
+  count) this crate doesn't have anywhere else, for benefit that vanishes on
+  any scene with a persistently noisy region (a small light, a caustic). Not
+  worth it until a scene shows up where it would matter.
 
 ---
 
