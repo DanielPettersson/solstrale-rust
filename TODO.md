@@ -91,11 +91,6 @@ Only observable through the light-attenuation falloff, which is the one feature
 that depends on absolute path length. Pre-existing; left alone deliberately
 because fixing it shifts the `light_attenuation_*` images again.
 
-### OBJ material ids are narrowed to `i8`
-
-`loader/obj.rs:76` and `:118` cast the material index to `i8`, so an OBJ with
-more than 127 materials wraps and aliases materials onto each other.
-
 ### Spheres cannot be transformed
 
 `Sphere::new` (`hittable/sphere.rs:17`) takes no `Transformer`, unlike `Triangle`
@@ -106,20 +101,36 @@ normal scene-building path.
 
 ## CPU and loader
 
-### OBJ loading is serial and allocation-heavy
+### `tobj`'s parser is now the floor under OBJ loading
 
-In `loader/obj.rs`: `triangles` is built with `Vec::new()` and never reserved
-(`:81`), each triangle clones a `Materials` value (`:121-122`), and the
-construction loop has no rayon parallelism. Much less severe than it was — the
-BVH build no longer deep-clones — but still the slowest part of loading a large
-mesh.
+With the loader parallelised and the allocations out of `Bvh::new` and the
+flattener, `tobj::load_obj` is about half of load time and is the only part left
+that is still serial:
+
+| | parse | total | was |
+|---|---|---|---|
+| `happy.obj` (98.6k tris) | 21.4 ms | 43.4 ms | 73.4 ms |
+| `xyzrgb_dragon.obj` (249.9k tris) | 54.5 ms | 116.9 ms | 202.4 ms |
+
+`load_obj_buf` (`tobj-4.0.3/src/lib.rs:1991`) is a `for line in reader.lines()`
+loop — one heap-allocated `String` per line, 375k of them for the dragon — and
+because `single_index` is off it takes `export_faces_multi_index` (`:1586`),
+three `HashMap` lookups per face vertex. 4.0.5 has the identical loop, so
+upgrading buys nothing.
+
+Getting under it means a bespoke parser: read the file into one `Vec<u8>`, split
+on `\n` with `memchr`, parse floats from `&str` slices, and split the work with
+a two-pass rayon scheme (count records per chunk to assign offsets, then parse
+chunks into preallocated arrays). Worth roughly another 2x on load, but it is a
+multi-day job with a real correctness surface — negative and relative indices,
+`f a/b/c` vs `a//c` vs `a`, polygon fans, `usemtl`/`o`/`g` grouping — and it
+replaces a dependency that currently just works.
 
 ### Pre-existing clippy warnings
 
-CI runs clippy. Three warnings in the library (redundant `&` in `format!` in
-`loader/obj.rs`, `sort_by` that should be `sort_by_key` in
-`util/texture_processing.rs`), plus several in tests. All predate this work; most
-are auto-fixable with `cargo clippy --fix`.
+CI runs clippy. One warning left in the library (`sort_by` that should be
+`sort_by_key` in `util/texture_processing.rs`), plus several in tests. All
+predate this work; most are auto-fixable with `cargo clippy --fix`.
 
 ---
 
@@ -192,6 +203,12 @@ Correct but imperfect; documented so they read as choices rather than bugs.
 - **Rare MIS edge case.** A blend-emitter hit with a real light collinear behind
   it can be slightly under-weighted, since the PDF sum counts lights at any
   distance along the ray. Pre-existing structure, vanishingly rare.
+- **The BVH leaf permutation switches strategy at 400k primitives.**
+  `permute_in_place` (`hittable/bvh.rs`) beats the staging-vector gather only
+  while the primitive array fits in last-level cache; past that its random-access
+  swaps lose to the gather's sequential writes. The threshold was measured on a
+  96 MB-L3 part, so it is an upper bound — a machine with a smaller last-level
+  cache crosses over sooner and would want it lower.
 - **16.7M primitive cap.** The BVH leaf encoding uses a 24-bit offset
   (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time.
 - **Golden images are lenient.** They downscale to 100x50 and compare RMS
