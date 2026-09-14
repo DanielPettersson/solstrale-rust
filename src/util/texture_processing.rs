@@ -66,7 +66,7 @@ impl TexturePacker {
             .collect();
 
         // Sort by height descending for better shelf packing efficiency
-        indexed_textures.sort_by(|a, b| b.2.cmp(&a.2));
+        indexed_textures.sort_by_key(|a| std::cmp::Reverse(a.2));
 
         let mut placements = Vec::new();
         let mut shelves: Vec<(u32, u32, u32)> = Vec::new(); // y, current_x, height

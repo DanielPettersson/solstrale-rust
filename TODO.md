@@ -126,12 +126,6 @@ multi-day job with a real correctness surface — negative and relative indices,
 `f a/b/c` vs `a//c` vs `a`, polygon fans, `usemtl`/`o`/`g` grouping — and it
 replaces a dependency that currently just works.
 
-### Pre-existing clippy warnings
-
-CI runs clippy. One warning left in the library (`sort_by` that should be
-`sort_by_key` in `util/texture_processing.rs`), plus several in tests. All
-predate this work; most are auto-fixable with `cargo clippy --fix`.
-
 ---
 
 ## Tooling and API
