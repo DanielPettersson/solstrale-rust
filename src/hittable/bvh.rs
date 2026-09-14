@@ -83,8 +83,17 @@ impl Bvh {
     /// there is nothing to preserve by keeping it separate, and one global tree
     /// is strictly better than a parent that treats a whole subtree as one box.
     pub fn new(list: Vec<Hittables>) -> Bvh {
-        let mut prims = Vec::with_capacity(list.len());
-        collect_primitives(list, &mut prims);
+        let mut prims = if list.iter().any(|h| matches!(h, Hittables::Bvh(_))) {
+            let mut v = Vec::with_capacity(list.len());
+            collect_primitives(list, &mut v);
+            v
+        } else {
+            // The common case: a loader hands us a flat list of primitives. Moving all of
+            // them into a second vector just to discover there was nothing to flatten
+            // costs a full copy -- ~78 MB for a 250k-triangle mesh. The discriminant scan
+            // that avoids it walks memory the very next statement walks anyway.
+            list
+        };
 
         if prims.is_empty() {
             return Bvh {
