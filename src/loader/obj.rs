@@ -152,9 +152,110 @@ fn vec3_from_mesh_vec(positions: &[f32], offset: usize) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
-    use crate::geo::transformation::NopTransformer;
+    use std::sync::Arc;
+
+    use crate::geo::transformation::{NopTransformer, RotationY, Transformations, Translation};
+    use crate::hittable::Hittables;
+    use crate::material::texture::Textures;
 
     use super::*;
+
+    /// FNV-1a over every geometric field of every loaded triangle, in `prims` order.
+    ///
+    /// The golden-image tests are stochastic GPU renders compared at 0.95 RMS, so they
+    /// happily absorb a reordering or a drifted transform. This is the oracle that does
+    /// not: it pins the exact bytes the loader produces, in the exact order the BVH build
+    /// sees them. Any change to `Obj::load` that leaves these constants alone is
+    /// geometrically a no-op.
+    fn geometry_checksum(bvh: &Bvh) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+
+        for prim in &bvh.prims {
+            let t = match prim {
+                Hittables::Triangle(t) => t,
+                other => panic!("expected only triangles, got {:?}", other),
+            };
+            for v in [t.v0, t.v0v1, t.v0v2, t.normal, t.tangent, t.bi_tangent] {
+                eat(&v.x.to_le_bytes());
+                eat(&v.y.to_le_bytes());
+                eat(&v.z.to_le_bytes());
+            }
+            for uv in [t.uv0, t.uv1, t.uv2] {
+                eat(&uv.u.to_le_bytes());
+                eat(&uv.v.to_le_bytes());
+            }
+            eat(&t.area.to_le_bytes());
+        }
+        h
+    }
+
+    /// How many distinct decoded images the loaded triangles point at.
+    ///
+    /// `spider.mtl` has 19 `usemtl` groups over 4 JPEGs, so this is what proves that
+    /// resolving the material once per *mesh* still hands every triangle the same shared
+    /// `Arc` the per-triangle lookup did -- the flattener dedups textures by
+    /// `Arc::ptr_eq`, so collapsing or splitting those Arcs is observable downstream.
+    fn distinct_albedo_images(bvh: &Bvh) -> usize {
+        let mut ptrs: Vec<usize> = bvh
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Hittables::Triangle(t) => Some(&t.mat),
+                _ => None,
+            })
+            .filter_map(|m| match m {
+                Materials::Lambertian(l) => match &l.albedo {
+                    Textures::ImageMap(im) => Some(Arc::as_ptr(&im.get_image()) as usize),
+                    Textures::SolidColor(_) => None,
+                },
+                _ => None,
+            })
+            .collect();
+        ptrs.sort_unstable();
+        ptrs.dedup();
+        ptrs.len()
+    }
+
+    #[test]
+    fn spider_geometry_is_stable() {
+        let bvh = Obj::new("resources/spider/", "spider.obj")
+            .load(&NopTransformer(), None)
+            .unwrap();
+
+        assert_eq!(1368, bvh.prims.len());
+        assert_eq!(4, distinct_albedo_images(&bvh));
+        assert_eq!(0x3dbd_c185_013f_ed05, geometry_checksum(&bvh));
+    }
+
+    #[test]
+    fn spider_geometry_is_stable_under_transformation() {
+        let transformation = Transformations::new(vec![
+            Box::new(RotationY::new(37.)),
+            Box::new(Translation::new(Vec3::new(1.5, -2.25, 0.75))),
+        ]);
+        let bvh = Obj::new("resources/spider/", "spider.obj")
+            .load(&transformation, None)
+            .unwrap();
+
+        assert_eq!(1368, bvh.prims.len());
+        assert_eq!(0xd439_8fec_0262_fe56, geometry_checksum(&bvh));
+    }
+
+    #[test]
+    fn box_loads_twelve_triangles_with_the_default_material() {
+        let bvh = Obj::new("resources/obj/", "box.obj")
+            .load(&NopTransformer(), None)
+            .unwrap();
+
+        assert_eq!(12, bvh.prims.len());
+        assert_eq!(0xe45a_ef74_7f0c_bc65, geometry_checksum(&bvh));
+    }
 
     #[test]
     fn missing_file() {
