@@ -43,6 +43,13 @@ pub struct RenderConfig {
     /// tunes the actual size down from here to keep a single dispatch within
     /// [`TARGET_DISPATCH`].
     pub samples_per_batch: u32,
+    /// Minimum samples a pixel must accumulate before adaptive sampling can
+    /// consider it converged and stop sampling it further.
+    pub min_samples_per_pixel: u32,
+    /// Relative standard-error threshold below which a pixel is considered
+    /// converged and skipped by adaptive sampling. Lower is stricter: less
+    /// noise tolerated, less speedup gained.
+    pub variance_threshold: f32,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
 }
@@ -55,6 +62,8 @@ impl Default for RenderConfig {
             samples_per_pixel: 50,
             max_depth: 10,
             samples_per_batch: 4,
+            min_samples_per_pixel: 16,
+            variance_threshold: 0.05,
             post_processors: vec![],
         }
     }
@@ -159,6 +168,8 @@ pub struct Renderer<'a> {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     output_buffer: wgpu::Buffer,
+    #[allow(dead_code)]
+    sample_count_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
     nodes_buffer: wgpu::Buffer,
@@ -369,7 +380,9 @@ impl<'a> Renderer<'a> {
             ],
             light_count: scene_data.lights.len() as u32,
             samples_per_batch: scene.render_config.samples_per_batch.max(1),
-            _pad: [0; 3],
+            min_samples_per_pixel: scene.render_config.min_samples_per_pixel,
+            variance_threshold: scene.render_config.variance_threshold,
+            _pad: [0; 1],
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -396,6 +409,7 @@ impl<'a> Renderer<'a> {
                 storage_binding(true, 0),  // 11: primitive references
                 storage_binding(true, 0),  // 12: triangle attributes
                 storage_binding(true, 0),  // 13: quad attributes
+                storage_binding(false, 0), // 14: per-pixel sample count
             ],
         );
 
@@ -407,6 +421,16 @@ impl<'a> Renderer<'a> {
             label: Some("Output Buffer"),
             size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Actual accumulated sample count per pixel, used by adaptive sampling
+        // to skip converged pixels. Its initial contents are never read as-is:
+        // the shader always resets a pixel's count when `sample_count == 0`.
+        let sample_count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sample Count Buffer"),
+            size: (width * height * 4) as u64,
+            usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -428,6 +452,7 @@ impl<'a> Renderer<'a> {
                 wgpu::BindingResource::Buffer(prim_refs_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(triangle_attr_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(quad_attr_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(sample_count_buffer.as_entire_buffer_binding()),
             ],
         );
 
@@ -444,6 +469,7 @@ impl<'a> Renderer<'a> {
             samples_per_batch: scene.render_config.samples_per_batch.max(1),
             pipeline,
             output_buffer,
+            sample_count_buffer,
             bind_group,
             nodes_buffer,
             spheres_buffer,

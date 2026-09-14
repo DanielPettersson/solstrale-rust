@@ -640,7 +640,7 @@ fn test_gpu_scene_nested_bvh() {
     render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
 }
 
-use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
+use solstrale::util::wgpu_util::{buffer_to_image, get_result_from_buffer, get_wgpu_device_and_queue};
 
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -698,4 +698,92 @@ fn compare_output(name: &str, actual_image: &RgbImage, comparison_threshold: f64
         name,
         score
     )
+}
+
+// Adaptive sampling changes how many samples a pixel gets once it has
+// converged, not what it converges to. This is the check TODO.md asks for:
+// unlike the gamma-mapped RMS golden tests above (which tolerate a biased but
+// structurally similar image), comparing the linear-radiance mean across spp
+// levels would catch an energy bias introduced by the convergence heuristic.
+#[test]
+fn test_adaptive_sampling_convergence() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let spp_levels = [50u32, 200u32, 2000u32];
+    let means: Vec<f64> = spp_levels
+        .iter()
+        .map(|&samples_per_pixel| {
+            let render_config = RenderConfig {
+                width: 100,
+                height: 60,
+                samples_per_pixel,
+                ..Default::default()
+            };
+            let scene = create_test_scene(render_config);
+            mean_linear_radiance(scene, device, queue)
+        })
+        .collect();
+
+    let baseline = means[0];
+    for (spp, mean) in spp_levels.iter().zip(means.iter()) {
+        assert!(
+            (mean - baseline).abs() / baseline < 0.05,
+            "mean linear radiance at {} spp ({}) diverges from the {} spp baseline ({}) by more than 5%",
+            spp,
+            mean,
+            spp_levels[0],
+            baseline
+        );
+    }
+}
+
+fn mean_linear_radiance(
+    scene: Scene,
+    device: &'static wgpu::Device,
+    queue: &'static wgpu::Queue,
+) -> f64 {
+    let (output_sender, output_receiver) = channel();
+    let (_, camera_config_receiver) = channel();
+    let (_, abort_receiver) = channel();
+
+    let width = scene.render_config.width as u32;
+    let height = scene.render_config.height as u32;
+
+    thread::spawn(move || {
+        ray_trace(
+            scene,
+            &output_sender,
+            &camera_config_receiver,
+            &abort_receiver,
+            device,
+            queue,
+            false,
+        )
+        .unwrap();
+    });
+
+    let mut output_buffer = None;
+    for render_output in output_receiver {
+        output_buffer = Some(render_output.output_buffer);
+    }
+    let output_buffer = output_buffer.unwrap();
+
+    let size = (width * height * 16) as u64;
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, size);
+    queue.submit(Some(encoder.finish()));
+
+    let result: Vec<[f32; 4]> = get_result_from_buffer(device, &staging_buffer);
+    let sum: f64 = result
+        .iter()
+        .map(|p| (p[0] + p[1] + p[2]) as f64 / 3.0)
+        .sum();
+    sum / result.len() as f64
 }

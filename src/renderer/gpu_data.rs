@@ -274,6 +274,10 @@ pub struct GpuRenderConfig {
     pub light_count: u32,
     /// Samples traced per dispatch, accumulated in-shader
     pub samples_per_batch: u32,
+    /// Minimum samples a pixel must have before adaptive sampling may skip it
+    pub min_samples_per_pixel: u32,
+    /// Relative standard-error threshold below which a pixel is converged
+    pub variance_threshold: f32,
     /// Padding to 48 bytes
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 1],
 }
