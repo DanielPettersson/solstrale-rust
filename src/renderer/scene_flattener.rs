@@ -14,6 +14,7 @@ use crate::renderer::gpu_data::{
 use crate::util::texture_processing::{AtlasLayout, TexturePacker};
 use image::RgbImage;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
 /// Interning caches used while flattening.
@@ -25,9 +26,61 @@ use std::sync::Arc;
 #[derive(Default)]
 struct FlattenCaches {
     /// Byte image of an already-emitted `GpuMaterial` -> its index.
-    material_ids: HashMap<Vec<u8>, u32>,
+    material_ids: HashMap<Vec<u8>, u32, BuildHasherDefault<FxHasher>>,
     /// `Arc::as_ptr` of a decoded texture -> its index in `unique_textures`.
-    texture_ids: HashMap<usize, usize>,
+    texture_ids: HashMap<usize, usize, BuildHasherDefault<FxHasher>>,
+}
+
+/// The multiply-xor hash rustc uses internally, over 64-bit words.
+///
+/// These two maps are probed once per *primitive* -- 348k times for a scene with a
+/// couple of imported meshes -- and the material key is the 96-byte image of a
+/// `GpuMaterial`. SipHash's per-byte work is the wrong trade for interning our own bytes
+/// into a table that never leaves this function, so it is not exposed to anything that
+/// could choose keys adversarially.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let chunks = bytes.as_chunks::<8>();
+        for chunk in chunks.0 {
+            self.add(u64::from_le_bytes(*chunk));
+        }
+        let remainder = chunks.1;
+        if !remainder.is_empty() {
+            let mut buf = [0u8; 8];
+            buf[..remainder.len()].copy_from_slice(remainder);
+            self.add(u64::from_le_bytes(buf));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
 }
 
 /// Container for all scene data flattened for the GPU
@@ -199,6 +252,25 @@ fn emit_bvh(
     caches: &mut FlattenCaches,
 ) {
     data.prim_refs.reserve(bvh.prims.len());
+
+    // The per-type buffers were growing by doubling from zero, which for a 250k-triangle
+    // mesh is ~32 MB of geometry copied about twice over. One pass over the discriminants
+    // is far cheaper than that, and the loop below walks the same memory anyway.
+    let (mut triangles, mut quads, mut spheres) = (0, 0, 0);
+    for prim in &bvh.prims {
+        match prim {
+            Hittables::Triangle(_) => triangles += 1,
+            Hittables::Quad(_) => quads += 1,
+            Hittables::Sphere(_) => spheres += 1,
+            Hittables::Bvh(_) => {}
+        }
+    }
+    data.triangle_pos.reserve(triangles);
+    data.triangle_attr.reserve(triangles);
+    data.quad_pos.reserve(quads);
+    data.quad_attr.reserve(quads);
+    data.spheres.reserve(spheres);
+
     for prim in &bvh.prims {
         let (prim_index, prim_type) =
             add_primitive(prim, data, unique_textures, atlas_layout, caches);
