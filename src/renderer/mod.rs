@@ -2,6 +2,7 @@
 
 use crate::hittable::Hittable;
 use crate::post::PostProcessor;
+use std::collections::VecDeque;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -93,16 +94,185 @@ pub struct RenderProgress {
     pub output_buffer: wgpu::Buffer,
 }
 
-/// Wall clock budget for a single dispatch.
+/// Wall clock budget for the *work* a single dispatch adds.
 ///
 /// A caller that renders interactively hands us the same device and queue its
 /// user interface draws on, so a dispatch that overruns a display frame is a
 /// dropped frame for whoever is waiting behind us. Roughly one vsync interval.
+///
+/// This budgets the sample-proportional part of a dispatch only -- see
+/// [`DispatchCost`] for why the fixed part is deliberately left out of it.
 const TARGET_DISPATCH: Duration = Duration::from_millis(12);
 
 /// Ceiling on the adaptive batch size, so a very cheap scene does not end up
 /// reporting progress once a second.
 const MAX_BATCH: u32 = 64;
+
+/// What a dispatch costs in wall clock time: a fixed per-dispatch term plus a
+/// per-sample one.
+///
+/// Both terms are needed, because the fixed one is not ours. A caller that
+/// renders interactively shares its queue with a vsync-throttled presenter, so
+/// our submission is regularly serialised behind a swapchain acquire and a
+/// dispatch takes a display frame longer than the work in it -- measured at
+/// 1384x784 on a 60 Hz display, one batch of 8 samples costs 22.4 ms against a
+/// marginal cost of 2.5 ms per sample.
+///
+/// Dividing the whole dispatch by its batch size, which is what a single
+/// milliseconds-per-sample figure amounts to, charges that latency to the
+/// samples. Every batch size is then its own fixed point: at a batch of one the
+/// measurement above reads 8.3 ms per sample, [`TARGET_DISPATCH`] divided by
+/// that asks for a batch of one, and a batch of one is what it stays at --
+/// while shrinking the batch is the one thing that cannot make the dispatch
+/// shorter, so nothing ever contradicts the estimate. The render then runs at
+/// a third of the throughput the same machine reaches when the estimate
+/// happens to settle higher instead, which is why the reported speed used to
+/// vary several-fold between runs of the same scene.
+///
+/// Fitting the two terms apart keeps the budget on the work a dispatch adds
+/// rather than on the latency it merely waits through.
+#[derive(Debug)]
+struct DispatchCost {
+    /// Recent `(batch, milliseconds)` observations, oldest first.
+    history: VecDeque<(f64, f64)>,
+    /// Fixed part of a dispatch, in milliseconds.
+    overhead: f64,
+    /// Marginal cost of one sample, in milliseconds. What the batch size is
+    /// tuned against.
+    slope: f64,
+    /// Moving average of a whole dispatch divided by its batch size: what a
+    /// sample costs the caller once the fixed part is shared out over the
+    /// batch. Reported and used for the time estimate, never for tuning.
+    per_sample: Option<f64>,
+}
+
+/// How many observations the fit sees. Long enough to average out a queue that
+/// hands us a display frame on one dispatch and not the next, short enough to
+/// follow a scene whose cost falls as adaptive sampling retires pixels.
+const COST_HISTORY: usize = 16;
+
+/// Spread in batch size, as a variance, below which the two terms cannot be
+/// told apart and the fit is not attempted.
+const MIN_BATCH_VARIANCE: f64 = 0.2;
+
+/// Floor under a per-sample estimate. Only guards the divisions; a slope this
+/// small already asks for [`MAX_BATCH`].
+const MIN_SLOPE: f64 = 1e-3;
+
+impl DispatchCost {
+    fn new() -> Self {
+        DispatchCost {
+            history: VecDeque::with_capacity(COST_HISTORY),
+            overhead: 0.,
+            slope: MIN_SLOPE,
+            per_sample: None,
+        }
+    }
+
+    /// Folds in one completed dispatch.
+    fn record(&mut self, batch: u32, elapsed: Duration) {
+        let batch = batch as f64;
+        let ms = elapsed.as_secs_f64() * 1000.;
+
+        let per_sample = ms / batch;
+        self.per_sample = Some(
+            self.per_sample
+                .map_or(per_sample, |prev| prev * 0.8 + per_sample * 0.2),
+        );
+
+        if self.history.len() == COST_HISTORY {
+            self.history.pop_front();
+        }
+        self.history.push_back((batch, ms));
+
+        if self.history.len() == 1 {
+            // Nothing to fit a line through yet. Start by charging the whole
+            // dispatch to the samples and let the first batch change separate
+            // the terms.
+            self.slope = per_sample.max(MIN_SLOPE);
+            return;
+        }
+
+        self.fit();
+    }
+
+    /// Spread in the batch sizes the window was measured at.
+    fn batch_variance(&self) -> f64 {
+        let n = self.history.len() as f64;
+        let mean = self.history.iter().map(|(b, _)| b).sum::<f64>() / n;
+        self.history
+            .iter()
+            .map(|(b, _)| (b - mean).powi(2))
+            .sum::<f64>()
+            / n
+    }
+
+    /// Least squares over [`Self::history`], falling back to correcting the
+    /// slope alone while the batch size sits still.
+    fn fit(&mut self) {
+        let n = self.history.len() as f64;
+        let mean_batch = self.history.iter().map(|(b, _)| b).sum::<f64>() / n;
+        let mean_ms = self.history.iter().map(|(_, ms)| ms).sum::<f64>() / n;
+        let variance = self.batch_variance();
+
+        if variance < MIN_BATCH_VARIANCE {
+            // One batch size tells us what a dispatch costs there and nothing
+            // about how that splits. Charge the drift to the samples and leave
+            // the fixed part where the last fit put it, so the estimate at
+            // least follows a scene whose cost is moving.
+            let residual = mean_ms - (self.overhead + self.slope * mean_batch);
+            self.slope = (self.slope + residual / mean_batch).max(MIN_SLOPE);
+            return;
+        }
+
+        let covariance = self
+            .history
+            .iter()
+            .map(|(b, ms)| (b - mean_batch) * (ms - mean_ms))
+            .sum::<f64>()
+            / n;
+
+        // A non-positive slope means the dispatch time did not follow the batch
+        // size at all over the window: the whole cost is latency, and the batch
+        // wants to be as large as the caller tolerates.
+        self.slope = (covariance / variance).max(MIN_SLOPE);
+        self.overhead = (mean_ms - self.slope * mean_batch).max(0.);
+    }
+
+    /// Whether the batch size has to be moved before the fit can say anything.
+    ///
+    /// A window measured at a single batch size cannot separate the two terms,
+    /// and the fallback in [`Self::fit`] then charges everything above the
+    /// standing fixed part to the samples -- which reproduces whatever estimate
+    /// pinned the batch size there, right or wrong. Nothing else in the loop
+    /// moves the batch size, so the model has to ask for the measurement it is
+    /// missing.
+    fn needs_probe(&self) -> bool {
+        self.history.len() == COST_HISTORY && self.batch_variance() < MIN_BATCH_VARIANCE
+    }
+
+    /// Batch size whose samples fill [`TARGET_DISPATCH`], given what the
+    /// dispatch before it was.
+    fn target_batch(&self, current: u32) -> u32 {
+        if self.needs_probe() {
+            // Step away from a batch size that has told us all it can, so the
+            // next fit has two of them to compare. Downwards at the ceiling,
+            // where there is no room to step up.
+            return if current >= MAX_BATCH {
+                current / 2
+            } else {
+                current.saturating_mul(2)
+            };
+        }
+        (TARGET_DISPATCH.as_secs_f64() * 1000. / self.slope) as u32
+    }
+
+    /// Milliseconds a sample costs the caller, fixed part included. `None`
+    /// until a dispatch has completed.
+    fn ms_per_sample(&self) -> Option<f64> {
+        self.per_sample
+    }
+}
 
 /// Length of a single wait slice.
 ///
@@ -501,12 +671,16 @@ impl<'a> Renderer<'a> {
         // Number of samples already accumulated into the output buffer.
         let mut completed = 0;
         // Seeded from the configured batch size, then continuously re-tuned to
-        // keep a single dispatch inside TARGET_DISPATCH.
+        // keep the work in a single dispatch inside TARGET_DISPATCH.
         let mut batch_size = self.samples_per_batch.max(1);
-        // Moving average of what one sample costs. Dominated by the scene
-        // rather than by the view, so it deliberately survives camera changes
-        // and only has to re-converge when the view changes character.
-        let mut ms_per_sample: Option<f64> = None;
+        // What a dispatch costs. Dominated by the scene rather than by the
+        // view, so it deliberately survives camera changes and only has to
+        // re-converge when the view changes character.
+        let mut cost = DispatchCost::new();
+        // The first dispatch of a run pays for shader and allocation warm-up
+        // that no later one does, and is left out of the cost model rather
+        // than left to age out of it.
+        let mut first_dispatch = true;
         // A camera config picked up while idling, handled at the top of the
         // next iteration together with any that arrived after it.
         let mut idle_camera_config = None;
@@ -596,20 +770,27 @@ impl<'a> Renderer<'a> {
 
             completed += batch;
 
-            let sample_ms = dispatch_time.as_secs_f64() * 1000. / batch as f64;
-            let ema = ms_per_sample.map_or(sample_ms, |prev| prev * 0.8 + sample_ms * 0.2);
-            ms_per_sample = Some(ema);
+            if first_dispatch {
+                first_dispatch = false;
+            } else {
+                cost.record(batch, dispatch_time);
+                // Grow at most by doubling, so a single anomalously cheap
+                // dispatch cannot blow the batch size up and stall the next
+                // frame.
+                batch_size = cost
+                    .target_batch(batch)
+                    .clamp(1, (batch_size * 2).min(MAX_BATCH));
+            }
 
-            let target = (TARGET_DISPATCH.as_secs_f64() * 1000. / ema.max(1e-3)) as u32;
-            // Grow at most by doubling, so a single anomalously cheap dispatch
-            // cannot blow the batch size up and stall the next frame.
-            batch_size = target.clamp(1, (batch_size * 2).min(MAX_BATCH));
+            let ms_per_sample = cost
+                .ms_per_sample()
+                .unwrap_or_else(|| dispatch_time.as_secs_f64() * 1000. / batch as f64);
 
             output.send(RenderProgress {
                 progress: completed as f64 / samples_per_pixel as f64,
-                fps: Some(1000. / ema),
+                fps: Some(1000. / ms_per_sample.max(MIN_SLOPE)),
                 estimated_time_left: calculate_estimated_time_left(
-                    ema,
+                    ms_per_sample,
                     samples_per_pixel - completed,
                 ),
                 output_buffer: self.output_buffer.clone(),
@@ -704,8 +885,155 @@ fn create_and_upload_buffer<T: bytemuck::Pod>(
 
 #[cfg(test)]
 mod test {
-    use crate::renderer::calculate_estimated_time_left;
+    use crate::renderer::{
+        DispatchCost, MAX_BATCH, TARGET_DISPATCH, calculate_estimated_time_left,
+    };
     use std::time::Duration;
+
+    /// Runs the render loop's batch-size feedback against a cost function,
+    /// returning the batch size used by each dispatch.
+    ///
+    /// `cost_ms` is given the dispatch index as well as the batch size, so a
+    /// test can make the first dispatches cost what warm-up makes them cost.
+    fn settle(cost_ms: impl Fn(u32, usize) -> f64, start_batch: u32) -> Vec<u32> {
+        let mut cost = DispatchCost::new();
+        let mut batch = start_batch;
+        let mut batches = Vec::new();
+
+        for dispatch in 0..400 {
+            batches.push(batch);
+            cost.record(
+                batch,
+                Duration::from_secs_f64(cost_ms(batch, dispatch) / 1000.),
+            );
+            batch = cost
+                .target_batch(batch)
+                .clamp(1, (batch * 2).min(MAX_BATCH));
+        }
+
+        batches
+    }
+
+    /// Mean throughput in samples per millisecond once the feedback has
+    /// settled, which is what the batch size is ultimately chosen for.
+    fn settled_throughput(batches: &[u32], cost_ms: impl Fn(u32, usize) -> f64) -> f64 {
+        let from = batches.len() / 2;
+        let samples: u32 = batches[from..].iter().sum();
+        let ms: f64 = batches[from..]
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| cost_ms(b, from + i))
+            .sum();
+        samples as f64 / ms
+    }
+
+    #[test]
+    fn test_dispatch_cost_separates_the_fixed_term() {
+        // Shaped like the measurement in DispatchCost's documentation: a
+        // dispatch costs a display frame of queue latency plus real work.
+        let batches = settle(|b, _| 16.7 + 2.5 * b as f64, 4);
+
+        let target = TARGET_DISPATCH.as_secs_f64() * 1000. / 2.5;
+        let settled = batches[batches.len() - 1];
+        assert!(
+            (settled as f64 - target).abs() <= 1.,
+            "batch size {} should fill the budget with samples at 2.5 ms each, expected about {}",
+            settled,
+            target
+        );
+    }
+
+    #[test]
+    fn test_dispatch_cost_does_not_collapse_under_queue_latency() {
+        // The measured curve at 1384x784 on a 60 Hz display, where charging the
+        // latency to the samples used to pin the batch size at one and run the
+        // render at a third of the throughput the same machine reaches.
+        let cost_ms = |b: u32, _: usize| 6.0 + 2.5 * b as f64;
+        let peak = 1. / 2.5;
+
+        for start_batch in [1, 2, 4, 16, MAX_BATCH] {
+            let batches = settle(cost_ms, start_batch);
+            let throughput = settled_throughput(&batches, cost_ms);
+
+            assert!(
+                batches[batches.len() - 1] > 1,
+                "batch size collapsed to one from a start of {}",
+                start_batch
+            );
+            assert!(
+                throughput > peak * 0.6,
+                "throughput {:.3} from a start of {} is far below the {:.3} the cost function allows",
+                throughput,
+                start_batch,
+                peak
+            );
+        }
+    }
+
+    #[test]
+    fn test_dispatch_cost_recovers_from_a_warm_up_dispatch() {
+        // The first dispatches of a run pay for shader and allocation warm-up,
+        // and an estimate taken from those alone asks for the smallest batch
+        // there is. Reaching that batch size must not be the end of it: the
+        // dispatch time does not follow the batch size down, and the model has
+        // to keep asking until something says so.
+        let cost_ms = |b: u32, dispatch: usize| {
+            if dispatch < 2 {
+                200.
+            } else {
+                6.0 + 2.5 * b as f64
+            }
+        };
+        let batches = settle(cost_ms, 4);
+        let throughput = settled_throughput(&batches, cost_ms);
+
+        assert!(
+            throughput > (1. / 2.5) * 0.6,
+            "throughput {:.3} never recovered from the warm-up dispatches",
+            throughput
+        );
+    }
+
+    #[test]
+    fn test_dispatch_cost_keeps_expensive_samples_in_small_batches() {
+        // No fixed term worth speaking of and a sample that costs more than the
+        // whole budget: one sample per dispatch is the right answer, and the
+        // occasional probe must not turn into a standing larger batch.
+        let batches = settle(|b, _| 0.2 + 30. * b as f64, 4);
+        let settled = &batches[batches.len() / 2..];
+
+        let ones = settled.iter().filter(|&&b| b == 1).count();
+        assert!(
+            ones * 4 > settled.len() * 3,
+            "only {} of {} dispatches used a batch of one",
+            ones,
+            settled.len()
+        );
+        assert!(
+            settled.iter().all(|&b| b <= 4),
+            "probing ran the batch size up to {}",
+            settled.iter().max().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_dispatch_cost_reports_what_a_sample_costs_the_caller() {
+        let mut cost = DispatchCost::new();
+        assert_eq!(cost.ms_per_sample(), None);
+
+        // The fixed part is the caller's to wait through, so it belongs in the
+        // reported rate even though the batch size is not tuned against it.
+        for _ in 0..100 {
+            cost.record(8, Duration::from_secs_f64((6.0 + 2.5 * 8.) / 1000.));
+        }
+        let per_sample = cost.ms_per_sample().unwrap();
+        assert!(
+            (per_sample - 26. / 8.).abs() < 0.01,
+            "reported {} ms per sample, expected {}",
+            per_sample,
+            26. / 8.
+        );
+    }
 
     #[test]
     fn test_calculate_estimated_time_left() {
