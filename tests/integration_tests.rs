@@ -726,6 +726,14 @@ fn test_adaptive_sampling_convergence() {
 
     let baseline = means[0];
     for (spp, mean) in spp_levels.iter().zip(means.iter()) {
+        // Absolute, not just relative: the assert below only checks that the
+        // mean is flat across spp within one build, which says nothing about
+        // where the whole curve sits. Anything that changes how much energy
+        // reaches the image -- the firefly clamp above all -- moves all three
+        // means together and is invisible to the assert. Printing them is what
+        // makes a before/after comparison across builds possible at all.
+        println!("mean linear radiance at {} spp: {}", spp, mean);
+
         assert!(
             (mean - baseline).abs() / baseline < 0.05,
             "mean linear radiance at {} spp ({}) diverges from the {} spp baseline ({}) by more than 5%",

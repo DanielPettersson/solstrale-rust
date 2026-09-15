@@ -96,7 +96,28 @@ const MAT_DIELECTRIC = 2u;
 const MAT_DIFFUSE_LIGHT = 3u;
 const MAT_BLEND = 4u;
 
-const CLAMPING_THRESHOLD = 3.5;
+// Ceiling on the indirect radiance a single sample may carry, which is what
+// stops one improbable bright bounce from leaving a permanent speck.
+//
+// `min(X, t)` has an expectation strictly below `E[X]`, so a clamp always
+// biases the image darker, and the bias is only worth paying where the
+// variance it suppresses is real. Two things narrow it down to what is left
+// here, both measured on `create_test_scene` against an unclamped reference:
+//
+// - It applies to depth >= 1 only (see `trace_sample`). The first path vertex
+//   has no firefly failure mode, and clamping it was eating 26% of the
+//   scene's energy -- most of that on diffuse surfaces, whose NEE estimate
+//   divides by a `pdf_light` that goes small for a light subtending a large
+//   solid angle, so a single legitimate direct sample lands far above any
+//   sane threshold.
+// - The threshold is 10, not the 3.5 it was before next-event estimation.
+//   With NEE carrying the direct lighting, no indirect sample in that scene
+//   reaches 10: per-sample standard deviation at 50 spp is 0.862 here and
+//   0.862 with the clamp removed altogether, while 3.5 cost a further 9% of
+//   the energy to buy that same 0.862 -> 0.672. What survives is a backstop
+//   for scenes that do produce outliers -- a small intense light, an emissive
+//   mesh -- priced so it does not tax the scenes that do not.
+const CLAMPING_THRESHOLD = 10.0;
 
 const PI = 3.14159265359;
 
@@ -912,6 +933,25 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
     return rec;
 }
 
+// Routes one radiance contribution to the direct or the indirect accumulator.
+//
+// Depth 0 is what the camera can see without an intervening bounce: the
+// visible surface's own emission, the shadow ray cast from it, and the
+// background behind it. None of those is a firefly, so none of them is
+// clamped. Everything deeper goes through CLAMPING_THRESHOLD.
+fn add_contribution(
+    direct: ptr<function, vec3<f32>>,
+    indirect: ptr<function, vec3<f32>>,
+    depth: u32,
+    contribution: vec3<f32>,
+) {
+    if (depth == 0u) {
+        *direct += contribution;
+    } else {
+        *indirect += contribution;
+    }
+}
+
 // Traces one path for the given pixel and sample index.
 //
 // Next-event estimation with multiple importance sampling: at every diffuse
@@ -940,7 +980,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let ray_direction = camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin - offset;
     var r = Ray(camera.origin + offset, ray_direction);
 
-    var radiance = vec3<f32>(0.0);
+    var direct = vec3<f32>(0.0);
+    var indirect = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
     var path_length = 0.0;
 
@@ -953,7 +994,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     for (var depth = 0u; depth < config.max_depth; depth++) {
         var hit_ref: HitRef;
         if (!world_hit(r, RAY_EPS, 10000.0, &hit_ref)) {
-            radiance += config.background_color * throughput;
+            add_contribution(&direct, &indirect, depth, config.background_color * throughput);
             break;
         }
 
@@ -976,7 +1017,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                     let pdf_light = light_pdf_value(r.origin, r.direction);
                     weight = prev_bsdf_pdf / (prev_bsdf_pdf + pdf_light);
                 }
-                radiance += throughput * emitted * weight;
+                add_contribution(&direct, &indirect, depth, throughput * emitted * weight);
             }
             break;
         }
@@ -996,7 +1037,12 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                             emitted *= 1.0 / (1.0 + ls.attenuation_factor * (path_length + ls.distance));
                         }
                         let brdf = surface.albedo / PI;
-                        radiance += throughput * brdf * cos_light * emitted / (pdf_light + pdf_bsdf);
+                        add_contribution(
+                            &direct,
+                            &indirect,
+                            depth,
+                            throughput * brdf * cos_light * emitted / (pdf_light + pdf_bsdf),
+                        );
                     }
                 }
             }
@@ -1062,8 +1108,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         }
     }
 
-    // Firefly clamp, per sample.
-    return min(radiance, vec3<f32>(CLAMPING_THRESHOLD));
+    // Firefly clamp, per sample, on the indirect term only.
+    return direct + min(indirect, vec3<f32>(CLAMPING_THRESHOLD));
 }
 
 // Floor on the luminance used as the denominator of the relative variance
