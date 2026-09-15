@@ -541,7 +541,7 @@ impl<'a> Renderer<'a> {
             samples_per_batch: scene.render_config.samples_per_batch.max(1),
             min_samples_per_pixel: scene.render_config.min_samples_per_pixel,
             variance_threshold: scene.render_config.variance_threshold,
-            _pad: [0; 1],
+            restart_index: 0,
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -703,6 +703,11 @@ impl<'a> Renderer<'a> {
                 // leaves a window in which a caller blitting the buffer sees
                 // black.
                 completed = 0;
+                // Sample indices restart at zero too, so without a fresh
+                // restart_index the RNG would hand every frame of a camera
+                // drag the identical sample sequence.
+                self.render_config.restart_index =
+                    self.render_config.restart_index.wrapping_add(1);
                 // Get an image of the new view out as fast as possible, then
                 // grow back into the budget. Carrying a large batch across the
                 // restart would spend a whole dispatch before showing anything

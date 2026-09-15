@@ -135,9 +135,15 @@ struct RenderConfig {
     min_samples_per_pixel: u32,
     // Relative standard-error threshold below which a pixel is converged.
     variance_threshold: f32,
-    // Scalar pad, not a vec3: a vec3 here would align to 16 and push the
-    // struct to 64 bytes, which no longer matches the Rust mirror.
-    _pad0: u32,
+    // Distinguishes successive accumulation restarts. Dragging the camera
+    // restarts the accumulation every frame, and without this the seed in
+    // trace_sample is a pure function of pixel and sample index, so every
+    // frame replays an identical sample sequence -- which reads as a static
+    // grain pinned to the screen rather than as noise.
+    //
+    // Scalar, not a vec3: a vec3 here would align to 16 and push the struct
+    // to 64 bytes, which no longer matches the Rust mirror.
+    restart_index: u32,
 }
 
 struct LightRef {
@@ -918,7 +924,9 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
 // they skip NEE and the emitter they reach is taken at full weight.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * config.width + pixel.x;
-    var rng_state = pcg_hash(index ^ (sample_index * 0x9E3779B9u));
+    var rng_state = pcg_hash(
+        index ^ (sample_index * 0x9E3779B9u) ^ (config.restart_index * 0x85EBCA6Bu)
+    );
 
     let u = (f32(pixel.x) + rand_float(&rng_state)) / f32(config.width - 1u);
     let v = 1.0 - (f32(pixel.y) + rand_float(&rng_state)) / f32(config.height - 1u);
