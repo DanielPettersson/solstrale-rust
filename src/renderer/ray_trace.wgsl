@@ -95,6 +95,15 @@ const MAT_METAL = 1u;
 const MAT_DIELECTRIC = 2u;
 const MAT_DIFFUSE_LIGHT = 3u;
 const MAT_BLEND = 4u;
+// Not a material. Marks a primary ray that left the scene, so the denoiser can
+// tell "background" from "a surface that happens to be dark".
+const MAT_MISS = 5u;
+
+// Depth recorded for a primary ray that hit nothing. Far enough that the
+// denoiser's relative depth weight reads background as identical to background
+// and as wildly different from any geometry, which preserves the silhouette
+// without needing a validity branch in the filter's inner loop.
+const GUIDE_FAR = 1e7;
 
 // Ceiling on the indirect radiance a single sample may carry, which is what
 // stops one improbable bright bounce from leaving a permanent speck.
@@ -239,6 +248,14 @@ var<storage, read> quad_attr: array<QuadAttr>;
 // `sample_count` once adaptive sampling starts skipping converged pixels.
 @group(0) @binding(14)
 var<storage, read_write> sample_count_buffer: array<u32>;
+
+// Primary-hit albedo, shading normal and camera distance, packed into 16 bytes.
+// Written once per accumulation run and read only by the denoiser, which fetches
+// it 125 times per pixel -- which is why it is packed rather than stored as two
+// plain vec4<f32>. See pack_guide below; the denoise shaders carry a matching
+// oct_decode that must stay in step with oct_encode here.
+@group(0) @binding(15)
+var<storage, read_write> gbuffer: array<vec4<u32>>;
 
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
@@ -512,6 +529,45 @@ fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
 
 // A hit surface with its material fully resolved: blend chosen, albedo and
 // shading normal sampled from textures.
+// What the primary hit looked like, before any light transport. Filled by
+// trace_sample at depth 0 and used only to guide the denoiser's edge-stopping
+// functions -- it is a guide, not a signal, which is what makes the lossy
+// packing below acceptable.
+struct GuideSample {
+    albedo: vec3<f32>,
+    normal: vec3<f32>,
+    // Distance from the camera in world units. Deliberately not rec.t: the
+    // primary ray is never normalised (see TODO.md), so rec.t is in units of
+    // |ray_direction|, which itself grows toward the frame corners and would
+    // bake a smooth false gradient into the guide.
+    depth: f32,
+    mat_type: u32,
+}
+
+// Octahedral normal encoding. Two floats instead of three, with ~0.01 degrees of
+// error at 16-bit -- far below anything an edge-stop with exponent 128 resolves.
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
+    if (n.z <= 0.0) {
+        let s = vec2<f32>(select(-1.0, 1.0, p.x >= 0.0), select(-1.0, 1.0, p.y >= 0.0));
+        return (1.0 - abs(vec2<f32>(p.y, p.x))) * s;
+    }
+    return p;
+}
+
+// 16 bytes per pixel. The depth goes through bitcast rather than into an f32
+// slot alongside packed bits, because a packed bit pattern can land on a NaN
+// encoding and some drivers canonicalise NaN payloads across a store/load.
+// pack4x8unorm clamps, so an albedo above 1 degrades the guide but never the image.
+fn pack_guide(g: GuideSample) -> vec4<u32> {
+    return vec4<u32>(
+        pack4x8unorm(vec4<f32>(g.albedo, 0.0)),
+        pack2x16float(oct_encode(g.normal)),
+        bitcast<u32>(g.depth),
+        g.mat_type,
+    );
+}
+
 struct Surface {
     albedo: vec3<f32>,
     normal: vec3<f32>,
@@ -962,7 +1018,16 @@ fn add_contribution(
 //
 // Specular bounces (metal, dielectric) have no light-sampling counterpart, so
 // they skip NEE and the emitter they reach is taken at full weight.
-fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
+//
+// `guide` is an out-parameter describing the primary hit, for the denoiser. It
+// is filled unconditionally at depth 0 and costs no extra rand_float draws --
+// resolve_surface is already called there -- so adding it leaves the sample
+// stream, and every golden image, untouched.
+fn trace_sample(
+    pixel: vec2<u32>,
+    sample_index: u32,
+    guide: ptr<function, GuideSample>,
+) -> vec3<f32> {
     let index = pixel.y * config.width + pixel.x;
     var rng_state = pcg_hash(
         index ^ (sample_index * 0x9E3779B9u) ^ (config.restart_index * 0x85EBCA6Bu)
@@ -994,6 +1059,14 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     for (var depth = 0u; depth < config.max_depth; depth++) {
         var hit_ref: HitRef;
         if (!world_hit(r, RAY_EPS, 10000.0, &hit_ref)) {
+            if (depth == 0u) {
+                (*guide).albedo = config.background_color;
+                // Face the camera, so background filters against background at
+                // full normal weight.
+                (*guide).normal = -normalize(r.direction);
+                (*guide).depth = GUIDE_FAR;
+                (*guide).mat_type = MAT_MISS;
+            }
             add_contribution(&direct, &indirect, depth, config.background_color * throughput);
             break;
         }
@@ -1001,6 +1074,15 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         let rec = resolve_hit(r, hit_ref);
         let surface = resolve_surface(rec, &rng_state);
         path_length += rec.t;
+
+        if (depth == 0u) {
+            (*guide).albedo = surface.albedo;
+            // The normal-mapped shading normal, so bump detail reaches the
+            // edge stop rather than just the geometric silhouette.
+            (*guide).normal = surface.normal;
+            (*guide).depth = length(rec.p - camera.origin);
+            (*guide).mat_type = surface.mat_type;
+        }
 
         if (surface.mat_type == MAT_DIFFUSE_LIGHT) {
             if (rec.front_face) {
@@ -1183,9 +1265,24 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var batch_sum = vec3<f32>(0.0);
     var batch_mean = 0.0;
     var batch_m2 = 0.0;
+    var guide: GuideSample;
     for (var s = 0u; s < batch; s++) {
-        let sample = trace_sample(pixel, config.sample_count + s);
+        let sample = trace_sample(pixel, config.sample_count + s, &guide);
         batch_sum += sample;
+
+        // One write per accumulation run. A restart is the write condition, so
+        // the guide can never go stale: a camera change rewrites it in the same
+        // dispatch that resets the accumulator. And on a restart dispatch the
+        // adaptive early-out above cannot have fired for any pixel -- n0 is
+        // forced to zero -- so every pixel reaches this line exactly once.
+        //
+        // Not averaged over the batch on purpose: an albedo averaged across a
+        // silhouette is a colour on neither surface, and an averaged normal at
+        // a corner points into the corner, weakening the edge stop exactly
+        // where it does the most work.
+        if (restart && s == 0u) {
+            gbuffer[index] = pack_guide(guide);
+        }
 
         let l = luminance(sample);
         let delta = l - batch_mean;

@@ -1,7 +1,7 @@
 //! Post-processor for applying bloom effect
 
 use crate::geo::vec3::Vec3;
-use crate::post::PostProcessor;
+use crate::post::{PostProcessContext, PostProcessor};
 use crate::util::gaussian::create_gaussian_blur_weights;
 use crate::util::wgpu_util::{bind_group, bind_group_layout, compute_pipeline, storage_binding};
 use std::error::Error;
@@ -184,12 +184,10 @@ impl PostProcessor for BloomPostProcessor {
     }
 
     #[allow(clippy::needless_range_loop)]
-    fn post_process(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        buffer: &wgpu::Buffer,
-        device: &wgpu::Device,
-    ) -> Result<(), Box<dyn Error>> {
+    fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>> {
+        let device = ctx.device;
+        let buffer = ctx.buffer;
+
         let intermediate_buffer1 = self
             .intermediate_buffer1
             .as_ref()
@@ -218,25 +216,25 @@ impl PostProcessor for BloomPostProcessor {
         let workgroup_count = (self.width * self.height).div_ceil(64);
 
         crate::util::wgpu_util::add_compute_pass(
-            encoder,
+            ctx.encoder,
             self.filter_bright_pipeline.as_ref().unwrap(),
             &filter_bright_bind_group,
             workgroup_count,
         );
         crate::util::wgpu_util::add_compute_pass(
-            encoder,
+            ctx.encoder,
             self.apply_pipeline_x.as_ref().unwrap(),
             apply_bind_group_x,
             workgroup_count,
         );
         crate::util::wgpu_util::add_compute_pass(
-            encoder,
+            ctx.encoder,
             self.apply_pipeline_y.as_ref().unwrap(),
             apply_bind_group_y,
             workgroup_count,
         );
         crate::util::wgpu_util::add_compute_pass(
-            encoder,
+            ctx.encoder,
             &self.add_pipeline,
             &add_bind_group,
             workgroup_count,

@@ -27,6 +27,10 @@ A WGPU-based GPU Monte Carlo path tracing library, with features like:
 Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
 * Bloom filter
 * Saturation filter
+* Denoiser: an edge-avoiding a-trous wavelet filter guided by the per-pixel
+  variance the sample loop already tracks, which cuts error against a converged
+  reference by about a third at 8 samples per pixel and leaves an already
+  converged image essentially untouched
 
 ## Requirements
 A GPU adapter supporting compute shaders and at least 12 storage buffers per
@@ -103,10 +107,26 @@ fn main() {
 | `samples_per_batch` | 4 | Samples traced per GPU dispatch |
 | `post_processors` | none | Filters applied to the final image |
 
+Order matters in `post_processors`: put the denoiser first. Denoising a bloomed
+image blurs the bloom, while bloom applied to a denoised image is what you want.
+
 `samples_per_batch` trades reporting granularity for throughput: larger batches
 amortise dispatch overhead and collapse the per-sample read-modify-write of the
 accumulation buffer, but render progress is reported less often and camera
 changes take longer to take effect.
+
+## Upgrading to 0.4
+`PostProcessor::post_process` now takes a single `PostProcessContext` instead of
+an encoder, buffer and device. The context also carries the accumulation buffer,
+the per-pixel sample counts and the primary-hit guide buffer, which is what a
+denoiser needs and what the old signature could not express. `PostProcessors`
+gained a `DenoisePostProcessor` variant and is now `#[non_exhaustive]`, so future
+post-processors are not themselves breaking changes.
+
+The post-processing chain now runs on a copy of the accumulation buffer rather
+than in place, so `RenderProgress::output_buffer` is that copy whenever any
+post-processor is configured. It remains a stable handle for the life of a
+render.
 
 ## Upgrading to 0.3
 `RenderConfig` gained `max_depth` and `samples_per_batch`, so code constructing it

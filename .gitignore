@@ -18,6 +18,7 @@ Cargo.lock
 
 
 **/out_actual*.jpg
+**/out_actual*.png
 /out.jpg
 /perf.data
 lcov.info
