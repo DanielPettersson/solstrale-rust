@@ -46,6 +46,12 @@ pub struct RenderConfig {
     pub samples_per_batch: u32,
     /// Minimum samples a pixel must accumulate before adaptive sampling can
     /// consider it converged and stop sampling it further.
+    ///
+    /// Skipping is effectively permanent -- a pixel that stops sampling can no
+    /// longer revise the variance estimate that silenced it -- so this wants to
+    /// be high enough that the estimate is trustworthy. Path-traced luminance
+    /// is heavy-tailed, and a couple of dozen samples is not much to judge it
+    /// on. Set above `samples_per_pixel` to disable adaptive sampling.
     pub min_samples_per_pixel: u32,
     /// Relative standard-error threshold below which a pixel is considered
     /// converged and skipped by adaptive sampling. Lower is stricter: less
@@ -63,7 +69,7 @@ impl Default for RenderConfig {
             samples_per_pixel: 50,
             max_depth: 10,
             samples_per_batch: 4,
-            min_samples_per_pixel: 16,
+            min_samples_per_pixel: 32,
             variance_threshold: 0.05,
             post_processors: vec![],
         }
