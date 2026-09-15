@@ -7,13 +7,14 @@ re-litigated later.
 Already done and not repeated here: the 24-item performance sweep (BVH2 node
 layout, binned SAH build, hot/cold primitive split, deferred shading, 2-D tiled
 dispatch, sample batching, Russian roulette, closed-form sampling), next-event
-estimation with MIS, and per-pixel adaptive sampling.
+estimation with MIS, per-pixel adaptive sampling, and narrowing the firefly
+clamp to indirect light only.
 
 ---
 
 ## Recommended next
 
-### 1. A depth cutoff for NEE
+### A depth cutoff for NEE
 
 NEE costs 1.89x per sample and pays for itself 2–4x on scenes lit by discrete
 lights — but it is a **net ~13% loss** on scenes that are effectively ambient-lit
@@ -23,21 +24,6 @@ lights — but it is a **net ~13% loss** on scenes that are effectively ambient-
 Direct lighting matters most at the first bounce. Skipping NEE past depth 1–2
 would cut shadow-ray count sharply for a small variance increase, and would make
 the ambient-lit case a win rather than a loss. Worth a knob and a measurement.
-
-### 2. Revisit the firefly clamp
-
-`CLAMPING_THRESHOLD = 3.5` at `ray_trace.wgsl:99` is applied per sample, and
-`min(X, 3.5)` has expectation strictly below `E[X]` — so it biases the image
-darker. Measured on `create_test_scene` at 3000 spp:
-
-| | clamp 3.5 | clamp raised |
-|---|---|---|
-| Pre-NEE | 155.81 | 161.55 |
-| NEE + MIS | 159.16 | 161.61 |
-
-It was eating ~3.5% of the scene's energy before NEE and eats ~1.5% now. Raising
-it (or exposing it on `RenderConfig`) is cheap, but it changes every image, so it
-is a deliberate quality call rather than a free win.
 
 ---
 
@@ -65,8 +51,9 @@ power-weighted selection, and a light BVH for the PDF sum.
 ### Denoiser
 
 OIDN was removed in the `wgpu-render` merge and nothing replaced it. There is no
-tone mapping either — just the hard clamp above plus `sqrt` gamma applied on the
-CPU during readback (`util/wgpu_util.rs`).
+tone mapping either — just `sqrt` gamma applied on the CPU during readback
+(`util/wgpu_util.rs`), which is now the binding constraint on highlights: see
+the display-clip note under *Known limitations*.
 
 ### Instancing (BLAS/TLAS)
 
@@ -171,6 +158,26 @@ Recorded so they aren't reconsidered without new information.
 
 Correct but imperfect; documented so they read as choices rather than bugs.
 
+- **Readback clips linear radiance at 1.0.** `buffer_to_image`
+  (`util/wgpu_util.rs`) does `sqrt(L).min(0.999)`, so everything above 1.0 is
+  white regardless of how much brighter it really is. With the firefly clamp
+  now at 10 and indirect-only, this — not the clamp — is what decides what a
+  highlight looks like, and it is the reason a tone mapper would be the next
+  thing to change the image rather than another clamp tweak.
+- **Light seen through glass is still clamped.** A dielectric bounce puts the
+  emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
+  vertex so far was specular" instead of `depth == 0` would exempt it, but it
+  would equally exempt fuzzy-metal paths onto small lights, which are genuine
+  fireflies. At a threshold of 10 the clamp barely fires on either, so this
+  buys close to nothing today; revisit only alongside a scene built to show
+  caustics.
+- **Adaptive sampling got slower at high spp, and should have.** Unclamping
+  direct light raises the per-sample variance the Welford estimator sees, so
+  fewer pixels are declared converged: `adaptive_sampling/adaptive` (2000 spp)
+  went 1.106 s -> 1.293 s. Raw tracing cost is unchanged —
+  `adaptive_sampling/forced_off` and `render` (800x600, 64 spp) both moved
+  within noise — so this is the skip heuristic no longer being fed an
+  artificially quiet signal, not the shader doing more work per sample.
 - **Dielectrics block NEE shadow rays.** Light through glass is found only by
   BSDF-sampled paths, at full MIS weight. Unbiased, but caustics stay noisy —
   the standard trade-off of naive NEE.
@@ -195,7 +202,12 @@ Correct but imperfect; documented so they read as choices rather than bugs.
 - **Golden images are lenient.** They downscale to 100x50 and compare RMS
   similarity at 0.9–0.95, which tolerates large quality changes. Any future
   integrator change needs a convergence check (render at 50/200/2000 spp and
-  confirm the mean is flat), not just a green test run. Note that output passes
+  confirm the mean is flat), not just a green test run —
+  `test_adaptive_sampling_convergence` is that check, and it now prints the
+  absolute means, so `cargo test test_adaptive_sampling_convergence --
+  --nocapture` before and after is what tells you whether energy moved. Its
+  assert only checks flatness *within* one build, and is blind to a change
+  that shifts all three means together. Note that output passes
   through `sqrt` gamma, which is concave — so a *noisier* image has a lower mean
   at identical linear radiance, and mean brightness must be compared at matched
   convergence.
