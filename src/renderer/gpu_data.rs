@@ -278,6 +278,7 @@ pub struct GpuRenderConfig {
     pub min_samples_per_pixel: u32,
     /// Relative standard-error threshold below which a pixel is converged
     pub variance_threshold: f32,
-    /// Padding to 48 bytes
-    pub _pad: [u32; 1],
+    /// Distinguishes successive accumulation restarts, mixed into the RNG
+    /// seed. Occupies what was padding, so the 48-byte layout is unchanged.
+    pub restart_index: u32,
 }
