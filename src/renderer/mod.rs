@@ -1313,14 +1313,14 @@ mod test {
             f16_to_f32((centre[1] >> 16) as u16),
         ]);
         assert!(
-            normal[2] > 0.99,
+            normal[0].abs() < 0.001 && normal[1].abs() < 0.001 && normal[2] > 0.999,
             "centre normal should point back at the camera, was {:?}",
             normal
         );
 
         let depth = f32::from_bits(centre[2]);
         assert!(
-            (depth - 3.5).abs() < 0.05,
+            (depth - 3.5).abs() < 0.001,
             "centre depth should be the 3.5 unit camera distance, was {}",
             depth
         );
@@ -1446,20 +1446,19 @@ mod test {
             f16_to_f32((centre[1] & 0xffff) as u16),
             f16_to_f32((centre[1] >> 16) as u16),
         ]);
-        // Not exactly -1: `trace_guide` maps pixels to the frame with the same
-        // `/ (width - 1)` divisor as `trace_sample`, which puts the centre
-        // pixel's ray half a pixel off-axis (see TODO.md). Over an 11.5 unit
-        // folded path that lands 0.05 off the pole of a 0.5 radius sphere, so
-        // the normal tips by about 0.1 in x and y.
+        // The centre pixel of an odd-sized frame maps to exactly 0.5 in both
+        // axes, so the guide ray is on-axis and hits the pole dead on. What is
+        // left is one ULP of the f16 octahedral encoding (1/2048), not a
+        // geometric error.
         assert!(
-            normal[2] < -0.98,
+            normal[0].abs() < 0.001 && normal[1].abs() < 0.001 && normal[2] < -0.999,
             "centre normal should be the sphere's, facing back at the mirror, was {:?}",
             normal
         );
 
         let depth = f32::from_bits(centre[2]);
         assert!(
-            (depth - 11.5).abs() < 0.05,
+            (depth - 11.5).abs() < 0.001,
             "centre depth should be the whole 11.5 unit folded path, was {}",
             depth
         );

@@ -8,7 +8,10 @@ Already done and not repeated here: the 24-item performance sweep (BVH2 node
 layout, binned SAH build, hot/cold primitive split, deferred shading, 2-D tiled
 dispatch, sample batching, Russian roulette, closed-form sampling), next-event
 estimation with MIS, per-pixel adaptive sampling, and narrowing the firefly
-clamp to indirect light only.
+clamp to indirect light only. Also the half-pixel pixel-to-frame mapping, whose
+`/ (width - 1)` divisor is now `/ width` -- the golden images turned out to be
+insensitive to it (they downscale to 100x50 first), and both G-buffer tests now
+assert the centre ray analytically, to 0.001 rather than 0.05.
 
 ---
 
@@ -110,18 +113,6 @@ Only observable through the light-attenuation falloff, which is the one feature
 that depends on absolute path length. Pre-existing; left alone deliberately
 because fixing it shifts the `light_attenuation_*` images again.
 
-### The pixel-to-frame mapping is off by half a pixel
-
-`trace_sample` and `trace_guide` both map a pixel to the frame with
-`(f32(pixel.x) + 0.5) / f32(config.width - 1u)`. The `- 1` makes `u` run over
-`[0.5/(w-1), (w-0.5)/(w-1)]` rather than `[0, 1]`, so the image is scaled by
-`w/(w-1)` and shifted half a pixel: the centre pixel's ray is not the centre
-ray. Visible in `test_gbuffer_follows_specular_chain`, where the reflected
-normal comes out 0.1 off the pole it should hit exactly.
-
-Harmless at any real resolution and a one-character fix, but it shifts every
-golden image, so it wants doing on its own.
-
 ### Spheres cannot be transformed
 
 `Sphere::new` (`hittable/sphere.rs:17`) takes no `Transformer`, unlike `Triangle`
@@ -161,6 +152,15 @@ replaces a dependency that currently just works.
 
 ## Tooling and API
 
+### No interactive viewer
+
+No binary, no `src/bin/`, no `examples/`. `cargo run` does nothing — the only
+entry points are the test suite and the benchmark. For a project whose stated
+goal is learning path tracing and WGPU, being able to fly a camera around a scene
+is worth a lot, and it surfaces behaviour that batch benchmarks do not.
+
+The plumbing is already there and unused: the camera-update receiver, the abort
+channel and `idle_after_rendering` all exist to support an interactive viewer
 that nothing drives.
 
 ### `profile.sh` is broken
