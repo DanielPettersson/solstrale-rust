@@ -867,6 +867,77 @@ fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     (sum / (a.len() * 3) as f64).sqrt()
 }
 
+/// Every post-processor has to survive an image larger than a flat 1-D dispatch
+/// can address.
+///
+/// A `workgroup_size(64)` pass dispatched as `(width * height) / 64` workgroups
+/// crosses `max_compute_workgroups_per_dimension` -- 65535 on a Radeon RX 5700
+/// XT, so 4194240 pixels -- and fails wgpu validation outright, which surfaces
+/// as a panic from the default uncaptured-error handler rather than as a
+/// `Result`. Bloom and saturation were both built that way, and both broke below
+/// 4K, on the same limit the tracer's dispatch was converted to a 2-D grid for.
+///
+/// 2732x1536 is the smallest 16:9 size past the ceiling, and is deliberately
+/// only just past it: the point is the dispatch shape, not the resolution, and
+/// the whole chain holds seven full-frame buffers at 16 bytes a pixel. One
+/// sample per pixel, since nothing here looks at the image.
+#[test]
+fn test_post_processors_above_the_1d_dispatch_limit() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let (width, height) = (2732usize, 1536usize);
+    assert!(
+        width * height > device.limits().max_compute_workgroups_per_dimension as usize * 64,
+        "test resolution no longer exceeds the 1-D dispatch ceiling on this adapter"
+    );
+
+    let render_config = RenderConfig {
+        width,
+        height,
+        samples_per_pixel: 1,
+        post_processors: vec![
+            DenoisePostProcessor::new(1., Some(1), None, device)
+                .unwrap()
+                .into(),
+            SaturationPostProcessor::new(-0.5, device).unwrap().into(),
+            BloomPostProcessor::new(0.002, None, Some(3.0), device)
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+
+    let (output_sender, output_receiver) = channel();
+    let (_c, camera_config_receiver) = channel();
+    let (_a, abort_receiver) = channel();
+    ray_trace(
+        create_test_scene(render_config),
+        &output_sender,
+        &camera_config_receiver,
+        &abort_receiver,
+        device,
+        queue,
+        false,
+    )
+    .unwrap();
+    drop(output_sender);
+
+    let output_buffer = output_receiver
+        .into_iter()
+        .last()
+        .expect("no render progress reported")
+        .output_buffer;
+
+    // Force the queue to drain, so a validation error in any recorded pass has
+    // been raised by the time the test returns.
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+
+    assert_eq!(
+        output_buffer.size(),
+        (width * height * 16) as u64,
+        "post buffer is not the full image"
+    );
+}
+
 /// Regression net for the denoise chain end to end, and for the documented
 /// ordering: the denoiser runs first so bloom lands on a clean image rather than
 /// being blurred by it.
