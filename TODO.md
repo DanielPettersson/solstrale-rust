@@ -99,14 +99,13 @@ Two things left:
   where the Narkowicz ACES fit assumes an sRGB transfer. The difference is
   small (sRGB is ~2.2 with a linear toe) but it is a second display-transform
   decision left unmade, and it would shift the goldens again.
-- **The desktop app's viewport is not tone mapped.** `solstrale-desktop-rust`
-  has three display paths: `save_image.rs` and `bin/solstrale-batch-render.rs`
-  go through `buffer_to_image` and so get ACES, but the live viewport has its
-  own blit shader (`render_output.rs`, `SHADER`) that returns the linear value
-  straight to an sRGB surface. So the app's preview now clips at 1.0 while its
-  saved file rolls off. Fixing it means porting the curve into that shader --
-  or having `ToneMapper` emit its WGSL so there is one definition rather than
-  two that can drift.
+- **The desktop app's transfer function still differs.** Done: `ToneMapper::wgsl`
+  emits the curve as WGSL, and `solstrale-desktop-rust` splices it into its blit
+  shader, so all three of its display paths share one definition of the tone
+  curve. What is still two things is the *transfer* function -- the viewport
+  applies none and relies on an sRGB surface, `buffer_to_image` encodes with
+  gamma 2.0 -- which is the same gap as the item above, seen from the other
+  side. Fixing that one fixes both.
 
 ### Instancing (BLAS/TLAS)
 
