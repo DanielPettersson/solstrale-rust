@@ -249,11 +249,12 @@ var<storage, read> quad_attr: array<QuadAttr>;
 @group(0) @binding(14)
 var<storage, read_write> sample_count_buffer: array<u32>;
 
-// Primary-hit albedo, shading normal and camera distance, packed into 16 bytes.
-// Written once per accumulation run and read only by the denoiser, which fetches
-// it 125 times per pixel -- which is why it is packed rather than stored as two
-// plain vec4<f32>. See pack_guide below; the denoise shaders carry a matching
-// oct_decode that must stay in step with oct_encode here.
+// Albedo, shading normal and camera distance of the first surface along the
+// view ray that is not a mirror or a lens, packed into 16 bytes. Written once
+// per accumulation run by trace_guide and read only by the denoiser, which
+// fetches it 125 times per pixel -- which is why it is packed rather than
+// stored as two plain vec4<f32>. See pack_guide below; the denoise shaders
+// carry a matching oct_decode that must stay in step with oct_encode here.
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
 
@@ -527,21 +528,26 @@ fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
     return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
 }
 
-// A hit surface with its material fully resolved: blend chosen, albedo and
-// shading normal sampled from textures.
-// What the primary hit looked like, before any light transport. Filled by
-// trace_sample at depth 0 and used only to guide the denoiser's edge-stopping
-// functions -- it is a guide, not a signal, which is what makes the lossy
-// packing below acceptable.
+// What the pixel is looking at, before any light transport: the first surface
+// along the view ray that is not a mirror or a lens. Filled by trace_guide and
+// used only to guide the denoiser's edge-stopping functions -- it is a guide,
+// not a signal, which is what makes the lossy packing below acceptable.
 struct GuideSample {
+    // The surface's own albedo, tinted by whatever specular surfaces the guide
+    // ray passed through to reach it, so it describes the colour this pixel
+    // should end up rather than the colour of a surface it only sees in a
+    // mirror.
     albedo: vec3<f32>,
     normal: vec3<f32>,
-    // Distance from the camera in world units. Deliberately not rec.t: the
-    // primary ray is never normalised (see TODO.md), so rec.t is in units of
-    // |ray_direction|, which itself grows toward the frame corners and would
-    // bake a smooth false gradient into the guide.
+    // Path length from the camera in world units, summed over the whole guide
+    // chain. The guide ray is normalised from the start, unlike the primary
+    // ray in trace_sample (see TODO.md), so every segment is in the same units.
     depth: f32,
     mat_type: u32,
+    // How many specular bounces the guide ray took to get here. Lets the filter
+    // tell a wall seen in a mirror from the same wall seen directly, which the
+    // other three channels can agree on by coincidence.
+    specular_depth: u32,
 }
 
 // Octahedral normal encoding. Two floats instead of three, with ~0.01 degrees of
@@ -559,15 +565,20 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
 // slot alongside packed bits, because a packed bit pattern can land on a NaN
 // encoding and some drivers canonicalise NaN payloads across a store/load.
 // pack4x8unorm clamps, so an albedo above 1 degrades the guide but never the image.
+//
+// The material type needs three bits of the last slot, so the specular depth
+// rides in the byte above it. denoise_atrous.wgsl unpacks both.
 fn pack_guide(g: GuideSample) -> vec4<u32> {
     return vec4<u32>(
         pack4x8unorm(vec4<f32>(g.albedo, 0.0)),
         pack2x16float(oct_encode(g.normal)),
         bitcast<u32>(g.depth),
-        g.mat_type,
+        (g.mat_type & 0xFFu) | (g.specular_depth << 8u),
     );
 }
 
+// A hit surface with its material fully resolved: blend chosen, albedo and
+// shading normal sampled from textures.
 struct Surface {
     albedo: vec3<f32>,
     normal: vec3<f32>,
@@ -593,6 +604,36 @@ fn resolve_surface(rec: HitRecord, state: ptr<function, u32>) -> Surface {
         }
     }
 
+    return surface_at(mat_idx, rec);
+}
+
+// The blend walk above, resolved deterministically: the branch the coin flip
+// would take more often than not. Used only by trace_guide, where a stochastic
+// choice would make neighbouring pixels disagree about what surface they are
+// looking at, which is the one thing an edge stop cannot survive.
+//
+// Deliberately not shared with resolve_surface: that walk draws one rand_float
+// per nesting level, and the sample stream has to stay bit-identical.
+fn resolve_material_index_dominant(start: u32) -> u32 {
+    var mat_idx = start;
+    for (var i = 0u; i < 10u; i++) {
+        let material = materials[mat_idx];
+        if (material.mat_type == MAT_BLEND) {
+            if (material.blend_factor < 0.5) {
+                mat_idx = material.blend_indices.x;
+            } else {
+                mat_idx = material.blend_indices.y;
+            }
+        } else {
+            break;
+        }
+    }
+    return mat_idx;
+}
+
+// Everything after the blend is chosen: albedo and shading normal sampled from
+// their textures. Shared by the stochastic and deterministic walks above.
+fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     let material = materials[mat_idx];
 
     var surface: Surface;
@@ -1008,6 +1049,113 @@ fn add_contribution(
     }
 }
 
+// Ceiling on specular bounces the guide ray will follow. A guide chain longer
+// than this is describing a hall of mirrors the eye cannot follow either, and
+// every extra bounce is another ray per pixel.
+const GUIDE_MAX_SPECULAR = 6u;
+
+// Traces the denoiser's guide ray: what does this pixel actually look at?
+//
+// Not the primary hit. On a mirror or a glass surface the primary hit describes
+// the surface rather than the image in or through it, so every tap across the
+// mirror looks like the same surface to the edge stop and the reflection is
+// smeared sideways along it. Following the specular chain to the first surface
+// that scatters is what gives the filter something to hold on to.
+//
+// Deliberately separate from trace_sample rather than gathered from one of its
+// samples. A sampled chain is stochastic -- the dielectric Fresnel coin flip,
+// metal fuzz -- so two neighbouring pixels on a glass sphere would record
+// unrelated guides, the edge stop would reject nearly every tap, and the filter
+// would stop working there instead of over-blurring. Everything below is
+// deterministic and shared with its neighbours: the pixel centre rather than a
+// jittered position, no lens offset, no fuzz, and the dominant Fresnel branch
+// rather than a coin flip.
+//
+// Costs one ray per pixel, and only on a restart dispatch, against
+// samples_per_pixel rays for the render itself.
+fn trace_guide(pixel: vec2<u32>) -> GuideSample {
+    var out: GuideSample;
+    out.specular_depth = 0u;
+
+    let u = (f32(pixel.x) + 0.5) / f32(config.width - 1u);
+    let v = 1.0 - (f32(pixel.y) + 0.5) / f32(config.height - 1u);
+    // Normalised, unlike the primary ray in trace_sample, so rec.t is in world
+    // units at every segment and the lengths below can simply be summed.
+    var r = Ray(
+        camera.origin,
+        normalize(camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin),
+    );
+
+    // What the specular chain has done to the colour on the way, so the guide
+    // albedo describes the pixel rather than a surface it only sees reflected.
+    var tint = vec3<f32>(1.0);
+    var distance = 0.0;
+
+    for (var bounce = 0u; bounce <= GUIDE_MAX_SPECULAR; bounce++) {
+        var hit_ref: HitRef;
+        if (!world_hit(r, RAY_EPS, 10000.0, &hit_ref)) {
+            out.albedo = config.background_color * tint;
+            // Face the camera, so background filters against background at
+            // full normal weight.
+            out.normal = -r.direction;
+            out.depth = GUIDE_FAR;
+            out.mat_type = MAT_MISS;
+            return out;
+        }
+
+        let rec = resolve_hit(r, hit_ref);
+        let surface = surface_at(resolve_material_index_dominant(rec.material_index), rec);
+        distance += rec.t;
+
+        let specular = surface.mat_type == MAT_METAL || surface.mat_type == MAT_DIELECTRIC;
+        if (!specular || bounce == GUIDE_MAX_SPECULAR) {
+            // The first surface that scatters -- or, once the budget is spent,
+            // whatever specular surface the chain stalled on, which is the old
+            // primary-hit guide generalised.
+            out.albedo = surface.albedo * tint;
+            // The normal-mapped shading normal, so bump detail reaches the
+            // edge stop rather than just the geometric silhouette.
+            out.normal = surface.normal;
+            out.depth = distance;
+            out.mat_type = surface.mat_type;
+            return out;
+        }
+
+        let unit_direction = normalize(r.direction);
+        var direction: vec3<f32>;
+        if (surface.mat_type == MAT_METAL) {
+            // Fuzz ignored: it is what makes a sampled chain diverge between
+            // neighbours, and the mirror direction is the mean it scatters
+            // around anyway.
+            direction = reflect(unit_direction, surface.normal);
+            tint *= surface.albedo;
+        } else {
+            var refraction_ratio = surface.refraction_index;
+            if (rec.front_face) {
+                refraction_ratio = 1.0 / surface.refraction_index;
+            }
+            let cos_theta = min(dot(-unit_direction, surface.normal), 1.0);
+            let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+            // The branch the coin flip in trace_sample would take more often
+            // than not: refraction everywhere but total internal reflection and
+            // the grazing rim.
+            if (refraction_ratio * sin_theta > 1.0
+                || reflectance(cos_theta, refraction_ratio) > 0.5) {
+                direction = reflect(unit_direction, surface.normal);
+            } else {
+                direction = refract(unit_direction, surface.normal, refraction_ratio);
+            }
+        }
+
+        out.specular_depth += 1u;
+        r = Ray(rec.p, normalize(direction));
+    }
+
+    // Unreachable: the loop returns at bounce == GUIDE_MAX_SPECULAR at the
+    // latest. WGSL needs the function to end in a return all the same.
+    return out;
+}
+
 // Traces one path for the given pixel and sample index.
 //
 // Next-event estimation with multiple importance sampling: at every diffuse
@@ -1018,16 +1166,7 @@ fn add_contribution(
 //
 // Specular bounces (metal, dielectric) have no light-sampling counterpart, so
 // they skip NEE and the emitter they reach is taken at full weight.
-//
-// `guide` is an out-parameter describing the primary hit, for the denoiser. It
-// is filled unconditionally at depth 0 and costs no extra rand_float draws --
-// resolve_surface is already called there -- so adding it leaves the sample
-// stream, and every golden image, untouched.
-fn trace_sample(
-    pixel: vec2<u32>,
-    sample_index: u32,
-    guide: ptr<function, GuideSample>,
-) -> vec3<f32> {
+fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * config.width + pixel.x;
     var rng_state = pcg_hash(
         index ^ (sample_index * 0x9E3779B9u) ^ (config.restart_index * 0x85EBCA6Bu)
@@ -1059,14 +1198,6 @@ fn trace_sample(
     for (var depth = 0u; depth < config.max_depth; depth++) {
         var hit_ref: HitRef;
         if (!world_hit(r, RAY_EPS, 10000.0, &hit_ref)) {
-            if (depth == 0u) {
-                (*guide).albedo = config.background_color;
-                // Face the camera, so background filters against background at
-                // full normal weight.
-                (*guide).normal = -normalize(r.direction);
-                (*guide).depth = GUIDE_FAR;
-                (*guide).mat_type = MAT_MISS;
-            }
             add_contribution(&direct, &indirect, depth, config.background_color * throughput);
             break;
         }
@@ -1074,15 +1205,6 @@ fn trace_sample(
         let rec = resolve_hit(r, hit_ref);
         let surface = resolve_surface(rec, &rng_state);
         path_length += rec.t;
-
-        if (depth == 0u) {
-            (*guide).albedo = surface.albedo;
-            // The normal-mapped shading normal, so bump detail reaches the
-            // edge stop rather than just the geometric silhouette.
-            (*guide).normal = surface.normal;
-            (*guide).depth = length(rec.p - camera.origin);
-            (*guide).mat_type = surface.mat_type;
-        }
 
         if (surface.mat_type == MAT_DIFFUSE_LIGHT) {
             if (rec.front_face) {
@@ -1213,6 +1335,15 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // A restart (accumulation reset on camera/depth change) discards whatever
     // the buffers held for a previous, unrelated accumulation.
     let restart = config.sample_count == 0u;
+
+    // One guide ray per accumulation run, before the adaptive early-out below
+    // can return, so every pixel gets exactly one and the guide can never go
+    // stale: a camera change restarts the accumulation and rewrites the guide
+    // in the same dispatch that resets the accumulator.
+    if (restart) {
+        gbuffer[index] = pack_guide(trace_guide(pixel));
+    }
+
     let n0 = select(sample_count_buffer[index], 0u, restart);
     let prev = select(output_buffer[index], vec4<f32>(0.0), restart);
     let prev_mean = prev.xyz;
@@ -1265,24 +1396,9 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var batch_sum = vec3<f32>(0.0);
     var batch_mean = 0.0;
     var batch_m2 = 0.0;
-    var guide: GuideSample;
     for (var s = 0u; s < batch; s++) {
-        let sample = trace_sample(pixel, config.sample_count + s, &guide);
+        let sample = trace_sample(pixel, config.sample_count + s);
         batch_sum += sample;
-
-        // One write per accumulation run. A restart is the write condition, so
-        // the guide can never go stale: a camera change rewrites it in the same
-        // dispatch that resets the accumulator. And on a restart dispatch the
-        // adaptive early-out above cannot have fired for any pixel -- n0 is
-        // forced to zero -- so every pixel reaches this line exactly once.
-        //
-        // Not averaged over the batch on purpose: an albedo averaged across a
-        // silhouette is a colour on neither surface, and an averaged normal at
-        // a corner points into the corner, weakening the edge stop exactly
-        // where it does the most work.
-        if (restart && s == 0u) {
-            gbuffer[index] = pack_guide(guide);
-        }
 
         let l = luminance(sample);
         let delta = l - batch_mean;

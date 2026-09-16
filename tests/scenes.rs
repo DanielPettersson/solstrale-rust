@@ -11,8 +11,86 @@ use solstrale::hittable::{Bvh, Quad};
 use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
 use solstrale::material::texture::{ImageMap, SolidColor, Textures, load_normal_texture};
-use solstrale::material::{Blend, Dielectric, DiffuseLight, Lambertian};
+use solstrale::material::{Blend, Dielectric, DiffuseLight, Lambertian, Metal};
 use solstrale::renderer::{RenderConfig, Scene};
+
+/// A scene built to exercise the denoiser's specular guide: a mirror sphere and
+/// a glass sphere fill much of the frame, and what they show is a textured
+/// floor, so a filter that blurs the reflected and refracted image along the
+/// surface has somewhere visible to do it.
+///
+/// A sphere rather than a flat mirror on purpose. A mirror wall reflects
+/// whatever is behind the camera, which in a small scene is mostly empty
+/// background; a sphere gathers the whole surroundings into a few hundred
+/// pixels, so the reflected detail is dense and its depth varies sharply across
+/// neighbouring pixels -- which is exactly what the guide has to track.
+///
+/// No aperture, so the guide's pixel-centre ray is the ray the samples average
+/// around and depth of field is not part of what is being measured.
+#[allow(dead_code)]
+pub fn create_specular_scene(render_config: RenderConfig) -> Scene {
+    let camera = CameraConfig {
+        vertical_fov_degrees: 35.,
+        aperture_size: 0.,
+        look_from: Vec3::new(0., 2.2, 6.5),
+        look_at: Vec3::new(0., 1.1, 0.),
+        up: Vec3::new(0., 1., 0.),
+    };
+
+    let image_tex = ImageMap::load("resources/textures/tex.jpg").unwrap();
+    let floor_material = Lambertian::new(image_tex.into(), None);
+    let mirror_mat = Metal::new(SolidColor::new(0.9, 0.9, 0.9).into(), None, 0.);
+    let glass_mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5);
+    let red_mat = Lambertian::new(SolidColor::new(0.8, 0.1, 0.1).into(), None);
+    let light_mat = DiffuseLight::new(10., 10., 10., None);
+
+    let nop = NopTransformer();
+    let mut world: Vec<Hittables> = Vec::new();
+
+    // Textured floor. The texture is the detail the reflected and refracted
+    // image is made of -- a flat colour here would measure nothing.
+    world.push(
+        Quad::new(
+            Vec3::new(-10., 0., -8.),
+            Vec3::new(20., 0., 0.),
+            Vec3::new(0., 0., 16.),
+            floor_material.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    world.push(Sphere::new(Vec3::new(1.5, 1.2, 0.), 1.2, mirror_mat.into()).into());
+    world.push(Sphere::new(Vec3::new(-1.5, 1., 0.3), 1., glass_mat.into()).into());
+
+    // Something with a recognisable shape and a colour of its own, to be seen
+    // reflected in one sphere and refracted through the other.
+    world.append(&mut Quad::new_box(
+        Vec3::new(-0.6, 0., -2.),
+        Vec3::new(0.6, 1.4, -0.8),
+        red_mat.into(),
+        &RotationY::new(20.),
+    ));
+
+    // One light, above and in front, facing down.
+    world.push(
+        Quad::new(
+            Vec3::new(-2., 6., -1.),
+            Vec3::new(4., 0., 0.),
+            Vec3::new(0., 0., 4.),
+            light_mat.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0.1, 0.15, 0.25),
+        render_config,
+    }
+}
 
 pub fn create_test_scene(render_config: RenderConfig) -> Scene {
     let camera = CameraConfig {
