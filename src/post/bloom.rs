@@ -3,7 +3,9 @@
 use crate::geo::vec3::Vec3;
 use crate::post::{PostProcessContext, PostProcessor};
 use crate::util::gaussian::create_gaussian_blur_weights;
-use crate::util::wgpu_util::{bind_group, bind_group_layout, compute_pipeline, storage_binding};
+use crate::util::wgpu_util::{
+    add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, storage_binding,
+};
 use std::error::Error;
 use wgpu::BufferUsages;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -15,16 +17,22 @@ pub struct BloomPostProcessor {
     height: u32,
 
     kernel_size_fraction: f64,
+    threshold: f64,
+    max_intensity: f64,
 
+    filter_bright_module: wgpu::ShaderModule,
     apply_module: wgpu::ShaderModule,
+    add_module: wgpu::ShaderModule,
 
     filter_bright_bind_group_layout: wgpu::BindGroupLayout,
     apply_bind_group_layout: wgpu::BindGroupLayout,
     add_bind_group_layout: wgpu::BindGroupLayout,
 
+    // All four pipelines carry the image dimensions as override constants, so
+    // none of them can be built before `initialize`.
     apply_pipeline_x: Option<wgpu::ComputePipeline>,
     apply_pipeline_y: Option<wgpu::ComputePipeline>,
-    add_pipeline: wgpu::ComputePipeline,
+    add_pipeline: Option<wgpu::ComputePipeline>,
     filter_bright_pipeline: Option<wgpu::ComputePipeline>,
 
     weights_buffer: Option<wgpu::Buffer>,
@@ -80,32 +88,27 @@ impl BloomPostProcessor {
             &[storage_binding(false, 16), storage_binding(true, 16)],
         );
 
-        let filter_bright_pipeline = Some(compute_pipeline(
-            device,
-            &filter_bright_bind_group_layout,
-            &filter_bright_module,
-            &[("threshold", threshold), ("max_intensity", max_intensity)],
-        ));
-
-        let add_pipeline = compute_pipeline(device, &add_bind_group_layout, &add_module, &[]);
-
         Ok(BloomPostProcessor {
             width: 0,
             height: 0,
             kernel_size_fraction,
+            threshold,
+            max_intensity,
+            filter_bright_module,
             apply_module,
+            add_module,
             filter_bright_bind_group_layout,
             apply_bind_group_layout,
             add_bind_group_layout,
             apply_pipeline_x: None,
             apply_pipeline_y: None,
-            add_pipeline,
-            filter_bright_pipeline,
+            add_pipeline: None,
+            filter_bright_pipeline: None,
             weights_buffer: None,
             intermediate_buffer1: None,
             intermediate_buffer2: None,
-            apply_bind_group_x: Option::None,
-            apply_bind_group_y: Option::None,
+            apply_bind_group_x: None,
+            apply_bind_group_y: None,
         })
     }
 }
@@ -119,17 +122,53 @@ impl PostProcessor for BloomPostProcessor {
         self.width = width;
         self.height = height;
 
+        // Every pass dispatches over a 2-D grid, so all four need the row stride
+        // and the bounds as constants. A 1-D dispatch would need one workgroup
+        // per 64 pixels, which crosses `max_compute_workgroups_per_dimension`
+        // (65535 on a Radeon RX 5700 XT) at 4194240 pixels -- 4K failed
+        // validation outright, the same way the tracer's dispatch used to.
+        let dimensions = [("width", width as f64), ("height", height as f64)];
+
+        self.filter_bright_pipeline = Some(compute_pipeline(
+            device,
+            &self.filter_bright_bind_group_layout,
+            &self.filter_bright_module,
+            &[
+                ("width", width as f64),
+                ("height", height as f64),
+                ("threshold", self.threshold),
+                ("max_intensity", self.max_intensity),
+            ],
+        ));
+
+        self.add_pipeline = Some(compute_pipeline(
+            device,
+            &self.add_bind_group_layout,
+            &self.add_module,
+            &dimensions,
+        ));
+
         self.apply_pipeline_x = Some(compute_pipeline(
             device,
             &self.apply_bind_group_layout,
             &self.apply_module,
-            &[("width", width as f64), ("x_dir", 1.), ("y_dir", 0.)],
+            &[
+                ("width", width as f64),
+                ("height", height as f64),
+                ("x_dir", 1.),
+                ("y_dir", 0.),
+            ],
         ));
         self.apply_pipeline_y = Some(compute_pipeline(
             device,
             &self.apply_bind_group_layout,
             &self.apply_module,
-            &[("width", width as f64), ("x_dir", 0.), ("y_dir", 1.)],
+            &[
+                ("width", width as f64),
+                ("height", height as f64),
+                ("x_dir", 0.),
+                ("y_dir", 1.),
+            ],
         ));
 
         let kernel_size = (self.kernel_size_fraction * width as f64) as usize * 2 + 1;
@@ -183,7 +222,6 @@ impl PostProcessor for BloomPostProcessor {
         self.apply_bind_group_y = Some(apply_bind_group_y);
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>> {
         let device = ctx.device;
         let buffer = ctx.buffer;
@@ -194,6 +232,13 @@ impl PostProcessor for BloomPostProcessor {
             .ok_or("Not initialized")?;
         let apply_bind_group_x = self.apply_bind_group_x.as_ref().ok_or("Not initialized")?;
         let apply_bind_group_y = self.apply_bind_group_y.as_ref().ok_or("Not initialized")?;
+        let filter_bright_pipeline = self
+            .filter_bright_pipeline
+            .as_ref()
+            .ok_or("Not initialized")?;
+        let apply_pipeline_x = self.apply_pipeline_x.as_ref().ok_or("Not initialized")?;
+        let apply_pipeline_y = self.apply_pipeline_y.as_ref().ok_or("Not initialized")?;
+        let add_pipeline = self.add_pipeline.as_ref().ok_or("Not initialized")?;
 
         let filter_bright_bind_group = bind_group(
             device,
@@ -213,31 +258,36 @@ impl PostProcessor for BloomPostProcessor {
             ],
         );
 
-        let workgroup_count = (self.width * self.height).div_ceil(64);
+        let groups_x = self.width.div_ceil(8);
+        let groups_y = self.height.div_ceil(8);
 
-        crate::util::wgpu_util::add_compute_pass(
+        add_compute_pass_2d(
             ctx.encoder,
-            self.filter_bright_pipeline.as_ref().unwrap(),
+            filter_bright_pipeline,
             &filter_bright_bind_group,
-            workgroup_count,
+            groups_x,
+            groups_y,
         );
-        crate::util::wgpu_util::add_compute_pass(
+        add_compute_pass_2d(
             ctx.encoder,
-            self.apply_pipeline_x.as_ref().unwrap(),
+            apply_pipeline_x,
             apply_bind_group_x,
-            workgroup_count,
+            groups_x,
+            groups_y,
         );
-        crate::util::wgpu_util::add_compute_pass(
+        add_compute_pass_2d(
             ctx.encoder,
-            self.apply_pipeline_y.as_ref().unwrap(),
+            apply_pipeline_y,
             apply_bind_group_y,
-            workgroup_count,
+            groups_x,
+            groups_y,
         );
-        crate::util::wgpu_util::add_compute_pass(
+        add_compute_pass_2d(
             ctx.encoder,
-            &self.add_pipeline,
+            add_pipeline,
             &add_bind_group,
-            workgroup_count,
+            groups_x,
+            groups_y,
         );
 
         Ok(())

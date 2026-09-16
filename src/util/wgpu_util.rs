@@ -91,6 +91,15 @@ pub fn get_result_from_buffer<T: AnyBitPattern>(
     result
 }
 
+/// Dispatches over a flat 1-D workgroup grid.
+///
+/// Test-only, and deliberately so. A 1-D dispatch at `workgroup_size(64)` needs
+/// one workgroup per 64 elements, which crosses
+/// `max_compute_workgroups_per_dimension` (65535 on a Radeon RX 5700 XT) at
+/// 4194240 elements -- below 4K, so no pass over the image may use it. What is
+/// left is `wgsl_matches_the_cpu_curve`, which dispatches over a couple of dozen
+/// test values rather than over pixels.
+#[cfg(test)]
 pub(crate) fn add_compute_pass(
     encoder: &mut wgpu::CommandEncoder,
     pipeline: &wgpu::ComputePipeline,

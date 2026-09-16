@@ -1,7 +1,9 @@
 //! Post-processor for applying saturation
 
 use crate::post::{PostProcessContext, PostProcessor};
-use crate::util::wgpu_util::{bind_group, bind_group_layout, compute_pipeline, storage_binding};
+use crate::util::wgpu_util::{
+    add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, storage_binding,
+};
 use std::error::Error;
 
 #[derive(Clone)]
@@ -9,8 +11,12 @@ use std::error::Error;
 pub struct SaturationPostProcessor {
     width: u32,
     height: u32,
+    saturation_factor: f64,
+    module: wgpu::ShaderModule,
     bind_group_layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    /// Built in `initialize` rather than in `new`, because the image dimensions
+    /// are override constants of the shader. See there for why they have to be.
+    pipeline: Option<wgpu::ComputePipeline>,
 }
 
 impl SaturationPostProcessor {
@@ -31,35 +37,44 @@ impl SaturationPostProcessor {
 
         let bind_group_layout = bind_group_layout(device, &[storage_binding(false, 16)]);
 
-        let pipeline = compute_pipeline(
-            device,
-            &bind_group_layout,
-            &module,
-            &[("saturation_factor", saturation_factor)],
-        );
-
         Ok(SaturationPostProcessor {
             width: 0,
             height: 0,
+            saturation_factor,
+            module,
             bind_group_layout,
-            pipeline,
+            pipeline: None,
         })
     }
 }
 
 impl PostProcessor for SaturationPostProcessor {
-    fn initialize(
-        &mut self,
-        _device: &wgpu::Device,
-        _queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-    ) {
+    fn initialize(&mut self, device: &wgpu::Device, _queue: &wgpu::Queue, width: u32, height: u32) {
+        if self.width == width && self.height == height && self.pipeline.is_some() {
+            return;
+        }
+
         self.width = width;
         self.height = height;
+
+        // The shader dispatches over a 2-D grid and so needs the row stride and
+        // the bounds as constants; it can no longer recover either from
+        // `arrayLength`, which only ever gave it a pixel count.
+        self.pipeline = Some(compute_pipeline(
+            device,
+            &self.bind_group_layout,
+            &self.module,
+            &[
+                ("width", width as f64),
+                ("height", height as f64),
+                ("saturation_factor", self.saturation_factor),
+            ],
+        ));
     }
 
     fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>> {
+        let pipeline = self.pipeline.as_ref().ok_or("Not initialized")?;
+
         let bind_group = bind_group(
             ctx.device,
             &self.bind_group_layout,
@@ -68,12 +83,12 @@ impl PostProcessor for SaturationPostProcessor {
             )],
         );
 
-        let workgroup_count = (self.width * self.height).div_ceil(64);
-        crate::util::wgpu_util::add_compute_pass(
+        add_compute_pass_2d(
             ctx.encoder,
-            &self.pipeline,
+            pipeline,
             &bind_group,
-            workgroup_count,
+            self.width.div_ceil(8),
+            self.height.div_ceil(8),
         );
 
         Ok(())

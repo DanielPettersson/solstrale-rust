@@ -1,3 +1,5 @@
+override width: u32 = 1u;
+override height: u32 = 1u;
 override threshold: f32 = 1.0;
 override max_intensity: f32 = 1000.0;
 
@@ -7,14 +9,12 @@ var<storage, read> input_pixels: array<vec4<f32>>;
 @group(0) @binding(1)
 var<storage, read_write> output_pixels: array<vec4<f32>>;
 
-@compute @workgroup_size(64)
-fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let curr_index = global_id.x;
-    let num_pixels = arrayLength(&input_pixels);
-
-    if (curr_index >= num_pixels) {
+@compute @workgroup_size(8, 8)
+fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= width || gid.y >= height) {
         return;
     }
+    let curr_index = gid.y * width + gid.x;
 
     output_pixels[curr_index] = vec4<f32>(get_bloom_color(input_pixels[curr_index].xyz), 1.0);
 }
