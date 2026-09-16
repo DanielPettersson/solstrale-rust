@@ -579,7 +579,7 @@ impl<'a> Renderer<'a> {
                 storage_binding(true, 0),  // 12: triangle attributes
                 storage_binding(true, 0),  // 13: quad attributes
                 storage_binding(false, 0), // 14: per-pixel sample count
-                storage_binding(false, 0), // 15: primary-hit guide (denoiser G-buffer)
+                storage_binding(false, 0), // 15: guide (denoiser G-buffer)
             ],
         );
 
@@ -1217,7 +1217,7 @@ mod test {
     /// encoding: the octahedral round trip, and using `rec.t` (in units of the
     /// unnormalised primary ray) where a world-space distance is meant.
     #[test]
-    fn test_gbuffer_primary_hit() {
+    fn test_gbuffer_direct_hit() {
         use crate::camera::CameraConfig;
         use crate::geo::vec3::Vec3;
         use crate::hittable::{Bvh, Hittables, Sphere};
@@ -1334,6 +1334,149 @@ mod test {
             f32::from_bits(corner[2]),
             1e7,
             "corner depth should be the far sentinel"
+        );
+    }
+
+    /// The point of `trace_guide`: on a mirror the guide has to describe what is
+    /// reflected, not the mirror. Same analytic approach as above, folded once
+    /// through a mirror so every slot has a different right answer than the
+    /// primary hit would have given.
+    #[test]
+    fn test_gbuffer_follows_specular_chain() {
+        use crate::camera::CameraConfig;
+        use crate::geo::transformation::NopTransformer;
+        use crate::geo::vec3::Vec3;
+        use crate::hittable::{Bvh, Hittables, Quad, Sphere};
+        use crate::material::texture::SolidColor;
+        use crate::material::{DiffuseLight, Lambertian, Metal};
+        use crate::renderer::{RenderConfig, Renderer, Scene};
+        use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
+        use std::sync::mpsc::channel;
+
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        const SIZE: u32 = 41;
+        let render_config = RenderConfig {
+            width: SIZE as usize,
+            height: SIZE as usize,
+            samples_per_pixel: 1,
+            ..Default::default()
+        };
+
+        // Camera at z = 4 looking down -z at a mirror filling the z = 0 plane,
+        // with a yellow sphere behind the camera at z = 8. The centre ray runs
+        // 4 units to the mirror, reflects straight back along +z and runs 7.5
+        // more to the sphere's near pole -- so the guide should report 11.5
+        // units, the sphere's normal pointing back down -z at the mirror, and
+        // the sphere's yellow dimmed by the mirror's half-grey.
+        let world: Vec<Hittables> = vec![
+            Quad::new(
+                Vec3::new(-2., -2., 0.),
+                Vec3::new(4., 0., 0.),
+                Vec3::new(0., 4., 0.),
+                Metal::new(SolidColor::new(0.5, 0.5, 0.5).into(), None, 0.).into(),
+                &NopTransformer(),
+            )
+            .into(),
+            Sphere::new(
+                Vec3::new(0., 0., 8.),
+                0.5,
+                Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into(),
+            )
+            .into(),
+            // Off to the side of both the view ray and its reflection.
+            Sphere::new(
+                Vec3::new(0., 100., 0.),
+                20.,
+                DiffuseLight::new(10., 10., 10., None).into(),
+            )
+            .into(),
+        ];
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera: CameraConfig {
+                vertical_fov_degrees: 20.,
+                aperture_size: 0.,
+                look_from: Vec3::new(0., 0., 4.),
+                look_at: Vec3::new(0., 0., 0.),
+                up: Vec3::new(0., 1., 0.),
+            },
+            background_color: Vec3::new(0.2, 0.3, 0.5),
+            render_config,
+        };
+
+        let mut renderer = Renderer::new(scene, device, queue).unwrap();
+        let (output_sender, output_receiver) = channel();
+        let (_camera_sender, camera_receiver) = channel();
+        let (_abort_sender, abort_receiver) = channel();
+        renderer
+            .render(&output_sender, &camera_receiver, &abort_receiver, false)
+            .unwrap();
+        drop(output_sender);
+        for _ in output_receiver {}
+
+        let size = (SIZE * SIZE * 16) as u64;
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&renderer.gbuffer, 0, &staging_buffer, 0, size);
+        queue.submit(Some(encoder.finish()));
+        let guide: Vec<[u32; 4]> = get_result_from_buffer(device, &staging_buffer);
+
+        let centre = guide[((SIZE / 2) * SIZE + SIZE / 2) as usize];
+
+        let albedo = [
+            (centre[0] & 0xff) as f32 / 255.,
+            ((centre[0] >> 8) & 0xff) as f32 / 255.,
+            ((centre[0] >> 16) & 0xff) as f32 / 255.,
+        ];
+        assert!(
+            (albedo[0] - 0.5).abs() < 0.01 && (albedo[1] - 0.5).abs() < 0.01 && albedo[2] < 0.01,
+            "centre albedo should be the sphere's yellow tinted by the mirror, was {:?}",
+            albedo
+        );
+
+        let normal = oct_decode([
+            f16_to_f32((centre[1] & 0xffff) as u16),
+            f16_to_f32((centre[1] >> 16) as u16),
+        ]);
+        // Not exactly -1: `trace_guide` maps pixels to the frame with the same
+        // `/ (width - 1)` divisor as `trace_sample`, which puts the centre
+        // pixel's ray half a pixel off-axis (see TODO.md). Over an 11.5 unit
+        // folded path that lands 0.05 off the pole of a 0.5 radius sphere, so
+        // the normal tips by about 0.1 in x and y.
+        assert!(
+            normal[2] < -0.98,
+            "centre normal should be the sphere's, facing back at the mirror, was {:?}",
+            normal
+        );
+
+        let depth = f32::from_bits(centre[2]);
+        assert!(
+            (depth - 11.5).abs() < 0.05,
+            "centre depth should be the whole 11.5 unit folded path, was {}",
+            depth
+        );
+        assert_eq!(
+            centre[3],
+            (1 << 8),
+            "centre should read as MAT_LAMBERTIAN behind one specular bounce"
+        );
+
+        // A corner ray hits the mirror too, but its reflection diverges past the
+        // sphere -- still one specular bounce deep, so the filter can tell it
+        // from background seen directly.
+        let corner = guide[0];
+        assert_eq!(
+            corner[3],
+            5 | (1 << 8),
+            "corner should read as MAT_MISS behind one specular bounce"
         );
     }
 }

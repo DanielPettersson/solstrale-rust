@@ -8,11 +8,11 @@ use crate::util::wgpu_util::{
 use std::error::Error;
 use wgpu::BufferUsages;
 
-/// Which primary-hit channels the edge-stopping functions are allowed to use.
+/// Which guide channels the edge-stopping functions are allowed to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DenoiseGuide {
-    /// Use the renderer's primary-hit albedo, normal and depth. What you want
-    /// unless you are measuring what the guide buys.
+    /// Use the renderer's guide albedo, normal, distance and specular depth.
+    /// What you want unless you are measuring what the guide buys.
     #[default]
     Full,
     /// Use only the accumulated colour and its per-pixel variance. Noticeably
@@ -45,9 +45,14 @@ pub enum DenoiseGuide {
 /// Denoising a bloomed image blurs the bloom; bloom applied to a denoised image
 /// is what you want.
 ///
-/// Known limitation: the guide describes the primary hit, so on a mirror or a
-/// glass surface it describes that surface rather than what is seen through or
-/// in it, and the reflected or refracted image is blurred along the surface.
+/// The guide follows the specular chain, so on a mirror or a glass surface it
+/// describes what is seen in or through it rather than the surface itself, and
+/// the reflected and refracted image survives the filter. Two limitations are
+/// left: a chain longer than `GUIDE_MAX_SPECULAR` (6) in
+/// `renderer/ray_trace.wgsl` falls back to describing the specular surface it
+/// stalled on, and with a wide aperture the guide ray is the pixel-centre ray,
+/// so it describes the point in focus rather than the defocused average the
+/// samples actually see.
 #[derive(Clone)]
 pub struct DenoisePostProcessor {
     width: u32,
@@ -88,8 +93,8 @@ impl DenoisePostProcessor {
     ///   keeps more detail and more noise, above 1 blurs harder. 0 to 10.
     /// * `iterations` Number of à-trous iterations, each doubling the tap
     ///   spacing. If not specified, defaults to 5. 1 to 8.
-    /// * `guide` Which primary-hit channels may guide the filter. If not
-    ///   specified, defaults to [`DenoiseGuide::Full`].
+    /// * `guide` Which guide channels may guide the filter. If not specified,
+    ///   defaults to [`DenoiseGuide::Full`].
     pub fn new(
         strength: f64,
         iterations: Option<u32>,
@@ -130,7 +135,7 @@ impl DenoisePostProcessor {
             &[
                 storage_binding(true, 16),  // source
                 storage_binding(false, 16), // destination
-                storage_binding(true, 16),  // primary-hit guide
+                storage_binding(true, 16),  // guide
             ],
         );
 
@@ -187,6 +192,7 @@ impl PostProcessor for DenoisePostProcessor {
             ("sigma_normal", 128.),
             ("sigma_depth", 1.),
             ("sigma_albedo", 0.1),
+            ("sigma_specular", 1.),
             (
                 "use_guide",
                 match self.guide {

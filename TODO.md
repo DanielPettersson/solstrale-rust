@@ -43,36 +43,38 @@ blockers make this a feature rather than an optimisation:
 
 ### Light BVH or power-weighted light selection
 
-`light_pdf_value` (`ray_trace.wgsl:328`) loops over every light, and
+`light_pdf_value` (`ray_trace.wgsl:387`) loops over every light, and
 `sample_light` chooses one uniformly. Fine at 1–3 lights; an emissive mesh
 imported from an OBJ would make both terrible. Wants an alias table for
 power-weighted selection, and a light BVH for the PDF sum.
 
-### Denoiser — the specular guide
+### Denoiser — what is left
 
-Done: `post/denoise.rs` is an edge-avoiding à-trous filter guided by the
-primary-hit G-buffer and by the per-pixel Welford variance. What is left is the
-case it handles worst.
+Done: `post/denoise.rs` is an edge-avoiding à-trous filter guided by a G-buffer
+and by the per-pixel Welford variance, and the guide now follows the specular
+chain — `trace_guide` (`renderer/ray_trace.wgsl`) traces one deterministic ray
+per pixel per accumulation run to the first surface that is not a mirror or a
+lens, and records its albedo (tinted by the chain), normal, total path length
+and specular bounce count.
 
-The guide is written at **depth 0**, so for a mirror or a glass surface it
-describes the surface itself rather than what is seen through or in it. The
-filter therefore blurs the reflected and refracted image along the surface. This
-is the standard SVGF limitation, but caustics and refraction are headline
-features here, so it is more visible than usual.
-
-The fix is to fill the guide at the first *non-specular* hit instead: the path
-loop already tracks `prev_specular`, and `path_length` is already accumulated, so
-guide depth would stay monotone along the path. Fall back to depth 0 if a path
-terminates while still specular. Left out of the first version to keep it
-reviewable.
+Measured on `create_specular_scene`, global linear RMSE is a wash against the
+old primary-hit guide (8 spp: 0.0727 → 0.0740, 64 spp: 0.0281 → 0.0280, 200 spp:
+0.0158 → 0.0157). That is the metric being the wrong one rather than the change
+doing nothing: at a low sample count RMSE rewards blurring, and smearing the
+reflection along the mirror is blurring. The difference is visible rather than
+numeric — the refracted floor inside the glass sphere and the caustic under it
+come out cleaner, and the reflected horizon in the mirror sphere stays a line.
+`test_gbuffer_follows_specular_chain` (`renderer/mod.rs`) is what actually pins
+the behaviour, analytically.
 
 Two smaller ones from the same work:
 
 - **Depth weight without a gradient.** `guide_weight` uses a relative depth test,
   which is scale-free and handles the background sentinel, but is more permissive
   than SVGF's screen-space gradient form at grazing incidence — a floor receding
-  to the horizon will over-blur slightly near the horizon. There are spare bits
-  in the G-buffer's `.w` for a forward-difference gradient if it shows.
+  to the horizon will over-blur slightly near the horizon. The G-buffer's `.w`
+  holds the material type in its low byte and the specular depth above it, so
+  bits 12 upward are still free for a forward-difference gradient if it shows.
 - **Interactive previews.** Post-processing still runs only on the final batch,
   so a camera drag is never denoised — which is the regime where it would help
   most. The chain already runs on a scratch copy, so this is now safe to add: it
@@ -99,7 +101,7 @@ transform and must stay a separate acceleration structure.
 
 ### Camera ray is not normalised
 
-`ray_trace.wgsl:918` builds the primary ray direction without normalising, so
+`ray_trace.wgsl:1184` builds the primary ray direction without normalising, so
 `rec.t` for the **first** path segment is in units of `|ray_direction|`
 (≈ the focus distance) rather than world units. Every later segment is
 normalised, so `path_length` mixes two scales.
@@ -107,6 +109,18 @@ normalised, so `path_length` mixes two scales.
 Only observable through the light-attenuation falloff, which is the one feature
 that depends on absolute path length. Pre-existing; left alone deliberately
 because fixing it shifts the `light_attenuation_*` images again.
+
+### The pixel-to-frame mapping is off by half a pixel
+
+`trace_sample` and `trace_guide` both map a pixel to the frame with
+`(f32(pixel.x) + 0.5) / f32(config.width - 1u)`. The `- 1` makes `u` run over
+`[0.5/(w-1), (w-0.5)/(w-1)]` rather than `[0, 1]`, so the image is scaled by
+`w/(w-1)` and shifted half a pixel: the centre pixel's ray is not the centre
+ray. Visible in `test_gbuffer_follows_specular_chain`, where the reflected
+normal comes out 0.1 off the pole it should hit exactly.
+
+Harmless at any real resolution and a one-character fix, but it shifts every
+golden image, so it wants doing on its own.
 
 ### Spheres cannot be transformed
 
@@ -227,6 +241,14 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   once at load, and the peak allocation is what decides whether a large scene
   fits at all. Revisit only if load time on huge scenes starts mattering more
   than footprint.
+- **The guide ray is a centre ray, and six bounces deep.** `trace_guide`
+  samples the pixel centre with no lens offset, so with a wide aperture it
+  describes the point in focus rather than the defocused average the samples
+  see; and a specular chain longer than `GUIDE_MAX_SPECULAR` (6) falls back to
+  describing whatever specular surface it stalled on, which is the old
+  primary-hit guide. Both are deliberate: a jittered guide ray would make
+  neighbouring pixels disagree about what they are looking at, which is the one
+  thing an edge stop cannot survive.
 - **16.7M primitive cap.** The BVH leaf encoding uses a 24-bit offset
   (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time.
 - **Golden images are lenient.** They downscale to 100x50 and compare RMS

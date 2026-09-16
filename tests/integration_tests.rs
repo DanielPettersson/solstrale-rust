@@ -22,7 +22,7 @@ use crate::scenes::{
     create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
     create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
     create_obj_with_triangle, create_quad_rotation_scene, create_simple_test_scene,
-    create_test_scene, create_texture_mapping_scene, create_uv_scene,
+    create_specular_scene, create_test_scene, create_texture_mapping_scene, create_uv_scene,
 };
 
 mod scenes;
@@ -899,6 +899,31 @@ fn test_scene_denoise_and_bloom() {
     render_and_compare_output(create_test_scene(render_config), "denoise_and_bloom", 0.95);
 }
 
+/// Regression net for the specular guide: most of this frame is a mirror or a
+/// lens, so a guide that described the specular surface instead of what it
+/// shows would smear the reflected and refracted floor texture sideways and
+/// move this image.
+#[test]
+fn test_scene_specular_denoise() {
+    let (device, _) = get_wgpu_device_and_queue();
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 16,
+        post_processors: vec![
+            DenoisePostProcessor::new(1., None, None, device)
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    render_and_compare_output(
+        create_specular_scene(render_config),
+        "specular_denoise",
+        0.95,
+    );
+}
+
 /// A denoise test scene. `strength` of `None` leaves the chain empty, so the
 /// same scene builder produces the control and the treatment.
 fn denoise_scene(samples_per_pixel: u32, strength: Option<f64>, adaptive: bool) -> Scene {
@@ -917,6 +942,28 @@ fn denoise_scene(samples_per_pixel: u32, strength: Option<f64>, adaptive: bool) 
         samples_per_pixel,
         // Above samples_per_pixel disables adaptive sampling, as the benches do.
         min_samples_per_pixel: if adaptive { 32 } else { u32::MAX },
+        post_processors,
+        ..Default::default()
+    })
+}
+
+/// `denoise_scene`'s counterpart on the specular scene. Adaptive sampling is
+/// always on here, as in the default configuration.
+fn specular_denoise_scene(samples_per_pixel: u32, strength: Option<f64>) -> Scene {
+    let (device, _) = get_wgpu_device_and_queue();
+    let post_processors = match strength {
+        Some(s) => vec![
+            DenoisePostProcessor::new(s, None, None, device)
+                .unwrap()
+                .into(),
+        ],
+        None => vec![],
+    };
+    create_specular_scene(RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel,
+        min_samples_per_pixel: 32,
         post_processors,
         ..Default::default()
     })
@@ -955,6 +1002,45 @@ fn test_denoise_improves_low_sample_image() {
         rmse_denoised < rmse_noisy * 0.7,
         "denoising 8 spp should cut linear RMSE against the reference by at least 30%, \
          was {} against {}",
+        rmse_denoised,
+        rmse_noisy
+    );
+}
+
+/// The same controlled experiment as above, on a scene that is mostly mirror
+/// and glass: the filter has to still be a net win where most of the frame is
+/// seen in a reflection or through a lens.
+///
+/// Deliberately not the gate on the specular guide itself. Global RMSE at a low
+/// sample count rewards blurring, so a guide that smears the reflected image
+/// along the mirror scores about the same here -- measured, the primary-hit
+/// guide gives 0.71 against this guide's 0.72. What pins the guide is
+/// `renderer::test::test_gbuffer_follows_specular_chain`, which checks it
+/// analytically, and `test_scene_specular_denoise`, which would move if the
+/// reflections changed.
+#[test]
+fn test_denoise_improves_specular_image() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let reference = render_linear(specular_denoise_scene(2000, None), device, queue);
+    let noisy = render_linear(specular_denoise_scene(8, None), device, queue);
+    let denoised = render_linear(specular_denoise_scene(8, Some(1.)), device, queue);
+
+    let rmse_noisy = linear_rmse(&noisy, &reference);
+    let rmse_denoised = linear_rmse(&denoised, &reference);
+
+    println!("specular scene, linear RMSE against 2000 spp reference:");
+    println!("  8 spp, no denoiser: {}", rmse_noisy);
+    println!("  8 spp, denoised:    {}", rmse_denoised);
+    println!("  ratio:              {}", rmse_denoised / rmse_noisy);
+
+    // 0.72 measured. The margin is wider than the 0.7 the diffuse scene asserts
+    // because the 2000 spp reference is itself adaptively sampled and moves a
+    // little run to run.
+    assert!(
+        rmse_denoised < rmse_noisy * 0.8,
+        "denoising 8 spp of a specular scene should cut linear RMSE against the \
+         reference by at least 20%, was {} against {}",
         rmse_denoised,
         rmse_noisy
     );
@@ -1018,15 +1104,48 @@ fn denoise_strength_sweep() {
     }
 }
 
+/// Diagnostic, not a gate: linear RMSE against a converged reference on the
+/// specular scene, across sample counts and strengths.
+///
+/// Read it knowing what it cannot see. Global RMSE is dominated by the pixels
+/// that are neither mirror nor lens, and at a low sample count it rewards
+/// blurring -- including blurring the reflected image along the mirror. Run
+/// against the primary-hit guide (`GUIDE_MAX_SPECULAR` set to 0 in
+/// ray_trace.wgsl) the two agree to within a couple of percent at every sample
+/// count, in both directions. So this is a net-effect check, not a measurement
+/// of the specular guide; for that, look at the images `denoise_visual_pair`
+/// saves.
+/// `cargo test --release specular_denoise_sweep -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn specular_denoise_sweep() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let reference = render_linear(specular_denoise_scene(4000, None), device, queue);
+
+    for spp in [8u32, 32, 64, 200, 800] {
+        let plain = render_linear(specular_denoise_scene(spp, None), device, queue);
+        let base = linear_rmse(&plain, &reference);
+        let mut line = format!("spp={:<5} none={:.4}", spp, base);
+        for s in [0.5f64, 1.0, 2.0] {
+            let d = render_linear(specular_denoise_scene(spp, Some(s)), device, queue);
+            let rmse = linear_rmse(&d, &reference);
+            line += &format!("  s={}: {:.4} ({:.3})", s, rmse, rmse / base);
+        }
+        println!("{}", line);
+    }
+}
+
 /// Diagnostic, not a gate: saves a noisy/denoised pair for visual inspection,
 /// which is how the golden images above were vetted before being promoted.
+/// The specular pair is where the guide's specular chain shows: compare the
+/// mirror and the glass sphere against a build with `GUIDE_MAX_SPECULAR` set
+/// to 0 in ray_trace.wgsl, which is the old primary-hit guide.
 /// `cargo test --release denoise_visual_pair -- --ignored`
 #[test]
 #[ignore]
 fn denoise_visual_pair() {
     let (device, queue) = get_wgpu_device_and_queue();
-    for (name, strength) in [("noisy", None), ("denoised", Some(1.))] {
-        let scene = denoise_scene(16, strength, true);
+    let save = |name: String, scene: Scene| {
         let (width, height) = (
             scene.render_config.width as u32,
             scene.render_config.height as u32,
@@ -1043,5 +1162,12 @@ fn denoise_visual_pair() {
         }
         img.save(format!("tests/output/out_actual_visual_{}.png", name))
             .unwrap();
+    };
+    for (name, strength) in [("noisy", None), ("denoised", Some(1.))] {
+        save(name.to_string(), denoise_scene(16, strength, true));
+        save(
+            format!("specular_{}", name),
+            specular_denoise_scene(16, strength),
+        );
     }
 }

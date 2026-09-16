@@ -23,7 +23,8 @@ override sigma_colour: f32 = 4.0;
 override sigma_normal: f32 = 128.0;
 override sigma_depth: f32 = 1.0;
 override sigma_albedo: f32 = 0.1;
-// Set to 0 by DenoiseGuide::ColorOnly, which drops the three guide weights and
+override sigma_specular: f32 = 1.0;
+// Set to 0 by DenoiseGuide::ColorOnly, which drops the four guide weights and
 // leaves the filter running on colour and variance alone.
 override use_guide: f32 = 1.0;
 
@@ -34,7 +35,8 @@ var<storage, read> src: array<vec4<f32>>;
 @group(0) @binding(1)
 var<storage, read_write> dst: array<vec4<f32>>;
 
-// Packed primary-hit guide. The oct_decode below is the inverse of oct_encode in
+// Packed guide describing the first non-specular surface the pixel looks at.
+// The oct_decode below is the inverse of oct_encode in
 // renderer/ray_trace.wgsl and must stay in step with it; WGSL has no include
 // mechanism, so the pair is deliberately duplicated rather than shared.
 @group(0) @binding(2)
@@ -44,6 +46,7 @@ struct Guide {
     albedo: vec3<f32>,
     normal: vec3<f32>,
     depth: f32,
+    specular_depth: f32,
 }
 
 fn oct_decode(e: vec2<f32>) -> vec3<f32> {
@@ -61,6 +64,10 @@ fn load_guide(index: u32) -> Guide {
     out.albedo = unpack4x8unorm(g.x).rgb;
     out.normal = oct_decode(unpack2x16float(g.y));
     out.depth = bitcast<f32>(g.z);
+    // Low byte is the material type, which nothing here reads yet; the rest is
+    // the number of specular bounces the guide ray took. See pack_guide in
+    // renderer/ray_trace.wgsl.
+    out.specular_depth = f32(g.w >> 8u);
     return out;
 }
 
@@ -88,7 +95,16 @@ fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
     // This is what keeps texture detail from being smeared into flat colour.
     let w_albedo = exp(-length(centre.albedo - tap.albedo) / sigma_albedo);
 
-    return mix(1.0, w_normal * w_depth * w_albedo, use_guide);
+    // A wall seen directly and the same wall seen in a mirror can agree on all
+    // three channels above by coincidence -- same material, same orientation,
+    // and a path length that happens to match. Separating them on how many
+    // specular bounces it took to reach them is the one test that cannot be
+    // fooled that way. Soft rather than a hard gate, at one e-fold per bounce,
+    // so a mirror's silhouette does not turn into a segmentation edge the
+    // filter refuses to cross at all.
+    let w_specular = exp(-abs(centre.specular_depth - tap.specular_depth) / sigma_specular);
+
+    return mix(1.0, w_normal * w_depth * w_albedo * w_specular, use_guide);
 }
 
 // SVGF's 3x3 variance pre-pass. Without it the single-pixel spikes in the raw
