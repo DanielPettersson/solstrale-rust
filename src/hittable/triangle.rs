@@ -79,14 +79,20 @@ impl Triangle {
             // No UV frame to derive: fall back to an arbitrary basis orthogonal
             // to the normal. Only ever used for normal mapping, which needs a
             // UV frame to be meaningful anyway.
-            let a = if normal.x.abs() > 0.9 { UNIT_Y } else { Vec3::new(1., 0., 0.) };
+            let a = if normal.x.abs() > 0.9 {
+                UNIT_Y
+            } else {
+                Vec3::new(1., 0., 0.)
+            };
             let t = normal.cross(a).unit();
             (t, normal.cross(t))
         } else {
             let r = 1. / det as f64;
             (
-                ((delta_pos_1 * delta_uv_2.v as f64 - delta_pos_2 * delta_uv_1.v as f64) * r).unit(),
-                ((delta_pos_2 * delta_uv_1.u as f64 - delta_pos_1 * delta_uv_2.u as f64) * r).unit(),
+                ((delta_pos_1 * delta_uv_2.v as f64 - delta_pos_2 * delta_uv_1.v as f64) * r)
+                    .unit(),
+                ((delta_pos_2 * delta_uv_1.u as f64 - delta_pos_1 * delta_uv_2.u as f64) * r)
+                    .unit(),
             )
         };
 

@@ -147,7 +147,13 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     // Process world
     match &scene.world {
         Hittables::Bvh(bvh) => {
-            emit_bvh(bvh, &mut data, &unique_textures, atlas_layout.as_ref(), &mut caches);
+            emit_bvh(
+                bvh,
+                &mut data,
+                &unique_textures,
+                atlas_layout.as_ref(),
+                &mut caches,
+            );
         }
         world => {
             // A bare primitive as the whole scene: emit a root whose left child
@@ -579,10 +585,10 @@ fn to_array(v: Vec3) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use crate::geo::vec3::Vec3;
+    use crate::hittable::LEAF_FLAG;
     use crate::hittable::{Bvh, Hittables, Sphere};
     use crate::material::texture::SolidColor;
     use crate::material::{Lambertian, Materials};
-    use crate::hittable::LEAF_FLAG;
     use crate::renderer::scene_flattener::flatten_scene;
     use crate::renderer::{RenderConfig, Scene};
 

@@ -251,8 +251,9 @@ fn pbr_neutral(c: [f32; 3]) -> [f32; 3] {
         return c;
     }
 
-    let new_peak = 1. - (1. - start_compression) * (1. - start_compression)
-        / (peak + (1. - 2. * start_compression));
+    let new_peak = 1.
+        - (1. - start_compression) * (1. - start_compression)
+            / (peak + (1. - 2. * start_compression));
     let c = c.map(|v| v * new_peak / peak);
 
     let g = 1. - 1. / (desaturation * (peak - new_peak) + 1.);

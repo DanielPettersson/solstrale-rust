@@ -641,7 +641,9 @@ fn test_gpu_scene_nested_bvh() {
 }
 
 use solstrale::util::tone_map::ToneMapper;
-use solstrale::util::wgpu_util::{buffer_to_image, get_result_from_buffer, get_wgpu_device_and_queue};
+use solstrale::util::wgpu_util::{
+    buffer_to_image, get_result_from_buffer, get_wgpu_device_and_queue,
+};
 
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -1278,7 +1280,10 @@ fn tone_map_visual_comparison() {
             "specular",
             (|| specular_denoise_scene(64, None)) as fn() -> Scene,
         ),
-        ("test_scene", (|| denoise_scene(64, None, true)) as fn() -> Scene),
+        (
+            "test_scene",
+            (|| denoise_scene(64, None, true)) as fn() -> Scene,
+        ),
     ] {
         let scene = scene_of();
         let (width, height) = (

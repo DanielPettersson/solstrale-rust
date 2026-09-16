@@ -1,8 +1,8 @@
 use std::hint::black_box;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
 use std::sync::OnceLock;
+use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 
@@ -198,11 +198,13 @@ pub fn obj_load_benchmark(c: &mut Criterion) {
             b.iter_with_large_drop(|| tobj::load_obj(path, &load_options()).unwrap());
         });
 
-        group.bench_with_input(BenchmarkId::new("total", name), &(dir, file), |b, (d, f)| {
-            b.iter_with_large_drop(|| {
-                Obj::new(d, f).load(&NopTransformer(), None).unwrap()
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("total", name),
+            &(dir, file),
+            |b, (d, f)| {
+                b.iter_with_large_drop(|| Obj::new(d, f).load(&NopTransformer(), None).unwrap());
+            },
+        );
     }
     group.finish();
 }

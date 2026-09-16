@@ -107,7 +107,9 @@ impl Loader for Obj {
             // `transform` calls changes, which an implementor with interior mutability
             // would notice.
             let positions: Vec<Vec3> = (0..mesh.positions.len() / 3)
-                .map(|v| transformation.transform(vec3_from_mesh_vec(&mesh.positions, v * 3), false))
+                .map(|v| {
+                    transformation.transform(vec3_from_mesh_vec(&mesh.positions, v * 3), false)
+                })
                 .collect();
 
             // `(0..n).into_par_iter()` is indexed, so `par_extend` reserves exactly and

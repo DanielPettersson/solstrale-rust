@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod tests {
     use solstrale::renderer::gpu_data::{
-        BvhNode, GpuRenderConfig, Material, QuadAttr, QuadPos, Ray, Sphere, TriangleAttr, TrianglePos,
+        BvhNode, GpuRenderConfig, Material, QuadAttr, QuadPos, Ray, Sphere, TriangleAttr,
+        TrianglePos,
     };
     use std::mem::size_of;
 

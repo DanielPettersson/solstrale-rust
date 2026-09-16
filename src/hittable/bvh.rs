@@ -113,7 +113,10 @@ impl Bvh {
         // Bounding boxes and centroids are derived once here. The old build
         // re-derived `bounding_box().center()` inside the sort comparator, so
         // it recomputed them O(N log N) times per level.
-        let boxes: Vec<Aabb32> = prims.iter().map(|p| Aabb32::from(p.bounding_box())).collect();
+        let boxes: Vec<Aabb32> = prims
+            .iter()
+            .map(|p| Aabb32::from(p.bounding_box()))
+            .collect();
         let centroids: Vec<[f32; 3]> = boxes.iter().map(|b| b.center()).collect();
 
         let mut b_box = prims[0].bounding_box().clone();
@@ -442,7 +445,11 @@ impl Aabb32 {
 
     fn from(a: &Aabb) -> Aabb32 {
         Aabb32 {
-            min: [round_down(a.x.min), round_down(a.y.min), round_down(a.z.min)],
+            min: [
+                round_down(a.x.min),
+                round_down(a.y.min),
+                round_down(a.z.min),
+            ],
             max: [round_up(a.x.max), round_up(a.y.max), round_up(a.z.max)],
         }
     }
