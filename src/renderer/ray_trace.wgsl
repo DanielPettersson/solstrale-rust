@@ -1077,8 +1077,8 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
     var out: GuideSample;
     out.specular_depth = 0u;
 
-    let u = (f32(pixel.x) + 0.5) / f32(config.width - 1u);
-    let v = 1.0 - (f32(pixel.y) + 0.5) / f32(config.height - 1u);
+    let u = (f32(pixel.x) + 0.5) / f32(config.width);
+    let v = 1.0 - (f32(pixel.y) + 0.5) / f32(config.height);
     // Normalised, unlike the primary ray in trace_sample, so rec.t is in world
     // units at every segment and the lengths below can simply be summed.
     var r = Ray(
@@ -1172,8 +1172,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         index ^ (sample_index * 0x9E3779B9u) ^ (config.restart_index * 0x85EBCA6Bu)
     );
 
-    let u = (f32(pixel.x) + rand_float(&rng_state)) / f32(config.width - 1u);
-    let v = 1.0 - (f32(pixel.y) + rand_float(&rng_state)) / f32(config.height - 1u);
+    let u = (f32(pixel.x) + rand_float(&rng_state)) / f32(config.width);
+    let v = 1.0 - (f32(pixel.y) + rand_float(&rng_state)) / f32(config.height);
 
     var offset = vec3<f32>(0.0);
     if (camera.lens_radius > 0.0) {

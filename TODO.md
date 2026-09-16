@@ -8,7 +8,10 @@ Already done and not repeated here: the 24-item performance sweep (BVH2 node
 layout, binned SAH build, hot/cold primitive split, deferred shading, 2-D tiled
 dispatch, sample batching, Russian roulette, closed-form sampling), next-event
 estimation with MIS, per-pixel adaptive sampling, and narrowing the firefly
-clamp to indirect light only.
+clamp to indirect light only. Also the half-pixel pixel-to-frame mapping, whose
+`/ (width - 1)` divisor is now `/ width` -- the golden images turned out to be
+insensitive to it (they downscale to 100x50 first), and both G-buffer tests now
+assert the centre ray analytically, to 0.001 rather than 0.05.
 
 ---
 
@@ -81,11 +84,28 @@ Two smaller ones from the same work:
   needs a per-processor "run on every batch" flag, and an accepted pop when bloom
   appears only at the end.
 
-### Tone mapping
+### Tone mapping — what is left
 
-There is still none — just `sqrt` gamma applied on the CPU during readback
-(`util/wgpu_util.rs`), which remains the binding constraint on highlights: see
-the display-clip note under *Known limitations*.
+Done: `util/tone_map.rs` has a `ToneMapper` enum (ACES by default, plus Khronos
+PBR Neutral, extended Reinhard and the old `Clamp`), applied in
+`buffer_to_image` before gamma. It is a *display* transform, not a
+post-processor, deliberately: the renderer publishes a linear HDR buffer, and
+bloom and the denoiser have to keep seeing real radiance. All golden images
+were regenerated against ACES.
+
+Two things left:
+
+- **Gamma is still `sqrt`, not sRGB.** `buffer_to_image` encodes with gamma 2.0
+  where the Narkowicz ACES fit assumes an sRGB transfer. The difference is
+  small (sRGB is ~2.2 with a linear toe) but it is a second display-transform
+  decision left unmade, and it would shift the goldens again.
+- **The desktop app's transfer function still differs.** Done: `ToneMapper::wgsl`
+  emits the curve as WGSL, and `solstrale-desktop-rust` splices it into its blit
+  shader, so all three of its display paths share one definition of the tone
+  curve. What is still two things is the *transfer* function -- the viewport
+  applies none and relies on an sRGB surface, `buffer_to_image` encodes with
+  gamma 2.0 -- which is the same gap as the item above, seen from the other
+  side. Fixing that one fixes both.
 
 ### Instancing (BLAS/TLAS)
 
@@ -109,18 +129,6 @@ normalised, so `path_length` mixes two scales.
 Only observable through the light-attenuation falloff, which is the one feature
 that depends on absolute path length. Pre-existing; left alone deliberately
 because fixing it shifts the `light_attenuation_*` images again.
-
-### The pixel-to-frame mapping is off by half a pixel
-
-`trace_sample` and `trace_guide` both map a pixel to the frame with
-`(f32(pixel.x) + 0.5) / f32(config.width - 1u)`. The `- 1` makes `u` run over
-`[0.5/(w-1), (w-0.5)/(w-1)]` rather than `[0, 1]`, so the image is scaled by
-`w/(w-1)` and shifted half a pixel: the centre pixel's ray is not the centre
-ray. Visible in `test_gbuffer_follows_specular_chain`, where the reflected
-normal comes out 0.1 off the pole it should hit exactly.
-
-Harmless at any real resolution and a one-character fix, but it shifts every
-golden image, so it wants doing on its own.
 
 ### Spheres cannot be transformed
 
@@ -161,6 +169,15 @@ replaces a dependency that currently just works.
 
 ## Tooling and API
 
+### No interactive viewer
+
+No binary, no `src/bin/`, no `examples/`. `cargo run` does nothing — the only
+entry points are the test suite and the benchmark. For a project whose stated
+goal is learning path tracing and WGPU, being able to fly a camera around a scene
+is worth a lot, and it surfaces behaviour that batch benchmarks do not.
+
+The plumbing is already there and unused: the camera-update receiver, the abort
+channel and `idle_after_rendering` all exist to support an interactive viewer
 that nothing drives.
 
 ### `profile.sh` is broken
@@ -202,12 +219,11 @@ Recorded so they aren't reconsidered without new information.
 
 Correct but imperfect; documented so they read as choices rather than bugs.
 
-- **Readback clips linear radiance at 1.0.** `buffer_to_image`
-  (`util/wgpu_util.rs`) does `sqrt(L).min(0.999)`, so everything above 1.0 is
-  white regardless of how much brighter it really is. With the firefly clamp
-  now at 10 and indirect-only, this — not the clamp — is what decides what a
-  highlight looks like, and it is the reason a tone mapper would be the next
-  thing to change the image rather than another clamp tweak.
+- **ACES lifts midtones and skews saturated highlights.** The default curve is
+  the per-channel Narkowicz fit, so linear 0.5 comes out at 0.616 rather than
+  passing through, and bright reds and oranges drift toward yellow. Both are
+  inherent to the cheap fit and were accepted for the filmic look;
+  `ToneMapper::PbrNeutral` is in the enum for when neither is wanted.
 - **Light seen through glass is still clamped.** A dielectric bounce puts the
   emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
   vertex so far was specular" instead of `depth == 0` would exempt it, but it

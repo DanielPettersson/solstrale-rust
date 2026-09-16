@@ -640,6 +640,7 @@ fn test_gpu_scene_nested_bvh() {
     render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
 }
 
+use solstrale::util::tone_map::ToneMapper;
 use solstrale::util::wgpu_util::{buffer_to_image, get_result_from_buffer, get_wgpu_device_and_queue};
 
 fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64) {
@@ -669,7 +670,14 @@ fn render_and_compare_output(scene: Scene, name: &str, comparison_threshold: f64
         output_buffer = Some(render_output.output_buffer);
     }
 
-    let image = buffer_to_image(device, queue, &output_buffer.unwrap(), width, height);
+    let image = buffer_to_image(
+        device,
+        queue,
+        &output_buffer.unwrap(),
+        width,
+        height,
+        ToneMapper::default(),
+    );
 
     compare_output(name, &image, comparison_threshold);
 }
@@ -1151,15 +1159,9 @@ fn denoise_visual_pair() {
             scene.render_config.height as u32,
         );
         let pixels = render_linear(scene, device, queue);
-        let mut img = RgbImage::new(width, height);
-        for (i, p) in pixels.iter().enumerate() {
-            let c = |v: f32| (v.max(0.).sqrt().min(0.999) * 256.) as u8;
-            img.put_pixel(
-                i as u32 % width,
-                i as u32 / width,
-                image::Rgb([c(p[0]), c(p[1]), c(p[2])]),
-            );
-        }
+        // Same display transform as buffer_to_image, so what lands here is what
+        // the renderer actually shows rather than the pre-tone-mapping clip.
+        let img = encode(&pixels, width, height, ToneMapper::default());
         img.save(format!("tests/output/out_actual_visual_{}.png", name))
             .unwrap();
     };
@@ -1169,5 +1171,63 @@ fn denoise_visual_pair() {
             format!("specular_{}", name),
             specular_denoise_scene(16, strength),
         );
+    }
+}
+
+/// Applies the display transform to a linear buffer, exactly as
+/// [`buffer_to_image`] does, but from pixels already read back.
+fn encode(pixels: &[[f32; 4]], width: u32, height: u32, tone_mapper: ToneMapper) -> RgbImage {
+    let mut img = RgbImage::new(width, height);
+    for (i, p) in pixels.iter().enumerate() {
+        let m = tone_mapper.map([p[0], p[1], p[2]]);
+        let c = |v: f32| (v.sqrt().min(0.999) * 256.) as u8;
+        img.put_pixel(
+            i as u32 % width,
+            i as u32 / width,
+            image::Rgb([c(m[0]), c(m[1]), c(m[2])]),
+        );
+    }
+    img
+}
+
+/// Renders one scene through every tone mapper, so the curves can be compared
+/// on identical radiance rather than on separate renders.
+///
+/// The specular scene is the interesting one: it has a caustic under the glass
+/// sphere and a bright horizon, which is exactly the range the old 1.0 clip
+/// flattened into a single white.
+/// `cargo test --release tone_map_visual_comparison -- --ignored`
+#[test]
+#[ignore]
+fn tone_map_visual_comparison() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    for (scene_name, scene_of) in [
+        (
+            "specular",
+            (|| specular_denoise_scene(64, None)) as fn() -> Scene,
+        ),
+        ("test_scene", (|| denoise_scene(64, None, true)) as fn() -> Scene),
+    ] {
+        let scene = scene_of();
+        let (width, height) = (
+            scene.render_config.width as u32,
+            scene.render_config.height as u32,
+        );
+        let pixels = render_linear(scene, device, queue);
+
+        for (name, mapper) in [
+            ("clamp", ToneMapper::Clamp),
+            ("aces", ToneMapper::Aces),
+            ("pbr_neutral", ToneMapper::PbrNeutral),
+            ("reinhard", ToneMapper::Reinhard { white_point: 4. }),
+        ] {
+            encode(&pixels, width, height, mapper)
+                .save(format!(
+                    "tests/output/out_actual_tonemap_{}_{}.png",
+                    scene_name, name
+                ))
+                .unwrap();
+        }
     }
 }

@@ -7,6 +7,7 @@ pub mod height_map;
 pub mod interval;
 pub mod rgb_color;
 pub mod texture_processing;
+pub mod tone_map;
 pub mod wgpu_util;
 
 /// Converts an angle in degrees to radians
