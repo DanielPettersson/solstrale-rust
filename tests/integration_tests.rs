@@ -853,6 +853,42 @@ fn render_linear(
 }
 
 /// Root mean squared error between two linear images, over the colour channels.
+/// Root mean square of each pixel's luminance departure from its 3x3
+/// neighbourhood, relative to the image's mean luminance: how grainy the image
+/// looks, in one number.
+///
+/// Unlike RMSE against a reference this needs no reference, and it does not
+/// reward blur -- which matters for the property below, where the failure being
+/// guarded against is an image that is *less* blurred and more speckled.
+/// It does count real pixel-scale detail, so it is only meaningful compared
+/// between renders of the same scene.
+fn grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
+    let lum = |p: &[f32; 4]| (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) as f64;
+    let mut sum_sq = 0.0;
+    let mut sum_lum = 0.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut local = 0.0;
+            let mut taps = 0.0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let nx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
+                    let ny = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
+                    local += lum(&pixels[ny * width + nx]);
+                    taps += 1.0;
+                }
+            }
+            let d = lum(&pixels[y * width + x]) - local / taps;
+            sum_sq += d * d;
+            sum_lum += lum(&pixels[y * width + x]);
+        }
+    }
+
+    let pixels_count = (width * height) as f64;
+    (sum_sq / pixels_count).sqrt() / (sum_lum / pixels_count)
+}
+
 fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let sum: f64 = a
         .iter()
@@ -1079,9 +1115,10 @@ fn test_denoise_improves_low_sample_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
+    // 0.56 measured.
     assert!(
-        rmse_denoised < rmse_noisy * 0.7,
-        "denoising 8 spp should cut linear RMSE against the reference by at least 30%, \
+        rmse_denoised < rmse_noisy * 0.65,
+        "denoising 8 spp should cut linear RMSE against the reference by at least 35%, \
          was {} against {}",
         rmse_denoised,
         rmse_noisy
@@ -1115,15 +1152,60 @@ fn test_denoise_improves_specular_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
-    // 0.72 measured. The margin is wider than the 0.7 the diffuse scene asserts
+    // 0.68 measured. The margin is wider than the one the diffuse scene asserts
     // because the 2000 spp reference is itself adaptively sampled and moves a
     // little run to run.
     assert!(
-        rmse_denoised < rmse_noisy * 0.8,
+        rmse_denoised < rmse_noisy * 0.75,
         "denoising 8 spp of a specular scene should cut linear RMSE against the \
-         reference by at least 20%, was {} against {}",
+         reference by at least 25%, was {} against {}",
         rmse_denoised,
         rmse_noisy
+    );
+}
+
+/// Spending more samples must not make the denoised image grainier. Obvious,
+/// and it did not hold: at 1 sample per pixel the chain has no Welford variance
+/// to work from and falls back on estimates that cannot collapse, while from 2
+/// samples up it trusted each pixel's own M2 -- one degree of freedom, reading
+/// near zero for every pixel whose two samples happened to agree, which in a
+/// path tracer means every pixel that missed the light twice. Each of those
+/// declared itself converged and kept its raw value, so a 2 spp render came out
+/// of the denoiser covered in speckle that a 1 spp render did not have.
+///
+/// Measured at strength 4, where the effect was reported and where it is
+/// largest: a strong filter has the most to undo when a pixel opts out of it.
+/// Before the fix the 2 spp image was 30% grainier than the 1 spp one.
+#[test]
+fn test_denoise_grain_does_not_grow_with_samples() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let (width, height) = (200, 100);
+
+    let grain_at = |spp| {
+        let pixels = render_linear(denoise_scene(spp, Some(4.), false), device, queue);
+        grain(&pixels, width, height)
+    };
+    let (one, two, four) = (grain_at(1), grain_at(2), grain_at(4));
+
+    println!(
+        "denoised grain: 1 spp {:.4}, 2 spp {:.4}, 4 spp {:.4}",
+        one, two, four
+    );
+
+    // 2 spp is allowed to be a shade grainier than 1: it is also less blurred,
+    // and this metric counts the detail that buys as grain. 1.04 measured.
+    assert!(
+        two < one * 1.1,
+        "denoising 2 spp came out grainier than 1 spp, {} against {}",
+        two,
+        one
+    );
+    // By 4 samples there is no excuse left. 0.92 measured.
+    assert!(
+        four < one,
+        "denoising 4 spp came out grainier than 1 spp, {} against {}",
+        four,
+        one
     );
 }
 

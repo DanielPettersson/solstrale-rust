@@ -7,8 +7,8 @@
 // nothing a temporal stage could add.
 //
 // Two entry points share this module so that the guide decoding below is
-// written once: `prefilter_variance` is SVGF's 3x3 variance pre-pass, `compute`
-// is one A-Trous iteration.
+// written once: `prefilter_variance` is SVGF's variance pre-pass, `compute` is
+// one A-Trous iteration.
 
 override width: u32 = 1u;
 override height: u32 = 1u;
@@ -27,6 +27,9 @@ override sigma_specular: f32 = 1.0;
 // Set to 0 by DenoiseGuide::ColorOnly, which drops the four guide weights and
 // leaves the filter running on colour and variance alone.
 override use_guide: f32 = 1.0;
+// Radius of the variance pre-pass. See prefilter_variance for why it is 2 and
+// not SVGF's 1.
+override prefilter_radius: i32 = 2;
 
 // xyz: colour, w: variance of the colour estimate.
 @group(0) @binding(0)
@@ -41,6 +44,13 @@ var<storage, read_write> dst: array<vec4<f32>>;
 // mechanism, so the pair is deliberately duplicated rather than shared.
 @group(0) @binding(2)
 var<storage, read> gbuffer: array<vec4<u32>>;
+
+// Written by prefilter_variance only, and read by denoise_resolve.wgsl, which
+// needs the same pooled variance this pass hands the iterations below. The
+// copy in `dst.w` cannot serve: the iterations filter it along with the colour,
+// and by the last one it describes the kernel rather than the pixel.
+@group(0) @binding(3)
+var<storage, read_write> pooled_variance: array<f32>;
 
 struct Guide {
     albedo: vec3<f32>,
@@ -107,9 +117,25 @@ fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
     return mix(1.0, w_normal * w_depth * w_albedo * w_specular, use_guide);
 }
 
-// SVGF's 3x3 variance pre-pass. Without it the single-pixel spikes in the raw
+// SVGF's variance pre-pass. Without it the single-pixel spikes in the raw
 // variance make the colour tolerance flicker from pixel to pixel, which reads as
 // a shimmer the eye picks up immediately. Colour passes through untouched.
+//
+// It is also what makes the variance usable at all at a handful of samples per
+// pixel, which is the case the filter exists for. A pixel's own M2 carries
+// n - 1 degrees of freedom, so at n == 2 the variance it implies is chi-squared
+// with one degree of freedom: its median sits at 45% of the truth and a quarter
+// of all pixels land below a tenth of it. A pixel that lands there declares
+// itself converged while holding pure noise -- and in a path tracer that is not
+// an unlucky accident but the ordinary case, because the two samples of a pixel
+// that both missed the light agree closely.
+//
+// Pooling over neighbours that share a surface multiplies the degrees of
+// freedom by the kernel's effective tap count -- the inverse of its summed
+// squared weights, 12.1 at radius 2 against 7.1 for SVGF's binomial 3x3 -- and
+// costs no samples. Measured on the test scene at 2 spp, widening the kernel
+// this far cut linear RMSE against a converged reference by 10%; radius 3
+// bought another 3% for twice the taps.
 //
 // Deliberately no colour weight here: using a variance-driven weight to filter
 // the variance itself would be circular.
@@ -120,22 +146,21 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let index = gid.y * width + gid.x;
 
-    // Function-scope var rather than a module-scope const: naga will not always
-    // accept a runtime index into a const array, and the failure is opaque.
-    var g = array<f32, 3>(0.25, 0.5, 0.25);
-
     let centre_guide = load_guide(index);
 
     var sum_variance = 0.0;
     var sum_weight = 0.0;
 
-    for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
+    // Half the radius, so the kernel reaches two standard deviations.
+    let sigma = max(f32(prefilter_radius), 1.0) * 0.5;
+    for (var dy = -prefilter_radius; dy <= prefilter_radius; dy++) {
+        for (var dx = -prefilter_radius; dx <= prefilter_radius; dx++) {
             let x = clamp(i32(gid.x) + dx, 0, i32(width) - 1);
             let y = clamp(i32(gid.y) + dy, 0, i32(height) - 1);
             let n_index = u32(y) * width + u32(x);
 
-            let weight = g[dx + 1] * g[dy + 1]
+            let d2 = f32(dx * dx + dy * dy);
+            let weight = exp(-d2 / (2.0 * sigma * sigma))
                 * guide_weight(centre_guide, load_guide(n_index), 1.0);
 
             sum_variance += src[n_index].w * weight;
@@ -143,7 +168,9 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    dst[index] = vec4<f32>(src[index].xyz, sum_variance / sum_weight);
+    let variance = sum_variance / sum_weight;
+    pooled_variance[index] = variance;
+    dst[index] = vec4<f32>(src[index].xyz, variance);
 }
 
 @compute @workgroup_size(8, 8)
