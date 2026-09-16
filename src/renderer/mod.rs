@@ -544,7 +544,7 @@ impl<'a> Renderer<'a> {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -769,8 +769,7 @@ impl<'a> Renderer<'a> {
                 // Sample indices restart at zero too, so without a fresh
                 // restart_index the RNG would hand every frame of a camera
                 // drag the identical sample sequence.
-                self.render_config.restart_index =
-                    self.render_config.restart_index.wrapping_add(1);
+                self.render_config.restart_index = self.render_config.restart_index.wrapping_add(1);
                 // Get an image of the new view out as fast as possible, then
                 // grow back into the budget. Carrying a large batch across the
                 // restart would spend a whole dispatch before showing anything

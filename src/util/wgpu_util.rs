@@ -34,7 +34,7 @@ pub fn get_wgpu_device_and_queue() -> &'static (wgpu::Device, wgpu::Queue) {
 }
 
 fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn Error>> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
@@ -86,7 +86,7 @@ pub fn get_result_from_buffer<T: AnyBitPattern>(
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let result = {
         let data = buffer_slice.get_mapped_range();
-        bytemuck::cast_slice(&data).to_vec()
+        bytemuck::cast_slice(&data.unwrap()).to_vec()
     };
     buffer.unmap();
     result
@@ -273,8 +273,8 @@ fn pipeline_layout(
 ) -> wgpu::PipelineLayout {
     device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[bind_group_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
     })
 }
 
@@ -337,7 +337,7 @@ pub fn buffer_to_image(
 
     let mut img = image::RgbImage::new(width, height);
     {
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().unwrap();
         let pixels: &[[f32; 4]] = bytemuck::cast_slice(&data);
 
         img.as_mut()
