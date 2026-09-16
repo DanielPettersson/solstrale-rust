@@ -14,7 +14,7 @@ use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::SolidColor;
 use solstrale::material::{DiffuseLight, Lambertian};
-use solstrale::post::{BloomPostProcessor, SaturationPostProcessor};
+use solstrale::post::{BloomPostProcessor, DenoisePostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
 
@@ -794,4 +794,254 @@ fn mean_linear_radiance(
         .map(|p| (p[0] + p[1] + p[2]) as f64 / 3.0)
         .sum();
     sum / result.len() as f64
+}
+
+/// Renders a scene and returns its raw linear pixels, before gamma.
+fn render_linear(
+    scene: Scene,
+    device: &'static wgpu::Device,
+    queue: &'static wgpu::Queue,
+) -> Vec<[f32; 4]> {
+    let (output_sender, output_receiver) = channel();
+    let (_, camera_config_receiver) = channel();
+    let (_, abort_receiver) = channel();
+
+    let width = scene.render_config.width as u32;
+    let height = scene.render_config.height as u32;
+
+    thread::spawn(move || {
+        ray_trace(
+            scene,
+            &output_sender,
+            &camera_config_receiver,
+            &abort_receiver,
+            device,
+            queue,
+            false,
+        )
+        .unwrap();
+    });
+
+    let mut output_buffer = None;
+    for render_output in output_receiver {
+        output_buffer = Some(render_output.output_buffer);
+    }
+
+    let size = (width * height * 16) as u64;
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    encoder.copy_buffer_to_buffer(&output_buffer.unwrap(), 0, &staging_buffer, 0, size);
+    queue.submit(Some(encoder.finish()));
+
+    get_result_from_buffer(device, &staging_buffer)
+}
+
+/// Root mean squared error between two linear images, over the colour channels.
+fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
+    let sum: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(p, q)| {
+            (0..3)
+                .map(|c| {
+                    let d = (p[c] - q[c]) as f64;
+                    d * d
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    (sum / (a.len() * 3) as f64).sqrt()
+}
+
+/// Regression net for the denoise chain end to end, and for the documented
+/// ordering: the denoiser runs first so bloom lands on a clean image rather than
+/// being blurred by it.
+#[test]
+fn test_scene_denoise() {
+    let (device, _) = get_wgpu_device_and_queue();
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 16,
+        post_processors: vec![
+            DenoisePostProcessor::new(1., None, None, device)
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    render_and_compare_output(create_test_scene(render_config), "denoise", 0.95);
+}
+
+#[test]
+fn test_scene_denoise_and_bloom() {
+    let (device, _) = get_wgpu_device_and_queue();
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 16,
+        post_processors: vec![
+            DenoisePostProcessor::new(1., None, None, device)
+                .unwrap()
+                .into(),
+            BloomPostProcessor::new(0.1, None, None, device)
+                .unwrap()
+                .into(),
+        ],
+        ..Default::default()
+    };
+    render_and_compare_output(create_test_scene(render_config), "denoise_and_bloom", 0.95);
+}
+
+/// A denoise test scene. `strength` of `None` leaves the chain empty, so the
+/// same scene builder produces the control and the treatment.
+fn denoise_scene(samples_per_pixel: u32, strength: Option<f64>, adaptive: bool) -> Scene {
+    let (device, _) = get_wgpu_device_and_queue();
+    let post_processors = match strength {
+        Some(s) => vec![
+            DenoisePostProcessor::new(s, None, None, device)
+                .unwrap()
+                .into(),
+        ],
+        None => vec![],
+    };
+    create_test_scene(RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel,
+        // Above samples_per_pixel disables adaptive sampling, as the benches do.
+        min_samples_per_pixel: if adaptive { 32 } else { u32::MAX },
+        post_processors,
+        ..Default::default()
+    })
+}
+
+/// The objective gate: denoising a low-sample render must land it measurably
+/// closer to a converged reference than the noisy render it started from.
+///
+/// This is a controlled experiment rather than a noise comparison. The RNG seed
+/// in `trace_sample` is a pure function of pixel, sample index and restart
+/// index; `restart_index` is zero for a non-interactive render; and adaptive
+/// sampling cannot fire at 8 spp because `min_samples_per_pixel` defaults to 32.
+/// So the noisy and denoised renders trace bit-identical sample streams and the
+/// only difference between the two images is the filter.
+///
+/// Measured in linear space at full resolution. Deliberately *not* through
+/// `compare_output`, whose 100x50 Gaussian downsample is itself a denoiser and
+/// would wash out most of the effect being measured.
+#[test]
+fn test_denoise_improves_low_sample_image() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let reference = render_linear(denoise_scene(2000, None, true), device, queue);
+    let noisy = render_linear(denoise_scene(8, None, true), device, queue);
+    let denoised = render_linear(denoise_scene(8, Some(1.), true), device, queue);
+
+    let rmse_noisy = linear_rmse(&noisy, &reference);
+    let rmse_denoised = linear_rmse(&denoised, &reference);
+
+    println!("linear RMSE against 2000 spp reference:");
+    println!("  8 spp, no denoiser: {}", rmse_noisy);
+    println!("  8 spp, denoised:    {}", rmse_denoised);
+    println!("  ratio:              {}", rmse_denoised / rmse_noisy);
+
+    assert!(
+        rmse_denoised < rmse_noisy * 0.7,
+        "denoising 8 spp should cut linear RMSE against the reference by at least 30%, \
+         was {} against {}",
+        rmse_denoised,
+        rmse_noisy
+    );
+}
+
+/// The filter has to fade itself out as the render converges, because its
+/// luminance tolerance is set by the variance of the pixel mean and that falls
+/// as 1/n. Without this the filter would keep a fixed blur floor that a
+/// single-spp golden test cannot see.
+#[test]
+fn test_denoise_is_near_identity_at_high_samples() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    // Adaptive sampling off, so every pixel really has 2000 samples. With it on,
+    // pixels retire at 5% relative standard error and the image is not converged
+    // in the sense this test is about.
+    let plain = render_linear(denoise_scene(2000, None, false), device, queue);
+    let denoised = render_linear(denoise_scene(2000, Some(1.), false), device, queue);
+
+    let mean: f64 = plain
+        .iter()
+        .map(|p| (p[0] + p[1] + p[2]) as f64 / 3.0)
+        .sum::<f64>()
+        / plain.len() as f64;
+    let relative = linear_rmse(&denoised, &plain) / mean;
+
+    println!(
+        "relative linear RMSE of the denoiser at 2000 spp: {}",
+        relative
+    );
+
+    assert!(
+        relative < 0.02,
+        "at 2000 spp the denoiser should be close to the identity, relative RMSE was {}",
+        relative
+    );
+}
+
+/// Diagnostic, not a gate: prints linear RMSE against a converged reference for
+/// a range of strengths at a range of sample counts. This is how the defaults in
+/// `DenoisePostProcessor::initialize` were chosen, and re-running it is how to
+/// re-choose them. `cargo test --release denoise_strength_sweep -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn denoise_strength_sweep() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let reference = render_linear(denoise_scene(4000, None, false), device, queue);
+
+    for adaptive in [false, true] {
+        for spp in [8u32, 64, 2000] {
+            let plain = render_linear(denoise_scene(spp, None, adaptive), device, queue);
+            let base = linear_rmse(&plain, &reference);
+            let mut line = format!("adaptive={} spp={:<5} none={:.4}", adaptive, spp, base);
+            for s in [0.25f64, 0.5, 1.0, 2.0] {
+                let d = render_linear(denoise_scene(spp, Some(s), adaptive), device, queue);
+                let rmse = linear_rmse(&d, &reference);
+                line += &format!("  s={}: {:.4} ({:.2})", s, rmse, rmse / base);
+            }
+            println!("{}", line);
+        }
+    }
+}
+
+/// Diagnostic, not a gate: saves a noisy/denoised pair for visual inspection,
+/// which is how the golden images above were vetted before being promoted.
+/// `cargo test --release denoise_visual_pair -- --ignored`
+#[test]
+#[ignore]
+fn denoise_visual_pair() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    for (name, strength) in [("noisy", None), ("denoised", Some(1.))] {
+        let scene = denoise_scene(16, strength, true);
+        let (width, height) = (
+            scene.render_config.width as u32,
+            scene.render_config.height as u32,
+        );
+        let pixels = render_linear(scene, device, queue);
+        let mut img = RgbImage::new(width, height);
+        for (i, p) in pixels.iter().enumerate() {
+            let c = |v: f32| (v.max(0.).sqrt().min(0.999) * 256.) as u8;
+            img.put_pixel(
+                i as u32 % width,
+                i as u32 / width,
+                image::Rgb([c(p[0]), c(p[1]), c(p[2])]),
+            );
+        }
+        img.save(format!("tests/output/out_actual_visual_{}.png", name))
+            .unwrap();
+    }
 }

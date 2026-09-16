@@ -1,6 +1,6 @@
 //! Post-processor for applying saturation
 
-use crate::post::PostProcessor;
+use crate::post::{PostProcessContext, PostProcessor};
 use crate::util::wgpu_util::{bind_group, bind_group_layout, compute_pipeline, storage_binding};
 use std::error::Error;
 
@@ -59,23 +59,18 @@ impl PostProcessor for SaturationPostProcessor {
         self.height = height;
     }
 
-    fn post_process(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        buffer: &wgpu::Buffer,
-        device: &wgpu::Device,
-    ) -> Result<(), Box<dyn Error>> {
+    fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>> {
         let bind_group = bind_group(
-            device,
+            ctx.device,
             &self.bind_group_layout,
             &[wgpu::BindingResource::Buffer(
-                buffer.as_entire_buffer_binding(),
+                ctx.buffer.as_entire_buffer_binding(),
             )],
         );
 
         let workgroup_count = (self.width * self.height).div_ceil(64);
         crate::util::wgpu_util::add_compute_pass(
-            encoder,
+            ctx.encoder,
             &self.pipeline,
             &bind_group,
             workgroup_count,

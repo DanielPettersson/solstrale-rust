@@ -17,6 +17,7 @@ use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
 use solstrale::material::Lambertian;
 use solstrale::material::texture::SolidColor;
+use solstrale::post::{DenoisePostProcessor, PostProcessors};
 use solstrale::ray_trace;
 use solstrale::renderer::scene_flattener::flatten_scene;
 use solstrale::renderer::{RenderConfig, Scene};
@@ -325,6 +326,66 @@ pub fn adaptive_sampling_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+/// What the denoise chain costs on top of a render, and how that scales with the
+/// iteration count.
+///
+/// Held at a low sample count, which is the regime a denoiser exists for: the
+/// filter is a fixed per-dispatch cost and would be lost under the tracing at
+/// high spp. The `none` arm is what makes the numbers mean anything, since
+/// `render_and_sync` also times scene upload and readback.
+///
+/// The processors are built once, outside the setup closure. `PostProcessors` is
+/// `Clone` and wgpu handles are refcounted, so cloning reuses the pipelines --
+/// rebuilding them per iteration would measure shader compilation instead.
+pub fn denoise_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("denoise");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+
+    let (device, _) = get_wgpu_device_and_queue();
+    let denoisers: Vec<(&str, Option<PostProcessors>)> = vec![
+        ("none", None),
+        (
+            "iterations_3",
+            Some(
+                DenoisePostProcessor::new(1., Some(3), None, device)
+                    .unwrap()
+                    .into(),
+            ),
+        ),
+        (
+            "iterations_5",
+            Some(
+                DenoisePostProcessor::new(1., Some(5), None, device)
+                    .unwrap()
+                    .into(),
+            ),
+        ),
+    ];
+
+    for (name, denoiser) in &denoisers {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            denoiser,
+            |b, denoiser| {
+                b.iter_with_setup(
+                    || {
+                        create_test_scene(RenderConfig {
+                            samples_per_pixel: 16,
+                            width: 800,
+                            height: 600,
+                            post_processors: denoiser.clone().into_iter().collect(),
+                            ..RenderConfig::default()
+                        })
+                    },
+                    render_and_sync,
+                )
+            },
+        );
+    }
+    group.finish();
+}
+
 /// Trace throughput against triangle count, with and without a BVH.
 pub fn bvh_traversal_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("bvh_traversal");
@@ -379,6 +440,7 @@ criterion_group!(
     flatten_benchmark,
     bvh_traversal_benchmark,
     render_benchmark,
-    adaptive_sampling_benchmark
+    adaptive_sampling_benchmark,
+    denoise_benchmark
 );
 criterion_main!(benches);

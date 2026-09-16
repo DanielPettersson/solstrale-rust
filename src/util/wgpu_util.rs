@@ -134,11 +134,25 @@ pub(crate) fn compute_pipeline<'a>(
     module: &wgpu::ShaderModule,
     constants: &'a [(&'a str, f64)],
 ) -> wgpu::ComputePipeline {
+    compute_pipeline_with_entry(device, bind_group_layout, module, "compute", constants)
+}
+
+/// As [`compute_pipeline`], but for a module that declares more than one entry
+/// point. Sharing a module lets two related passes share their helper functions,
+/// which WGSL offers no other way to do -- `include_wgsl!` is `include_str!` and
+/// there is no include directive.
+pub(crate) fn compute_pipeline_with_entry<'a>(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    constants: &'a [(&'a str, f64)],
+) -> wgpu::ComputePipeline {
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
         layout: Some(&pipeline_layout(device, bind_group_layout)),
         module,
-        entry_point: Some("compute"),
+        entry_point: Some(entry_point),
         compilation_options: wgpu::PipelineCompilationOptions {
             constants,
             ..Default::default()

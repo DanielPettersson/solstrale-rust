@@ -335,6 +335,10 @@ pub struct Renderer<'a> {
     output_buffer: wgpu::Buffer,
     #[allow(dead_code)]
     sample_count_buffer: wgpu::Buffer,
+    gbuffer: wgpu::Buffer,
+    /// Scratch copy the post-processing chain runs on, so the accumulator is
+    /// never written by a post-processor. `None` when there is no chain.
+    post_buffer: Option<wgpu::Buffer>,
     bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
     nodes_buffer: wgpu::Buffer,
@@ -575,6 +579,7 @@ impl<'a> Renderer<'a> {
                 storage_binding(true, 0),  // 12: triangle attributes
                 storage_binding(true, 0),  // 13: quad attributes
                 storage_binding(false, 0), // 14: per-pixel sample count
+                storage_binding(false, 0), // 15: primary-hit guide (denoiser G-buffer)
             ],
         );
 
@@ -599,6 +604,17 @@ impl<'a> Renderer<'a> {
             mapped_at_creation: false,
         });
 
+        // Primary-hit albedo, normal and camera distance, packed 16 bytes per
+        // pixel. Written by the tracer on the first dispatch of an accumulation
+        // run and read only by a denoising post-processor. COPY_SRC so tests can
+        // read it back.
+        let gbuffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Guide Buffer"),
+            size: (width * height * 16) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
         let bind_group = bind_group(
             device,
             &bind_group_layout,
@@ -618,6 +634,7 @@ impl<'a> Renderer<'a> {
                 wgpu::BindingResource::Buffer(triangle_attr_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(quad_attr_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(sample_count_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(gbuffer.as_entire_buffer_binding()),
             ],
         );
 
@@ -625,6 +642,22 @@ impl<'a> Renderer<'a> {
         for p in &mut post_processors {
             p.initialize(device, queue, width, height);
         }
+
+        // The post-processing chain runs on a copy, never on the accumulator.
+        // See the comment on PostProcessContext::accumulator for why: a
+        // post-processor writing into output_buffer would feed its own output
+        // back into the next batch's Welford merge. Only allocated when there is
+        // a chain to run, so the default path costs nothing.
+        let post_buffer = if post_processors.is_empty() {
+            None
+        } else {
+            Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Post Process Buffer"),
+                size,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }))
+        };
 
         Ok(Renderer {
             width,
@@ -635,6 +668,8 @@ impl<'a> Renderer<'a> {
             pipeline,
             output_buffer,
             sample_count_buffer,
+            gbuffer,
+            post_buffer,
             bind_group,
             nodes_buffer,
             spheres_buffer,
@@ -758,9 +793,27 @@ impl<'a> Renderer<'a> {
                 workgroup_count_y,
             );
 
-            if completed + batch >= samples_per_pixel {
-                for p in &self.post_processors {
-                    p.post_process(&mut encoder, &self.output_buffer, self.device)?;
+            // Refreshed every batch, not just the one the chain runs on: the
+            // post buffer is what gets published on RenderProgress, so a caller
+            // watching an unfinished render has to see the accumulated image
+            // there rather than whatever the allocation came with.
+            if let Some(post_buffer) = &self.post_buffer {
+                let size = (self.width * self.height) as u64 * crate::post::PIXEL_SIZE;
+                encoder.copy_buffer_to_buffer(&self.output_buffer, 0, post_buffer, 0, size);
+
+                if completed + batch >= samples_per_pixel {
+                    let mut ctx = crate::post::PostProcessContext {
+                        encoder: &mut encoder,
+                        buffer: post_buffer,
+                        accumulator: &self.output_buffer,
+                        sample_count_buffer: &self.sample_count_buffer,
+                        gbuffer: &self.gbuffer,
+                        samples_completed: completed,
+                        device: self.device,
+                    };
+                    for p in &self.post_processors {
+                        p.post_process(&mut ctx)?;
+                    }
                 }
             }
 
@@ -804,7 +857,15 @@ impl<'a> Renderer<'a> {
                     ms_per_sample,
                     samples_per_pixel - completed,
                 ),
-                output_buffer: self.output_buffer.clone(),
+                // Stable for the life of the render -- always the post buffer
+                // when there is a chain, always the accumulator when there is
+                // not -- so a caller caching a bind group per buffer handle
+                // never has to rebuild it between batches.
+                output_buffer: self
+                    .post_buffer
+                    .as_ref()
+                    .unwrap_or(&self.output_buffer)
+                    .clone(),
             })?;
         }
 
@@ -1122,5 +1183,157 @@ mod test {
 
         let camera_data: Vec<GpuCamera> = get_result_from_buffer(device, &staging_buffer);
         assert_eq!(camera_data[0].origin, [0., 0., 10.]);
+    }
+
+    /// Decodes an IEEE half. Only the cases octahedral coordinates actually
+    /// produce are handled: zero and the normal range. Subnormals are below
+    /// 6e-5 and read as zero, which is within this test's tolerances anyway.
+    fn f16_to_f32(bits: u16) -> f32 {
+        let sign = ((bits >> 15) & 1) as u32;
+        let exp = ((bits >> 10) & 0x1f) as u32;
+        let frac = (bits & 0x3ff) as u32;
+        if exp == 0 {
+            return f32::from_bits(sign << 31);
+        }
+        f32::from_bits((sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13))
+    }
+
+    /// Inverse of `oct_encode` in ray_trace.wgsl. Must stay in step with it.
+    fn oct_decode(e: [f32; 2]) -> [f32; 3] {
+        let mut v = [e[0], e[1], 1.0 - e[0].abs() - e[1].abs()];
+        if v[2] < 0.0 {
+            let x = (1.0 - v[1].abs()) * if v[0] >= 0.0 { 1.0 } else { -1.0 };
+            let y = (1.0 - v[0].abs()) * if v[1] >= 0.0 { 1.0 } else { -1.0 };
+            v[0] = x;
+            v[1] = y;
+        }
+        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / len, v[1] / len, v[2] / len]
+    }
+
+    /// The guide the denoiser reads has to describe the geometry the camera
+    /// actually sees. This pins all four packed slots against a scene whose
+    /// answer is known analytically, which is what catches the two traps in the
+    /// encoding: the octahedral round trip, and using `rec.t` (in units of the
+    /// unnormalised primary ray) where a world-space distance is meant.
+    #[test]
+    fn test_gbuffer_primary_hit() {
+        use crate::camera::CameraConfig;
+        use crate::geo::vec3::Vec3;
+        use crate::hittable::{Bvh, Hittables, Sphere};
+        use crate::material::texture::SolidColor;
+        use crate::material::{DiffuseLight, Lambertian};
+        use crate::renderer::{RenderConfig, Renderer, Scene};
+        use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
+        use std::sync::mpsc::channel;
+
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        // Odd dimensions so there is a true centre pixel, and no aperture so the
+        // primary ray carries no lens jitter.
+        const SIZE: u32 = 41;
+        let render_config = RenderConfig {
+            width: SIZE as usize,
+            height: SIZE as usize,
+            samples_per_pixel: 1,
+            ..Default::default()
+        };
+
+        // A yellow sphere of radius 0.5 at the origin, seen from 4 units away:
+        // the centre ray hits its near pole at z = 0.5, so the camera distance
+        // is 3.5 and the surface normal there points straight back at the camera.
+        let world: Vec<Hittables> = vec![
+            Sphere::new(
+                Vec3::new(0., 0., 0.),
+                0.5,
+                Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into(),
+            )
+            .into(),
+            // The renderer requires a light. Far outside the 20 degree frustum,
+            // so it cannot be the primary hit for any pixel under test.
+            Sphere::new(
+                Vec3::new(0., 100., 0.),
+                20.,
+                DiffuseLight::new(10., 10., 10., None).into(),
+            )
+            .into(),
+        ];
+
+        let scene = Scene {
+            world: Bvh::new(world).into(),
+            camera: CameraConfig {
+                vertical_fov_degrees: 20.,
+                aperture_size: 0.,
+                look_from: Vec3::new(0., 0., 4.),
+                look_at: Vec3::new(0., 0., 0.),
+                up: Vec3::new(0., 1., 0.),
+            },
+            background_color: Vec3::new(0.2, 0.3, 0.5),
+            render_config,
+        };
+
+        let mut renderer = Renderer::new(scene, device, queue).unwrap();
+        let (output_sender, output_receiver) = channel();
+        let (_camera_sender, camera_receiver) = channel();
+        let (_abort_sender, abort_receiver) = channel();
+        renderer
+            .render(&output_sender, &camera_receiver, &abort_receiver, false)
+            .unwrap();
+        drop(output_sender);
+        for _ in output_receiver {}
+
+        let size = (SIZE * SIZE * 16) as u64;
+        let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&renderer.gbuffer, 0, &staging_buffer, 0, size);
+        queue.submit(Some(encoder.finish()));
+        let guide: Vec<[u32; 4]> = get_result_from_buffer(device, &staging_buffer);
+
+        let centre = guide[((SIZE / 2) * SIZE + SIZE / 2) as usize];
+
+        let albedo = [
+            (centre[0] & 0xff) as f32 / 255.,
+            ((centre[0] >> 8) & 0xff) as f32 / 255.,
+            ((centre[0] >> 16) & 0xff) as f32 / 255.,
+        ];
+        assert!(
+            albedo[0] > 0.99 && albedo[1] > 0.99 && albedo[2] < 0.01,
+            "centre albedo should be the sphere's yellow, was {:?}",
+            albedo
+        );
+
+        let normal = oct_decode([
+            f16_to_f32((centre[1] & 0xffff) as u16),
+            f16_to_f32((centre[1] >> 16) as u16),
+        ]);
+        assert!(
+            normal[2] > 0.99,
+            "centre normal should point back at the camera, was {:?}",
+            normal
+        );
+
+        let depth = f32::from_bits(centre[2]);
+        assert!(
+            (depth - 3.5).abs() < 0.05,
+            "centre depth should be the 3.5 unit camera distance, was {}",
+            depth
+        );
+        assert_eq!(centre[3], 0, "centre material should be MAT_LAMBERTIAN");
+
+        // A corner ray clears the sphere entirely and must read as background,
+        // so the filter keeps the silhouette rather than blending across it.
+        let corner = guide[0];
+        assert_eq!(corner[3], 5, "corner material should be MAT_MISS");
+        assert_eq!(
+            f32::from_bits(corner[2]),
+            1e7,
+            "corner depth should be the far sentinel"
+        );
     }
 }

@@ -48,11 +48,41 @@ blockers make this a feature rather than an optimisation:
 imported from an OBJ would make both terrible. Wants an alias table for
 power-weighted selection, and a light BVH for the PDF sum.
 
-### Denoiser
+### Denoiser — the specular guide
 
-OIDN was removed in the `wgpu-render` merge and nothing replaced it. There is no
-tone mapping either — just `sqrt` gamma applied on the CPU during readback
-(`util/wgpu_util.rs`), which is now the binding constraint on highlights: see
+Done: `post/denoise.rs` is an edge-avoiding à-trous filter guided by the
+primary-hit G-buffer and by the per-pixel Welford variance. What is left is the
+case it handles worst.
+
+The guide is written at **depth 0**, so for a mirror or a glass surface it
+describes the surface itself rather than what is seen through or in it. The
+filter therefore blurs the reflected and refracted image along the surface. This
+is the standard SVGF limitation, but caustics and refraction are headline
+features here, so it is more visible than usual.
+
+The fix is to fill the guide at the first *non-specular* hit instead: the path
+loop already tracks `prev_specular`, and `path_length` is already accumulated, so
+guide depth would stay monotone along the path. Fall back to depth 0 if a path
+terminates while still specular. Left out of the first version to keep it
+reviewable.
+
+Two smaller ones from the same work:
+
+- **Depth weight without a gradient.** `guide_weight` uses a relative depth test,
+  which is scale-free and handles the background sentinel, but is more permissive
+  than SVGF's screen-space gradient form at grazing incidence — a floor receding
+  to the horizon will over-blur slightly near the horizon. There are spare bits
+  in the G-buffer's `.w` for a forward-difference gradient if it shows.
+- **Interactive previews.** Post-processing still runs only on the final batch,
+  so a camera drag is never denoised — which is the regime where it would help
+  most. The chain already runs on a scratch copy, so this is now safe to add: it
+  needs a per-processor "run on every batch" flag, and an accepted pop when bloom
+  appears only at the end.
+
+### Tone mapping
+
+There is still none — just `sqrt` gamma applied on the CPU during readback
+(`util/wgpu_util.rs`), which remains the binding constraint on highlights: see
 the display-clip note under *Known limitations*.
 
 ### Instancing (BLAS/TLAS)
