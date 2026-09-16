@@ -1,4 +1,5 @@
 //! Utility functions for working with wgpu
+use crate::util::tone_map::ToneMapper;
 use bytemuck::AnyBitPattern;
 use once_cell::sync::Lazy;
 use simple_error::SimpleError;
@@ -267,13 +268,20 @@ fn pipeline_layout(
     })
 }
 
-/// Converts a wgpu buffer to an RgbImage
+/// Converts a wgpu buffer of linear HDR radiance to an RgbImage.
+///
+/// This is the display transform: `tone_mapper` brings unbounded radiance into
+/// `[0, 1]`, then gamma encoding makes it displayable. Everything upstream --
+/// the accumulator, bloom, the denoiser -- works on the untouched linear
+/// values, so the curve chosen here changes only what is shown, never what is
+/// computed.
 pub fn buffer_to_image(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
     width: u32,
     height: u32,
+    tone_mapper: ToneMapper,
 ) -> image::RgbImage {
     let size = (width * height * 16) as u64;
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -296,11 +304,15 @@ pub fn buffer_to_image(
         let x = (i as u32) % width;
         let y = (i as u32) / width;
         if x < width && y < height {
-            // Apply gamma correction (gamma = 2.0) and clamp
-            let r = (pixel[0].max(0.0).sqrt().min(0.999) * 256.0) as u8;
-            let g = (pixel[1].max(0.0).sqrt().min(0.999) * 256.0) as u8;
-            let b = (pixel[2].max(0.0).sqrt().min(0.999) * 256.0) as u8;
-            img.put_pixel(x, y, image::Rgb([r, g, b]));
+            let mapped = tone_mapper.map([pixel[0], pixel[1], pixel[2]]);
+            // Gamma 2.0, and the 0.999 ceiling so the `* 256` below cannot
+            // reach 256 and wrap the cast to u8.
+            let encode = |v: f32| (v.sqrt().min(0.999) * 256.0) as u8;
+            img.put_pixel(
+                x,
+                y,
+                image::Rgb([encode(mapped[0]), encode(mapped[1]), encode(mapped[2])]),
+            );
         }
     }
     img

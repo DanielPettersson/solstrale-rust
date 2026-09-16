@@ -84,11 +84,29 @@ Two smaller ones from the same work:
   needs a per-processor "run on every batch" flag, and an accepted pop when bloom
   appears only at the end.
 
-### Tone mapping
+### Tone mapping — what is left
 
-There is still none — just `sqrt` gamma applied on the CPU during readback
-(`util/wgpu_util.rs`), which remains the binding constraint on highlights: see
-the display-clip note under *Known limitations*.
+Done: `util/tone_map.rs` has a `ToneMapper` enum (ACES by default, plus Khronos
+PBR Neutral, extended Reinhard and the old `Clamp`), applied in
+`buffer_to_image` before gamma. It is a *display* transform, not a
+post-processor, deliberately: the renderer publishes a linear HDR buffer, and
+bloom and the denoiser have to keep seeing real radiance. All golden images
+were regenerated against ACES.
+
+Two things left:
+
+- **Gamma is still `sqrt`, not sRGB.** `buffer_to_image` encodes with gamma 2.0
+  where the Narkowicz ACES fit assumes an sRGB transfer. The difference is
+  small (sRGB is ~2.2 with a linear toe) but it is a second display-transform
+  decision left unmade, and it would shift the goldens again.
+- **The desktop app's viewport is not tone mapped.** `solstrale-desktop-rust`
+  has three display paths: `save_image.rs` and `bin/solstrale-batch-render.rs`
+  go through `buffer_to_image` and so get ACES, but the live viewport has its
+  own blit shader (`render_output.rs`, `SHADER`) that returns the linear value
+  straight to an sRGB surface. So the app's preview now clips at 1.0 while its
+  saved file rolls off. Fixing it means porting the curve into that shader --
+  or having `ToneMapper` emit its WGSL so there is one definition rather than
+  two that can drift.
 
 ### Instancing (BLAS/TLAS)
 
@@ -202,12 +220,11 @@ Recorded so they aren't reconsidered without new information.
 
 Correct but imperfect; documented so they read as choices rather than bugs.
 
-- **Readback clips linear radiance at 1.0.** `buffer_to_image`
-  (`util/wgpu_util.rs`) does `sqrt(L).min(0.999)`, so everything above 1.0 is
-  white regardless of how much brighter it really is. With the firefly clamp
-  now at 10 and indirect-only, this — not the clamp — is what decides what a
-  highlight looks like, and it is the reason a tone mapper would be the next
-  thing to change the image rather than another clamp tweak.
+- **ACES lifts midtones and skews saturated highlights.** The default curve is
+  the per-channel Narkowicz fit, so linear 0.5 comes out at 0.616 rather than
+  passing through, and bright reds and oranges drift toward yellow. Both are
+  inherent to the cheap fit and were accepted for the filmic look;
+  `ToneMapper::PbrNeutral` is in the enum for when neither is wanted.
 - **Light seen through glass is still clamped.** A dielectric bounce puts the
   emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
   vertex so far was specular" instead of `depth == 0` would exempt it, but it

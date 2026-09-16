@@ -32,6 +32,12 @@ Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https:/
   reference by about a third at 8 samples per pixel and leaves an already
   converged image essentially untouched
 
+### Display
+* Tone mapping: ACES filmic by default, with Khronos PBR Neutral, extended
+  Reinhard and a plain clamp selectable. Applied in `buffer_to_image` as a
+  display transform, so highlights roll off instead of clipping at linear 1.0
+  while everything upstream keeps working on real radiance
+
 ## Requirements
 A GPU adapter supporting compute shaders and at least 12 storage buffers per
 shader stage. Native backends (Vulkan, Metal, DX12) exceed this comfortably; the
