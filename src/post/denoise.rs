@@ -32,9 +32,8 @@ pub enum DenoiseGuide {
 /// its tolerance is set by the variance of the pixel *mean*, which falls as
 /// `1/n`, and the result is then blended back over the original in proportion to
 /// each pixel's remaining relative standard error. Measured against a converged
-/// reference on the test scene, it cuts linear RMSE by about a third at 8
-/// samples per pixel, by about a sixth at 64, and changes a 2000-sample image by
-/// 0.2%.
+/// reference on the test scene, it cuts linear RMSE by about 45% at 8 samples
+/// per pixel, by about a fifth at 64, and changes a 2000-sample image by 0.2%.
 ///
 /// Costs seven compute dispatches, run once on the finished image: 4.2 ms at
 /// 800x600 on a Radeon RX 5700 XT, against 52 ms for the render itself at 16
@@ -68,6 +67,7 @@ pub struct DenoisePostProcessor {
 
     prepare_bind_group_layout: wgpu::BindGroupLayout,
     atrous_bind_group_layout: wgpu::BindGroupLayout,
+    resolve_bind_group_layout: wgpu::BindGroupLayout,
 
     prepare_pipeline: Option<wgpu::ComputePipeline>,
     prefilter_pipeline: Option<wgpu::ComputePipeline>,
@@ -78,6 +78,9 @@ pub struct DenoisePostProcessor {
 
     buffer_a: Option<wgpu::Buffer>,
     buffer_b: Option<wgpu::Buffer>,
+    /// The variance the pre-filter pooled, kept aside from the image the à-trous
+    /// iterations then filter, so the resolve pass can still read it.
+    variance_buffer: Option<wgpu::Buffer>,
 }
 
 /// Bounds on the iteration count. Five reaches 32 pixels, which is the usual
@@ -136,6 +139,17 @@ impl DenoisePostProcessor {
                 storage_binding(true, 16),  // source
                 storage_binding(false, 16), // destination
                 storage_binding(true, 16),  // guide
+                storage_binding(false, 4),  // pooled variance, written by the pre-filter
+            ],
+        );
+
+        let resolve_bind_group_layout = bind_group_layout(
+            device,
+            &[
+                storage_binding(true, 4),   // per-pixel sample count
+                storage_binding(true, 16),  // filtered image
+                storage_binding(false, 16), // working image
+                storage_binding(true, 4),   // pooled variance
             ],
         );
 
@@ -150,12 +164,14 @@ impl DenoisePostProcessor {
             resolve_module,
             prepare_bind_group_layout,
             atrous_bind_group_layout,
+            resolve_bind_group_layout,
             prepare_pipeline: None,
             prefilter_pipeline: None,
             resolve_pipeline: None,
             atrous_pipelines: Vec::new(),
             buffer_a: None,
             buffer_b: None,
+            variance_buffer: None,
         })
     }
 }
@@ -217,11 +233,9 @@ impl PostProcessor for DenoisePostProcessor {
             &constants(1),
         ));
 
-        // Shares the prepare layout: both are [ro accumulator, ro sample count,
-        // ro image, rw image].
         self.resolve_pipeline = Some(compute_pipeline(
             device,
-            &self.prepare_bind_group_layout,
+            &self.resolve_bind_group_layout,
             &self.resolve_module,
             &dimensions,
         ));
@@ -248,11 +262,19 @@ impl PostProcessor for DenoisePostProcessor {
         };
         self.buffer_a = scratch();
         self.buffer_b = scratch();
+
+        self.variance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Denoise Variance Buffer"),
+            size: (width * height) as u64 * 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
     }
 
     fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>> {
         let buffer_a = self.buffer_a.as_ref().ok_or("Not initialized")?;
         let buffer_b = self.buffer_b.as_ref().ok_or("Not initialized")?;
+        let variance_buffer = self.variance_buffer.as_ref().ok_or("Not initialized")?;
         let prepare_pipeline = self.prepare_pipeline.as_ref().ok_or("Not initialized")?;
         let prefilter_pipeline = self.prefilter_pipeline.as_ref().ok_or("Not initialized")?;
         let resolve_pipeline = self.resolve_pipeline.as_ref().ok_or("Not initialized")?;
@@ -276,6 +298,7 @@ impl PostProcessor for DenoisePostProcessor {
                     wgpu::BindingResource::Buffer(src.as_entire_buffer_binding()),
                     wgpu::BindingResource::Buffer(dst.as_entire_buffer_binding()),
                     wgpu::BindingResource::Buffer(ctx.gbuffer.as_entire_buffer_binding()),
+                    wgpu::BindingResource::Buffer(variance_buffer.as_entire_buffer_binding()),
                 ],
             )
         };
@@ -313,12 +336,12 @@ impl PostProcessor for DenoisePostProcessor {
         // inside the filter is not enough on its own.
         let resolve_bind_group = bind_group(
             ctx.device,
-            &self.prepare_bind_group_layout,
+            &self.resolve_bind_group_layout,
             &[
-                wgpu::BindingResource::Buffer(ctx.accumulator.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(ctx.sample_count_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(result.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(ctx.buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(variance_buffer.as_entire_buffer_binding()),
             ],
         );
         add_compute_pass_2d(
