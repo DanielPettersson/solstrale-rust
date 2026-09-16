@@ -80,6 +80,19 @@ const PBR_NEUTRAL_START: f32 = 0.8;
 const PBR_NEUTRAL_D: f32 = 0.15;
 const PBR_NEUTRAL_KNEE: f32 = 0.4;
 
+/// Narkowicz's coefficients for the ACES rational fit.
+const ACES_A: f32 = 2.51;
+const ACES_B: f32 = 0.03;
+const ACES_C: f32 = 2.43;
+const ACES_D: f32 = 0.59;
+const ACES_E: f32 = 0.14;
+
+/// Name of the function [`ToneMapper::wgsl`] emits.
+///
+/// Exposed so a caller splicing the source into a larger shader can call it
+/// without hard-coding the name and silently breaking when it changes.
+pub const WGSL_FN: &str = "solstrale_tone_map";
+
 impl ToneMapper {
     /// Maps one linear RGB triple into `[0, 1]`.
     ///
@@ -101,16 +114,108 @@ impl ToneMapper {
             ToneMapper::Clamp => c.map(|x| x.min(1.)),
         }
     }
+
+    /// WGSL source for this curve, defining a single function
+    /// ```wgsl
+    /// fn solstrale_tone_map(color: vec3<f32>) -> vec3<f32>
+    /// ```
+    /// (the name is [`WGSL_FN`]) with no bindings, uniforms or entry point, so
+    /// it can be concatenated into any shader that needs to display the
+    /// renderer's linear buffer.
+    ///
+    /// This exists because the display transform has more than one
+    /// implementation: [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image)
+    /// runs on the CPU when an image is saved, while an interactive viewer
+    /// blits the buffer to a surface on the GPU and never goes near it. Two
+    /// hand-written copies of a curve drift, and a preview that disagrees with
+    /// the saved file is a bug that is easy to look straight past.
+    ///
+    /// Every coefficient here is formatted in from the same constant
+    /// [`ToneMapper::map`] uses, and `wgsl_matches_the_cpu_curve` runs this
+    /// source on the GPU and checks it against `map` over the range, so the two
+    /// cannot drift apart unnoticed.
+    pub fn wgsl(&self) -> String {
+        // NaN is folded to zero explicitly rather than left to `max`: WGSL does
+        // not define which operand `max` returns for NaN, where Rust's `f32::max`
+        // does, and this function has to agree with `map` on that.
+        let prelude = format!(
+            "fn {fn_name}(color: vec3<f32>) -> vec3<f32> {{\n    \
+             let finite = select(color, vec3<f32>(0.0), color != color);\n    \
+             let c = clamp(finite, vec3<f32>(0.0), vec3<f32>({max_radiance}));\n",
+            fn_name = WGSL_FN,
+            max_radiance = wgsl_f32(MAX_RADIANCE),
+        );
+
+        let body = match *self {
+            ToneMapper::Aces => format!(
+                "    let n = c * ({a} * c + {b});\n    \
+                 let d = c * ({cc} * c + {dd}) + {e};\n    \
+                 return clamp(n / d, vec3<f32>(0.0), vec3<f32>(1.0));\n",
+                a = wgsl_f32(ACES_A),
+                b = wgsl_f32(ACES_B),
+                cc = wgsl_f32(ACES_C),
+                dd = wgsl_f32(ACES_D),
+                e = wgsl_f32(ACES_E),
+            ),
+
+            ToneMapper::PbrNeutral => format!(
+                "    let start_compression = {start} - {d};\n    \
+                 let x = min(c.r, min(c.g, c.b));\n    \
+                 var offset = {d};\n    \
+                 if (x < 2.0 * {d}) {{\n        \
+                 offset = x - x * x / (4.0 * {d});\n    \
+                 }}\n    \
+                 let shifted = c - vec3<f32>(offset);\n    \
+                 let peak = max(shifted.r, max(shifted.g, shifted.b));\n    \
+                 if (peak < start_compression) {{\n        \
+                 return shifted;\n    \
+                 }}\n    \
+                 let new_peak = 1.0 - (1.0 - start_compression) * (1.0 - start_compression)\n        \
+                 / (peak + (1.0 - 2.0 * start_compression));\n    \
+                 let scaled = shifted * new_peak / peak;\n    \
+                 let g = 1.0 - 1.0 / ({knee} * (peak - new_peak) + 1.0);\n    \
+                 return clamp(scaled * (1.0 - g) + vec3<f32>(new_peak) * g, vec3<f32>(0.0), vec3<f32>(1.0));\n",
+                start = wgsl_f32(PBR_NEUTRAL_START),
+                d = wgsl_f32(PBR_NEUTRAL_D),
+                knee = wgsl_f32(PBR_NEUTRAL_KNEE),
+            ),
+
+            ToneMapper::Reinhard { white_point } => {
+                let w = white_point.max(MIN_WHITE_POINT);
+                format!(
+                    "    let w2 = {w} * {w};\n    \
+                     let mapped = (c * (vec3<f32>(1.0) + c / w2)) / (vec3<f32>(1.0) + c);\n    \
+                     return clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0));\n",
+                    w = wgsl_f32(w),
+                )
+            }
+
+            ToneMapper::Clamp => "    return min(c, vec3<f32>(1.0));\n".to_string(),
+        };
+
+        format!("{prelude}{body}}}\n")
+    }
+}
+
+/// Formats an `f32` as a WGSL float literal.
+///
+/// `{:?}` gives the shortest representation that round-trips, but for a whole
+/// number that is `4`, which WGSL parses as an integer -- and `4 * c` against a
+/// `vec3<f32>` is a type error rather than a wrong answer, so it would surface
+/// as a shader compile failure. Appending `.0` where there is no `.` or
+/// exponent keeps every emitted literal floating point.
+fn wgsl_f32(v: f32) -> String {
+    let s = format!("{:?}", v);
+    if s.contains('.') || s.contains('e') || s.contains("inf") || s.contains("NaN") {
+        s
+    } else {
+        format!("{s}.0")
+    }
 }
 
 /// Narkowicz's fit to the ACES RRT+ODT, per channel.
 fn aces(x: f32) -> f32 {
-    const A: f32 = 2.51;
-    const B: f32 = 0.03;
-    const C: f32 = 2.43;
-    const D: f32 = 0.59;
-    const E: f32 = 0.14;
-    ((x * (A * x + B)) / (x * (C * x + D) + E)).clamp(0., 1.)
+    ((x * (ACES_A * x + ACES_B)) / (x * (ACES_C * x + ACES_D) + ACES_E)).clamp(0., 1.)
 }
 
 /// `x(1 + x/W²) / (1 + x)`, which is 0 at 0 and exactly 1 at `W`.
@@ -305,5 +410,114 @@ mod tests {
     #[test]
     fn clamp_is_the_old_behaviour() {
         assert_eq!(ToneMapper::Clamp.map([0.25, 1.5, 1.]), [0.25, 1., 1.]);
+    }
+
+    /// Emitted literals have to be floating point. A whole-number coefficient
+    /// formatted as `4` makes `4 * c` a type error against a `vec3<f32>`, so
+    /// this would show up as a shader compile failure rather than a wrong
+    /// colour -- but only for whichever curve happened to have one.
+    #[test]
+    fn emitted_literals_are_floats() {
+        assert_eq!(wgsl_f32(4.), "4.0");
+        assert_eq!(wgsl_f32(0.5), "0.5");
+        assert_eq!(wgsl_f32(1e18), "1e18");
+        assert_eq!(wgsl_f32(0.), "0.0");
+    }
+
+    /// The point of [`ToneMapper::wgsl`]: the GPU curve and the CPU curve are
+    /// separate implementations, and a preview that disagrees with the saved
+    /// file is exactly the kind of bug nobody notices. Runs the emitted source
+    /// over the range and checks it against `map`.
+    #[test]
+    fn wgsl_matches_the_cpu_curve() {
+        use crate::util::wgpu_util::{
+            add_compute_pass, bind_group, bind_group_layout, compute_pipeline,
+            get_result_from_buffer, get_wgpu_device_and_queue, storage_binding,
+        };
+        use wgpu::util::DeviceExt;
+
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        // Across the shoulder, either side of PbrNeutral's two branch points
+        // (0.3 and 0.65), and far enough past 1.0 to exercise the clamp.
+        let mut inputs: Vec<[f32; 4]> = Vec::new();
+        for v in [
+            0., 0.001, 0.05, 0.1, 0.2, 0.29, 0.3, 0.31, 0.5, 0.64, 0.65, 0.66, 0.8, 0.999, 1.0,
+            1.5, 2., 4., 10., 100., 1e5, 1e18,
+        ] {
+            // Grey, and three saturated triples, since PbrNeutral is not a
+            // per-channel curve and only the latter exercise its desaturation.
+            inputs.push([v, v, v, 0.]);
+            inputs.push([v, v * 0.5, v * 0.25, 0.]);
+            inputs.push([v, 0., 0., 0.]);
+            inputs.push([0., v, v * 0.1, 0.]);
+        }
+
+        for mapper in [
+            ToneMapper::Aces,
+            ToneMapper::PbrNeutral,
+            ToneMapper::Reinhard { white_point: 4. },
+            ToneMapper::Clamp,
+        ] {
+            let source = format!(
+                "@group(0) @binding(0) var<storage, read_write> data: array<vec4<f32>>;\n\n\
+                 {}\n\
+                 @compute @workgroup_size(1)\n\
+                 fn compute(@builtin(global_invocation_id) id: vec3<u32>) {{\n    \
+                 data[id.x] = vec4<f32>({}(data[id.x].xyz), 1.0);\n\
+                 }}\n",
+                mapper.wgsl(),
+                WGSL_FN,
+            );
+
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+            let layout = bind_group_layout(device, &[storage_binding(false, 16)]);
+            let pipeline = compute_pipeline(device, &layout, &module, &[]);
+
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&inputs),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
+            let group = bind_group(
+                device,
+                &layout,
+                &[wgpu::BindingResource::Buffer(
+                    buffer.as_entire_buffer_binding(),
+                )],
+            );
+
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            add_compute_pass(&mut encoder, &pipeline, &group, inputs.len() as u32);
+
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (inputs.len() * 16) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, (inputs.len() * 16) as u64);
+            queue.submit(Some(encoder.finish()));
+
+            let gpu: Vec<[f32; 4]> = get_result_from_buffer(device, &staging);
+
+            for (input, got) in inputs.iter().zip(gpu.iter()) {
+                let want = mapper.map([input[0], input[1], input[2]]);
+                for ch in 0..3 {
+                    assert!(
+                        (got[ch] - want[ch]).abs() < 1e-4,
+                        "{:?} at {:?}: gpu {:?} vs cpu {:?}",
+                        mapper,
+                        &input[..3],
+                        &got[..3],
+                        want
+                    );
+                }
+            }
+        }
     }
 }
