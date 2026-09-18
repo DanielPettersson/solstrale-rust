@@ -68,10 +68,15 @@ pub struct RenderConfig {
     ///
     /// 0.05 is a 5% relative luminance error, well above the ~1% contrast the
     /// eye resolves in a smooth gradient, and it reads as grain that never
-    /// sands out. The denoiser does not hide it either: `denoise_resolve`
-    /// fades the filter on this same relative error, reaching full strength
-    /// only at 0.4, so a pixel retired at 0.05 takes an eighth of the filtered
-    /// result -- both systems agree it has converged and neither touches it.
+    /// sands out. The denoiser used to agree with it and leave it there, since
+    /// `denoise_resolve` faded the filter on this same relative error and
+    /// reached full strength only at 0.4, so a pixel retired at 0.05 took an
+    /// eighth of the filtered result. That is no longer true, and the division
+    /// of labour is better for it: that pass now fades on how visible the
+    /// residue would be rather than on how converged the estimate is, and even
+    /// at the 0.01 default a retired pixel still carries 0.4 to 0.8 code values
+    /// of grain. Adaptive sampling stops spending samples; the denoiser cleans
+    /// up what it left.
     ///
     /// At 0.01 the floor lands below what 4096 spp reaches anyway (0.021
     /// against 0.020 with adaptive sampling off), for roughly 2x the time of

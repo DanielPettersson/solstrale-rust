@@ -30,6 +30,19 @@ override use_guide: f32 = 1.0;
 // Radius of the variance pre-pass. See prefilter_variance for why it is 2 and
 // not SVGF's 1.
 override prefilter_radius: i32 = 2;
+// Corrects the variance recursion at the bottom of `compute` for the fact that
+// this iteration's taps are not independent of each other. One per iteration,
+// supplied by denoise.rs; see VARIANCE_CORRELATION there for the derivation and
+// the comment at the recursion itself for what goes wrong without it. 1.0 for
+// iteration 0, where the taps really are independent, and for the pre-pass,
+// which does not filter the image at all.
+override variance_correlation: f32 = 1.0;
+
+// Effective tap count of the 5x5 B-spline with every edge stop identically one:
+// the reciprocal of its summed squared weights. What `variance_correlation` is
+// measured against, so that a kernel the edge stops have narrowed gets a
+// proportionally smaller share of it.
+const KERNEL_TAPS = 13.374;
 
 // Outlier rejection, applied in prefilter_variance. See the block comment there
 // for what it does and why none of these is scaled by `strength`. Chosen on
@@ -48,9 +61,20 @@ override despeckle_floor: f32 = 1.0;
 // Raising it to 2.5 took that scene from 4% worse than no despeckle at all to
 // slightly better, and cost no fireflies.
 override despeckle_min_weight: f32 = 2.5;
-// Relative standard error at which the clamp reaches full strength. Matches
-// `full_strength_error` in denoise_resolve.wgsl deliberately: the two are the
-// same test, and the comment there is the one that explains the number.
+// Relative standard error at which the clamp reaches full strength.
+//
+// This used to match `full_strength_error` in denoise_resolve.wgsl, because the
+// two were the same test: is this pixel's estimate converged? That pass now asks
+// a different question -- would the remainder be visible on screen? -- so the
+// two are no longer related and sharing a number would be a coincidence.
+//
+// This one deliberately stays a relative standard error, because its calibration
+// depends on being one. For a mean carried by a single outlier sample the
+// standard error and the mean cancel exactly, leaving a relative error of
+// sqrt(1/6.169) = 0.4026 *however bright the firefly is* -- see the block comment
+// on prefilter_variance. One threshold therefore catches all of them. The same
+// firefly measured in code values ranges over 13 to 30 with brightness, and no
+// single number would do.
 override despeckle_full_strength_error: f32 = 0.4;
 // Set to 0 when strength is 0, which is documented to be the identity.
 override despeckle_enabled: f32 = 1.0;
@@ -209,10 +233,12 @@ fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
 // What is left for this pass is the extreme tail, and the case the fade never
 // sees at all. For a pixel whose mean comes from one outlier sample out of n,
 // the Welford variance of the mean works out to the pixel's own value squared,
-// so the standard error and the mean cancel and the relative error the fade
-// tests is a constant: sqrt of this kernel's centre share, 1/6.169, which is
-// 0.4026 against a `full_strength_error` of 0.4. Every such firefly lands on
-// the threshold, scale-free in how bright it is. And below two samples the fade
+// so the standard error and the mean cancel and the relative error tested here
+// is a constant: sqrt of this kernel's centre share, 1/6.169, which is
+// 0.4026 against a `despeckle_full_strength_error` of 0.4. Every such firefly
+// lands on the threshold, scale-free in how bright it is -- which is why this
+// stage keeps a relative standard error as its yardstick even though the resolve
+// pass has stopped using one. And below two samples the fade
 // does not run at all -- it takes the filtered result whole -- so at 1 spp
 // nothing but this pass stands between an outlier and the image. Measured, the
 // fade's fix alone leaves 1701 specks at 1 spp and this one takes it to 357.
@@ -318,10 +344,10 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
             // firefly -- a caustic is too, and so is the lit side of anything
             // small. What separates them is whether the pixel has any evidence
             // behind it, and the accumulator already knows: fade the clamp in
-            // on the same relative standard error denoise_resolve.wgsl and the
-            // adaptive sampler in renderer/ray_trace.wgsl already test.
+            // on the same relative standard error the adaptive sampler in
+            // renderer/ray_trace.wgsl already tests.
             //
-            // Two departures from those two, both deliberate.
+            // Two departures from it, both deliberate.
             //
             // The denominator is the *neighbourhood's* level rather than the
             // pixel's own. A firefly's own mean is the thing the outlier
@@ -373,16 +399,32 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let centre_lum = luminance(centre.xyz);
     let centre_guide = load_guide(index);
 
-    // How far a neighbour's luminance may stray before it reads as a different
-    // surface rather than as noise. Driven by the pre-filtered variance of the
-    // estimate, so a pixel that has converged tolerates almost nothing and a
-    // pixel at one sample tolerates almost anything. This is the whole of the
+    // How far a neighbour may stray before it reads as a different surface
+    // rather than as noise. Driven by the pre-filtered variance of the estimate,
+    // so a pixel that has converged tolerates almost nothing and a pixel at one
+    // sample tolerates almost anything. This is the whole of the
     // "variance-guided" part.
+    //
+    // Measured and not done: comparing *compressed* luminance, log(1 + L), with
+    // the variance carried through by the delta method. The image is shown
+    // through a tone curve and gamma, so a linear tolerance is worth wildly
+    // different amounts of visibility depending on where it sits, and TODO.md
+    // records the fix. To first order it is identically this filter -- numerator
+    // and denominator are scaled by the same derivative and it cancels -- so
+    // what it actually changes is the tail. Measured at strength 1 with the
+    // asymmetric form, it took fireflies from 129 to 84 at 1 spp and 77 to 63 at
+    // 2, moved denoised grain by under 1%, and cost 4% of the specular scene's
+    // RMSE against a converged reference and 7% of the diffuse scene's -- the
+    // price of a weight that is not symmetric in (centre, tap) and so does not
+    // conserve energy locally. The firefly budget was not under pressure at 129
+    // against a gate of 946, so it was paying accuracy for a margin that was
+    // already there. See TODO.md.
     let lum_tolerance = sigma_colour * sqrt(max(centre.w, 1e-8)) + 1e-8;
 
     var sum = vec3<f32>(0.0);
     var sum_variance = 0.0;
     var sum_weight = 0.0;
+    var sum_weight_sq = 0.0;
 
     for (var dy = -2; dy <= 2; dy++) {
         for (var dx = -2; dx <= 2; dx++) {
@@ -398,15 +440,50 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             sum += tap.xyz * weight;
             // Variance is a second moment, so it filters with the *squared*
-            // weights. That is what shrinks lum_tolerance from one iteration to
-            // the next on its own, with no explicit sigma schedule -- and why
+            // weights -- which is what shrinks lum_tolerance from one iteration
+            // to the next on its own, with no explicit sigma schedule, and why
             // sigma_colour is deliberately not divided by 2^i here.
+            //
+            // But the squared-weight form is the variance of a weighted mean of
+            // *independent* taps, and that is only true on the first iteration.
+            // From the second, the taps are pixels that already averaged
+            // overlapping neighbourhoods of each other, so their errors are
+            // correlated and the formula reads far too low. `variance_correlation`
+            // is the per-iteration factor that repairs it; without it the tracked
+            // variance is about 96 times too small by the fifth iteration, the
+            // tolerance is ten times too tight, and the wide passes are very
+            // nearly the identity. See VARIANCE_CORRELATION in denoise.rs.
             sum_variance += tap.w * weight * weight;
             sum_weight += weight;
+            sum_weight_sq += weight * weight;
         }
     }
 
+    // How much of the kernel actually survived the edge stops, as a fraction of
+    // the 13.374 effective taps it would have with every weight at one.
+    //
+    // `variance_correlation` is derived for the unweighted kernel, and applying
+    // it whole wherever the edge stops have already cut the kernel down
+    // over-states the correction badly -- measured, it cost the specular scene
+    // 18% of its RMSE against a converged reference, concentrated on the mirror
+    // and the caustic, which are exactly the places the guide is protecting.
+    //
+    // So it is faded in on how much averaging this pass is actually doing. Both
+    // ends are exact rather than chosen: a kernel reduced to its centre tap
+    // changes nothing and introduces no correlation, so it needs no correction
+    // at all, while a kernel with every weight at one is the case the factor was
+    // derived for. In between is a first-order interpolation, and it is on the
+    // safe side of the one that matters -- an under-corrected variance leaves a
+    // tolerance too tight, which costs smoothing, where an over-corrected one
+    // blurs detail the guide had just declared worth keeping.
+    let overlap = clamp(sum_weight * sum_weight
+        / (max(sum_weight_sq, 1e-12) * KERNEL_TAPS), 0.0, 1.0);
+    let correlation = 1.0 + (variance_correlation - 1.0) * overlap;
+
     // sum_weight can never reach zero: the centre tap contributes h*h = 0.140625
     // with every edge-stopping term identically one against itself.
-    dst[index] = vec4<f32>(sum / sum_weight, sum_variance / (sum_weight * sum_weight));
+    dst[index] = vec4<f32>(
+        sum / sum_weight,
+        correlation * sum_variance / (sum_weight * sum_weight),
+    );
 }
