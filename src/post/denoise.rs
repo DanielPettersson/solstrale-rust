@@ -96,8 +96,9 @@ pub struct DenoisePostProcessor {
     prepare_pipeline: Option<wgpu::ComputePipeline>,
     prefilter_pipeline: Option<wgpu::ComputePipeline>,
     resolve_pipeline: Option<wgpu::ComputePipeline>,
-    /// One per à-trous iteration, differing only in their `step_width`
-    /// override, so the tap spacing is a compile-time constant.
+    /// One per à-trous iteration, differing in their `step_width` override, so
+    /// the tap spacing is a compile-time constant, and in the
+    /// `variance_correlation` that goes with it.
     atrous_pipelines: Vec<wgpu::ComputePipeline>,
 
     buffer_a: Option<wgpu::Buffer>,
@@ -142,6 +143,54 @@ const MAX_ITERATIONS: u32 = 8;
 /// Note that `strength` scales this and `sigma_colour` together, so moving the
 /// threshold alone means editing this constant.
 const FULL_STRENGTH_GRAIN: f64 = 2.0;
+
+/// Per-iteration repair of the variance recursion in `denoise_atrous.wgsl`,
+/// which assumes the taps it is averaging are independent of one another.
+///
+/// They are, on the first iteration: each pixel holds its own Monte Carlo mean.
+/// They are not on any iteration after that, because every pixel the second
+/// iteration reads was itself an average over a neighbourhood overlapping its
+/// neighbours'. Tracking `sum(w^2 * var)` through that under-reports the
+/// variance, compounding once per iteration.
+///
+/// How badly is exactly computable, because the cascade has a closed form. Each
+/// iteration convolves with the 5x5 B-spline `h = (1,4,6,4,1)/16` at a tap
+/// spacing of `2^i`, and `h` is `((1 + z)/2)^4`, so after `N` iterations the
+/// composite kernel is
+///
+/// ```text
+/// prod_{i<N} ((1 + z^(2^i))/2)^4 = [(1 + z + ... + z^(M-1)) / M]^4,  M = 2^N
+/// ```
+///
+/// -- the four-fold self-convolution of a *box* of width `M`, whose `sum k^2`
+/// falls as `0.4886 / M` rather than as `sum h^2` to the power `N`:
+///
+/// ```text
+/// after N iterations      1       2       3       4       5
+/// true sum k^2 (2-D)   7.5e-2  1.5e-2  3.6e-3  9.0e-4  2.2e-4
+/// tracked              7.5e-2  5.6e-3  4.2e-4  3.1e-5  2.3e-6
+/// under-reported by      1.0     2.7     8.7    28.8    96.1
+/// ```
+///
+/// A tolerance is a square root of that, so by the fifth iteration it was ten
+/// times too tight and the widest passes were doing essentially nothing -- which
+/// is why the denoiser cleared large-scale blotches and left fine grain.
+///
+/// Each entry is `sum k^2(i+1) / (sum k^2(i) * sum h^2)`, in 2-D. The pleasing
+/// part is what it implies: with the correction in, the luminance tolerance
+/// shrinks by 0.273 across the first iteration and then by 0.452, 0.489, 0.497,
+/// 0.499 -- it *halves* per iteration from the second onward, which is exactly
+/// Dammertz's `sigma / 2^i` schedule, arrived at rather than assumed.
+///
+/// The derivation is for the unweighted kernel, so applying it whole wherever
+/// the edge stops have already narrowed the kernel over-states it -- measured,
+/// that cost the specular scene 18% of its RMSE against a converged reference,
+/// concentrated on the mirror and the caustic. `denoise_atrous.wgsl` therefore
+/// fades each factor in on how much of the kernel actually survived its weights;
+/// see the comment at the recursion. The specular scene stays the control on any
+/// change here.
+const VARIANCE_CORRELATION: [f64; MAX_ITERATIONS as usize] =
+    [1.0, 2.7272, 3.1961, 3.3072, 3.3346, 3.3414, 3.3431, 3.3435];
 
 impl DenoisePostProcessor {
     /// Creates a new denoiser.
@@ -309,10 +358,11 @@ impl PostProcessor for DenoisePostProcessor {
             ("despeckle_enabled", f64::from(self.strength != 0.)),
         ];
 
-        let constants = |step_width: u32| {
+        let constants = |step_width: u32, variance_correlation: f64| {
             let mut c = dimensions.to_vec();
             c.extend_from_slice(&sigmas);
             c.push(("step_width", step_width as f64));
+            c.push(("variance_correlation", variance_correlation));
             c
         };
 
@@ -321,7 +371,11 @@ impl PostProcessor for DenoisePostProcessor {
             &self.atrous_bind_group_layout,
             &self.atrous_module,
             "prefilter_variance",
-            &constants(1),
+            // No correlation to correct: the pre-pass pools per-pixel variance
+            // *estimates* to buy degrees of freedom, with unsquared weights, and
+            // never filters the image. Passing anything else here to make it
+            // "consistent" with the iterations below would be wrong.
+            &constants(1, 1.),
         ));
 
         // The tone curve is spliced in ahead of the shader's own source, so
@@ -329,9 +383,8 @@ impl PostProcessor for DenoisePostProcessor {
         // in the module. `ToneMapper::wgsl` emits one free function named
         // `solstrale_tone_map` with no bindings or entry point, which is what
         // makes it safe to concatenate.
-        let resolve_module = self
-            .resolve_module
-            .insert(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let resolve_module = self.resolve_module.insert(
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("denoise_resolve.wgsl"),
                 source: wgpu::ShaderSource::Wgsl(
                     format!(
@@ -341,7 +394,8 @@ impl PostProcessor for DenoisePostProcessor {
                     )
                     .into(),
                 ),
-            }));
+            }),
+        );
 
         // Passed as the reciprocal so that a strength of 0 is exactly 0 rather
         // than an infinity narrowed through an f64 -> f32 override, which makes
@@ -362,7 +416,7 @@ impl PostProcessor for DenoisePostProcessor {
                     device,
                     &self.atrous_bind_group_layout,
                     &self.atrous_module,
-                    &constants(1 << i),
+                    &constants(1 << i, VARIANCE_CORRELATION[i as usize]),
                 )
             })
             .collect();

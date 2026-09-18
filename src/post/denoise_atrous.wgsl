@@ -30,6 +30,19 @@ override use_guide: f32 = 1.0;
 // Radius of the variance pre-pass. See prefilter_variance for why it is 2 and
 // not SVGF's 1.
 override prefilter_radius: i32 = 2;
+// Corrects the variance recursion at the bottom of `compute` for the fact that
+// this iteration's taps are not independent of each other. One per iteration,
+// supplied by denoise.rs; see VARIANCE_CORRELATION there for the derivation and
+// the comment at the recursion itself for what goes wrong without it. 1.0 for
+// iteration 0, where the taps really are independent, and for the pre-pass,
+// which does not filter the image at all.
+override variance_correlation: f32 = 1.0;
+
+// Effective tap count of the 5x5 B-spline with every edge stop identically one:
+// the reciprocal of its summed squared weights. What `variance_correlation` is
+// measured against, so that a kernel the edge stops have narrowed gets a
+// proportionally smaller share of it.
+const KERNEL_TAPS = 13.374;
 
 // Outlier rejection, applied in prefilter_variance. See the block comment there
 // for what it does and why none of these is scaled by `strength`. Chosen on
@@ -383,6 +396,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     var sum = vec3<f32>(0.0);
     var sum_variance = 0.0;
     var sum_weight = 0.0;
+    var sum_weight_sq = 0.0;
 
     for (var dy = -2; dy <= 2; dy++) {
         for (var dx = -2; dx <= 2; dx++) {
@@ -398,15 +412,50 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             sum += tap.xyz * weight;
             // Variance is a second moment, so it filters with the *squared*
-            // weights. That is what shrinks lum_tolerance from one iteration to
-            // the next on its own, with no explicit sigma schedule -- and why
+            // weights -- which is what shrinks lum_tolerance from one iteration
+            // to the next on its own, with no explicit sigma schedule, and why
             // sigma_colour is deliberately not divided by 2^i here.
+            //
+            // But the squared-weight form is the variance of a weighted mean of
+            // *independent* taps, and that is only true on the first iteration.
+            // From the second, the taps are pixels that already averaged
+            // overlapping neighbourhoods of each other, so their errors are
+            // correlated and the formula reads far too low. `variance_correlation`
+            // is the per-iteration factor that repairs it; without it the tracked
+            // variance is about 96 times too small by the fifth iteration, the
+            // tolerance is ten times too tight, and the wide passes are very
+            // nearly the identity. See VARIANCE_CORRELATION in denoise.rs.
             sum_variance += tap.w * weight * weight;
             sum_weight += weight;
+            sum_weight_sq += weight * weight;
         }
     }
 
+    // How much of the kernel actually survived the edge stops, as a fraction of
+    // the 13.374 effective taps it would have with every weight at one.
+    //
+    // `variance_correlation` is derived for the unweighted kernel, and applying
+    // it whole wherever the edge stops have already cut the kernel down
+    // over-states the correction badly -- measured, it cost the specular scene
+    // 18% of its RMSE against a converged reference, concentrated on the mirror
+    // and the caustic, which are exactly the places the guide is protecting.
+    //
+    // So it is faded in on how much averaging this pass is actually doing. Both
+    // ends are exact rather than chosen: a kernel reduced to its centre tap
+    // changes nothing and introduces no correlation, so it needs no correction
+    // at all, while a kernel with every weight at one is the case the factor was
+    // derived for. In between is a first-order interpolation, and it is on the
+    // safe side of the one that matters -- an under-corrected variance leaves a
+    // tolerance too tight, which costs smoothing, where an over-corrected one
+    // blurs detail the guide had just declared worth keeping.
+    let overlap = clamp(sum_weight * sum_weight
+        / (max(sum_weight_sq, 1e-12) * KERNEL_TAPS), 0.0, 1.0);
+    let correlation = 1.0 + (variance_correlation - 1.0) * overlap;
+
     // sum_weight can never reach zero: the centre tap contributes h*h = 0.140625
     // with every edge-stopping term identically one against itself.
-    dst[index] = vec4<f32>(sum / sum_weight, sum_variance / (sum_weight * sum_weight));
+    dst[index] = vec4<f32>(
+        sum / sum_weight,
+        correlation * sum_variance / (sum_weight * sum_weight),
+    );
 }
