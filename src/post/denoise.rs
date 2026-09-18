@@ -115,6 +115,34 @@ pub struct DenoisePostProcessor {
 const MIN_ITERATIONS: u32 = 1;
 const MAX_ITERATIONS: u32 = 8;
 
+/// How much grain, in code values of the final 0-255 image, the filter must be
+/// facing before it commits to its result whole -- at a `strength` of 1.
+///
+/// The fade in `denoise_resolve.wgsl` is a linear ramp, so the grain it leaves
+/// behind is `g * (1 - g / tau)` for a displayed noise level `g`. That peaks at
+/// `g = tau / 2` and is worth **`tau / 4`** there, whatever the sample count. So
+/// this constant does not set how hard the filter runs so much as bound what it
+/// is allowed to leave: at 2 code values the worst case anywhere in the image,
+/// at any sample count, is half a code value -- below the quantisation step of
+/// the image it is written into, so unrepresentable rather than merely subtle.
+///
+/// 2 is also about where grain stops being visible rather than where it stops
+/// being measurable: on a flat mid-grey wall it is roughly 0.8% contrast,
+/// against the ~1% the eye resolves in a smooth gradient.
+///
+/// The renderer's own numbers agree on the order of magnitude. Adaptive sampling
+/// retires a pixel at `variance_threshold` = 0.01 relative standard error, which
+/// through the display transform is 0.42 to 0.75 code values depending on
+/// brightness. So "full strength" sits a factor of about three above where the
+/// sampler stops caring, and the ramp's tail covers the gap between them --
+/// adaptive sampling stops spending samples, and this pass cleans up the
+/// residue it left.
+///
+/// Chosen on `denoise_display_sweep`, which is also what to re-run to change it.
+/// Note that `strength` scales this and `sigma_colour` together, so moving the
+/// threshold alone means editing this constant.
+const FULL_STRENGTH_GRAIN: f64 = 2.0;
+
 impl DenoisePostProcessor {
     /// Creates a new denoiser.
     ///
@@ -315,8 +343,11 @@ impl PostProcessor for DenoisePostProcessor {
                 ),
             }));
 
+        // Passed as the reciprocal so that a strength of 0 is exactly 0 rather
+        // than an infinity narrowed through an f64 -> f32 override, which makes
+        // the resolve pass the identity by arithmetic rather than by luck.
         let mut resolve_constants = dimensions.to_vec();
-        resolve_constants.push(("full_strength_error", 0.4));
+        resolve_constants.push(("grain_blend_gain", self.strength / FULL_STRENGTH_GRAIN));
 
         self.resolve_pipeline = Some(compute_pipeline(
             device,

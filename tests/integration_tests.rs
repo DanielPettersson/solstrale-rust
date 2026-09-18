@@ -890,6 +890,85 @@ fn grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
     (sum_sq / pixels_count).sqrt() / (sum_lum / pixels_count)
 }
 
+/// How much grain a viewer would actually see, in code values of the 0-255
+/// scale the image is written on.
+///
+/// [`grain`]'s sibling, and it exists because `grain` cannot see the thing this
+/// change is about. That one is an RMS in linear radiance, normalised by the
+/// mean; this one measures through the display transform, for the reason spelt
+/// out on [`fireflies`], and reports an absolute number of code values so it
+/// can be compared against what the eye resolves -- about one.
+///
+/// The median rather than an RMS, scaled by 1.4826 so it reads as a standard
+/// deviation on the Gaussian the flat regions are. Every high-pass of a render
+/// has object silhouettes in it, and those are real detail, arbitrarily large,
+/// and present in exactly the same places whether the image is denoised or not.
+/// They put a floor under any RMS that is independent of the noise -- which is
+/// precisely the floor that would hide the improvement being measured. The
+/// median is owned by the flat majority of the frame, which is where grain
+/// lives and where the complaint came from.
+#[allow(dead_code)]
+fn displayed_grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
+    let displayed: Vec<f64> = pixels
+        .iter()
+        .map(|p| {
+            let m = ToneMapper::default().map([p[0], p[1], p[2]]);
+            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
+        })
+        .collect();
+
+    let mut departures = Vec::with_capacity(width * height);
+    for y in 0..height {
+        for x in 0..width {
+            let mut local = 0.0;
+            let mut taps = 0.0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let nx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
+                    let ny = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
+                    local += displayed[ny * width + nx];
+                    taps += 1.0;
+                }
+            }
+            departures.push((displayed[y * width + x] - local / taps).abs());
+        }
+    }
+
+    departures.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // 1.4826 is the reciprocal of the standard normal's interquartile
+    // half-width, so the result is on the same scale a standard deviation
+    // would be and can be read directly as "code values of grain".
+    1.4826 * departures[departures.len() / 2]
+}
+
+/// The median per-pixel, per-channel difference between two images, in code
+/// values, after the display transform.
+///
+/// Median for the same reason [`displayed_grain`] uses one: an RMS is owned by
+/// the few percent of pixels that are genuinely noisy, where a denoiser both
+/// does and should change a lot, and a bound loose enough to accommodate those
+/// says nothing about the rest of the frame.
+#[allow(dead_code)]
+fn displayed_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
+    let encode = |p: &[f32; 4]| {
+        let m = ToneMapper::default().map([p[0], p[1], p[2]]);
+        m.map(|v| (v.sqrt().min(0.999) * 256.) as f64)
+    };
+
+    let mut diffs: Vec<f64> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(p, q)| {
+            let (p, q) = (encode(p), encode(q));
+            (0..3).map(|c| (p[c] - q[c]).abs()).fold(0.0, f64::max)
+        })
+        .collect();
+
+    diffs.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    diffs[diffs.len() / 2]
+}
+
 /// How many pixels read as an isolated bright speck: a count of those whose
 /// displayed luminance exceeds the brightest of their four neighbours by more
 /// than `excess`, on the 0-255 scale the image is finally written on.
@@ -1293,36 +1372,160 @@ fn test_denoise_grain_does_not_grow_with_samples() {
     );
 }
 
+/// The gate this change exists for: spending more samples has to buy a
+/// visibly smoother denoised image, and it did not.
+///
+/// The old resolve fade set `blend` to the pixel's relative standard error over
+/// a `full_strength_error` of 0.4, so the residual it left was
+/// `sigma * (1 - sigma / (0.4 * L))` -- a downward parabola in sigma, peaking
+/// at `sigma = 0.2 L`. Any two noise levels symmetric about that peak leave
+/// *identical* grain, and a Cornell wall at 10 spp (sigma ~ 0.30 L) and at 100
+/// spp (sigma ~ 0.095 L) are almost exactly that pair. The fade handed noise
+/// back at the same rate the sampler removed it, so the two images were
+/// indistinguishable. Measured on a 1303x964 Cornell render, ten times the
+/// samples bought 19% less grain.
+///
+/// Measured through the display transform, in code values, because the old
+/// criterion's defect was precisely that it was not perceptual: 0.4 relative
+/// linear error is 13 to 30 code values of visible grain depending on
+/// brightness, and the eye sees grain at about one.
+///
+/// Both assertions fail on the code this replaced -- the 32 to 128 ratio was
+/// about 0.81 against the 0.8 required, and the denoised image sat at roughly
+/// 0.8 of the raw one rather than under 0.35.
+#[test]
+fn test_denoised_grain_keeps_falling_with_samples() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let (width, height) = (200, 200);
+
+    let grain_at = |spp, strength| {
+        let pixels = render_linear(cornell_denoise_scene(spp, strength), device, queue);
+        displayed_grain(&pixels, width, height)
+    };
+
+    let counts = [2u32, 8, 32, 128];
+    let mut raw = Vec::new();
+    let mut denoised = Vec::new();
+    for spp in counts {
+        raw.push(grain_at(spp, None));
+        denoised.push(grain_at(spp, Some(1.)));
+    }
+
+    println!("displayed grain, code values:");
+    for (i, spp) in counts.iter().enumerate() {
+        println!(
+            "  {:>4} spp: raw {:.3}, denoised {:.3} ({:.2} of raw)",
+            spp,
+            raw[i],
+            denoised[i],
+            denoised[i] / raw[i]
+        );
+    }
+
+    for (i, spp) in counts.iter().enumerate() {
+        assert!(
+            denoised[i] < raw[i] * 0.35,
+            "at {} spp the denoiser left {:.3} code values of grain against the raw render's {:.3}",
+            spp,
+            denoised[i],
+            raw[i]
+        );
+    }
+
+    // Four times the samples has to buy a real reduction, not a rounding one.
+    // While `blend` is saturated the denoised image tracks the filter's own
+    // output, whose noise falls as 1/sqrt(n) because `lum_tolerance` shrinks
+    // with the input -- so 0.5 is the number to expect and 0.8 is the loosest
+    // reading that still means "kept falling".
+    for i in 1..counts.len() - 1 {
+        assert!(
+            denoised[i + 1] < denoised[i] * 0.8,
+            "going from {} to {} spp moved denoised grain only {:.3} -> {:.3}",
+            counts[i],
+            counts[i + 1],
+            denoised[i],
+            denoised[i + 1]
+        );
+    }
+}
+
 /// The filter has to fade itself out as the render converges, because its
 /// luminance tolerance is set by the variance of the pixel mean and that falls
 /// as 1/n. Without this the filter would keep a fixed blur floor that a
 /// single-spp golden test cannot see.
+///
+/// This used to bound the relative linear RMSE between the denoised and the
+/// plain 2000 spp render at 0.02, and measured 0.0045. It now measures 0.023 and
+/// that is correct rather than a regression: the test scene at 2000 spp with
+/// adaptive sampling off still carries about two code values of grain, which is
+/// visible, and the fade is now built to remove visible grain rather than to
+/// retire on a relative error. The old bound *was* the premise being replaced --
+/// "2000 samples means converged, so do nothing" is the same linear-relative
+/// notion of convergence that let 13 to 30 code values of grain through at lower
+/// sample counts.
+///
+/// So the property is restated in the units the filter now works in, and it is
+/// two properties rather than one, because "near identity" was doing both jobs:
+///
+/// 1. The image a viewer sees must be all but unchanged -- half the frame moving
+///    by less than one code value is what that should always have meant.
+/// 2. The fade must actually keep fading. This is the part the old bound really
+///    protected, and the part a fixed blur floor would violate: the criterion is
+///    quadratic in sigma while the blend is unsaturated and linear once it
+///    saturates, so four times the samples has to cut the change by at least
+///    two. A filter that had stopped fading would hold it flat.
+///
+/// Measured with the median rather than an RMS, for the reason on
+/// [`displayed_difference`]: the few percent of pixels that are genuinely still
+/// noisy are pixels the denoiser both does and should change a lot, and a bound
+/// loose enough to admit them says nothing about the rest of the frame.
 #[test]
 fn test_denoise_is_near_identity_at_high_samples() {
     let (device, queue) = get_wgpu_device_and_queue();
 
-    // Adaptive sampling off, so every pixel really has 2000 samples. With it on,
-    // pixels retire at 5% relative standard error and the image is not converged
-    // in the sense this test is about.
+    // Adaptive sampling off, so every pixel really has the samples asked for.
+    // With it on, pixels retire at the variance threshold and the image is not
+    // converged in the sense this test is about.
     let plain = render_linear(denoise_scene(2000, None, false), device, queue);
     let denoised = render_linear(denoise_scene(2000, Some(1.), false), device, queue);
+    let plain_500 = render_linear(denoise_scene(500, None, false), device, queue);
+    let denoised_500 = render_linear(denoise_scene(500, Some(1.), false), device, queue);
 
+    let change = displayed_difference(&denoised, &plain);
+    let change_500 = displayed_difference(&denoised_500, &plain_500);
+
+    // Kept and printed rather than asserted, as `test_adaptive_sampling_convergence`
+    // does, so a before-and-after across builds is still possible in the old
+    // units.
     let mean: f64 = plain
         .iter()
         .map(|p| (p[0] + p[1] + p[2]) as f64 / 3.0)
         .sum::<f64>()
         / plain.len() as f64;
-    let relative = linear_rmse(&denoised, &plain) / mean;
-
     println!(
-        "relative linear RMSE of the denoiser at 2000 spp: {}",
-        relative
+        "relative linear RMSE of the denoiser at 2000 spp: {} (unasserted)",
+        linear_rmse(&denoised, &plain) / mean
+    );
+    println!(
+        "median displayed change:  500 spp {:.3} cv, 2000 spp {:.3} cv, ratio {:.2}",
+        change_500,
+        change,
+        change / change_500
     );
 
     assert!(
-        relative < 0.02,
-        "at 2000 spp the denoiser should be close to the identity, relative RMSE was {}",
-        relative
+        change < 1.0,
+        "at 2000 spp the denoiser should be close to the identity, but half the \
+         image moved by {:.3} code values or more",
+        change
+    );
+
+    assert!(
+        change < change_500 * 0.5,
+        "the fade has stopped fading: four times the samples took the denoiser's \
+         visible change only from {:.3} to {:.3} code values",
+        change_500,
+        change
     );
 }
 
