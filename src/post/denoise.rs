@@ -35,10 +35,27 @@ pub enum DenoiseGuide {
 /// reference on the test scene, it cuts linear RMSE by about 45% at 8 samples
 /// per pixel, by about a fifth at 64, and changes a 2000-sample image by 0.2%.
 ///
-/// Costs seven compute dispatches, run once on the finished image: 4.2 ms at
+/// An edge-avoiding filter cannot remove a firefly on its own -- a firefly is an
+/// edge by every measure such a filter has -- so what decided a firefly's fate
+/// was the fade above, and it leaked at two scales. The fade's denominator was
+/// the pixel's own luminance, which biases it to preserve noise that moved a
+/// pixel up and remove noise that moved it down; it is now the lower of that and
+/// the pixel's neighbourhood level. And the variance pre-pass now also does
+/// outlier rejection, which covers the extreme tail and the below-two-samples
+/// case the fade never runs on at all. See the block comments on `level` in
+/// `denoise_resolve.wgsl` and on `prefilter_variance` in `denoise_atrous.wgsl`.
+///
+/// Measured on a Cornell box through the display transform, counting pixels more
+/// than 20 of 255 brighter than every neighbour, the denoiser used to leave
+/// 1000-3000 of them at every sample count from 2 upwards. It now leaves 7-46 at
+/// strength 5 and under 4% of the raw render's at strength 1.
+///
+/// Costs eight compute dispatches, run once on the finished image: 6.6 ms at
 /// 800x600 on a Radeon RX 5700 XT, against 52 ms for the render itself at 16
 /// samples per pixel. The cost is per pixel and independent of sample count, so
-/// it matters less the longer the render.
+/// it matters less the longer the render. Outlier rejection adds no dispatch of
+/// its own: it needs the same guide-weighted neighbourhood the variance pre-pass
+/// was already gathering.
 ///
 /// Place this first in [`crate::renderer::RenderConfig::post_processors`].
 /// Denoising a bloomed image blurs the bloom; bloom applied to a denoised image
@@ -81,6 +98,9 @@ pub struct DenoisePostProcessor {
     /// The variance the pre-filter pooled, kept aside from the image the à-trous
     /// iterations then filter, so the resolve pass can still read it.
     variance_buffer: Option<wgpu::Buffer>,
+    /// The luminance of each pixel's guide-weighted neighbourhood, measured by
+    /// the pre-filter and kept aside for the same reason.
+    level_buffer: Option<wgpu::Buffer>,
 }
 
 /// Bounds on the iteration count. Five reaches 32 pixels, which is the usual
@@ -140,6 +160,8 @@ impl DenoisePostProcessor {
                 storage_binding(false, 16), // destination
                 storage_binding(true, 16),  // guide
                 storage_binding(false, 4),  // pooled variance, written by the pre-filter
+                storage_binding(false, 16), // working image, despeckled by the pre-filter
+                storage_binding(false, 4),  // neighbourhood level, written by the pre-filter
             ],
         );
 
@@ -150,6 +172,7 @@ impl DenoisePostProcessor {
                 storage_binding(true, 16),  // filtered image
                 storage_binding(false, 16), // working image
                 storage_binding(true, 4),   // pooled variance
+                storage_binding(true, 4),   // neighbourhood level
             ],
         );
 
@@ -172,6 +195,7 @@ impl DenoisePostProcessor {
             buffer_a: None,
             buffer_b: None,
             variance_buffer: None,
+            level_buffer: None,
         })
     }
 }
@@ -216,6 +240,19 @@ impl PostProcessor for DenoisePostProcessor {
                     DenoiseGuide::ColorOnly => 0.,
                 },
             ),
+            // Outlier rejection, deliberately *not* scaled by `strength`. The
+            // whole reason fireflies survived was that the stage which decided
+            // their fate read no sigma at all, so turning the knob did nothing;
+            // re-coupling the two would reintroduce exactly that. See
+            // prefilter_variance in denoise_atrous.wgsl.
+            //
+            // At a strength of 0 the luminance tolerance collapses to 1e-8 and
+            // every non-centre tap goes to zero weight, which is as close to
+            // the identity as this filter gets. The despeckle reads no sigma,
+            // so it would go on clamping right through that unless it is
+            // switched off too -- and "off" would quietly stop meaning off.
+            // test_denoise_strength_zero_is_the_identity is the guard.
+            ("despeckle_enabled", f64::from(self.strength != 0.)),
         ];
 
         let constants = |step_width: u32| {
@@ -263,18 +300,23 @@ impl PostProcessor for DenoisePostProcessor {
         self.buffer_a = scratch();
         self.buffer_b = scratch();
 
-        self.variance_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Denoise Variance Buffer"),
-            size: (width * height) as u64 * 4,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        }));
+        let scalar = |label| {
+            Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (width * height) as u64 * 4,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }))
+        };
+        self.variance_buffer = scalar("Denoise Variance Buffer");
+        self.level_buffer = scalar("Denoise Level Buffer");
     }
 
     fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>> {
         let buffer_a = self.buffer_a.as_ref().ok_or("Not initialized")?;
         let buffer_b = self.buffer_b.as_ref().ok_or("Not initialized")?;
         let variance_buffer = self.variance_buffer.as_ref().ok_or("Not initialized")?;
+        let level_buffer = self.level_buffer.as_ref().ok_or("Not initialized")?;
         let prepare_pipeline = self.prepare_pipeline.as_ref().ok_or("Not initialized")?;
         let prefilter_pipeline = self.prefilter_pipeline.as_ref().ok_or("Not initialized")?;
         let resolve_pipeline = self.resolve_pipeline.as_ref().ok_or("Not initialized")?;
@@ -299,6 +341,8 @@ impl PostProcessor for DenoisePostProcessor {
                     wgpu::BindingResource::Buffer(dst.as_entire_buffer_binding()),
                     wgpu::BindingResource::Buffer(ctx.gbuffer.as_entire_buffer_binding()),
                     wgpu::BindingResource::Buffer(variance_buffer.as_entire_buffer_binding()),
+                    wgpu::BindingResource::Buffer(ctx.buffer.as_entire_buffer_binding()),
+                    wgpu::BindingResource::Buffer(level_buffer.as_entire_buffer_binding()),
                 ],
             )
         };
@@ -342,6 +386,7 @@ impl PostProcessor for DenoisePostProcessor {
                 wgpu::BindingResource::Buffer(result.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(ctx.buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(variance_buffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(level_buffer.as_entire_buffer_binding()),
             ],
         );
         add_compute_pass_2d(

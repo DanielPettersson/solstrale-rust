@@ -655,3 +655,134 @@ pub fn create_texture_mapping_scene(render_config: RenderConfig) -> Scene {
         render_config,
     }
 }
+
+/// A Cornell box: the canonical firefly generator, and the one thing missing
+/// from the scenes above.
+///
+/// Every other scene here is lit by something huge -- `create_test_scene` has
+/// three lights, one a radius-10 sphere, plus a bright background -- which is
+/// precisely why the denoiser's firefly behaviour never showed up in CI. What
+/// produces a firefly is the opposite: a *small* bright emitter, no ambient
+/// background at all, and a surface dark enough that one improbable bright
+/// bounce lands tens of times above its converged radiance. All three are
+/// deliberate here.
+///
+/// The black box is the subject. At an albedo of 0.05 its converged radiance is
+/// a few hundredths, so a single indirect sample that finds the light arrives
+/// 40-75x above the mean -- far under `CLAMPING_THRESHOLD`, and exactly the
+/// regime the renderer's absolute clamp is documented as not covering.
+#[allow(dead_code)]
+pub fn create_cornell_scene(render_config: RenderConfig) -> Scene {
+    let camera = CameraConfig {
+        vertical_fov_degrees: 40.,
+        aperture_size: 0.,
+        look_from: Vec3::new(278., 278., -800.),
+        look_at: Vec3::new(278., 278., 0.),
+        up: Vec3::new(0., 1., 0.),
+    };
+
+    let red = Lambertian::new(SolidColor::new(0.65, 0.05, 0.05).into(), None);
+    let green = Lambertian::new(SolidColor::new(0.12, 0.45, 0.15).into(), None);
+    let white = Lambertian::new(SolidColor::new(0.73, 0.73, 0.73).into(), None);
+    // Dark enough that a single lucky bounce dwarfs the converged value.
+    let black = Lambertian::new(SolidColor::new(0.05, 0.05, 0.05).into(), None);
+    let light = DiffuseLight::new(25., 25., 25., None);
+
+    let nop = NopTransformer();
+    let mut world: Vec<Hittables> = Vec::new();
+
+    // Walls, floor and ceiling of a 555-unit cube, open toward the camera.
+    world.push(
+        Quad::new(
+            Vec3::new(555., 0., 0.),
+            Vec3::new(0., 555., 0.),
+            Vec3::new(0., 0., 555.),
+            green.into(),
+            &nop,
+        )
+        .into(),
+    );
+    world.push(
+        Quad::new(
+            Vec3::new(0., 0., 0.),
+            Vec3::new(0., 555., 0.),
+            Vec3::new(0., 0., 555.),
+            red.into(),
+            &nop,
+        )
+        .into(),
+    );
+    world.push(
+        Quad::new(
+            Vec3::new(0., 0., 0.),
+            Vec3::new(555., 0., 0.),
+            Vec3::new(0., 0., 555.),
+            white.clone().into(),
+            &nop,
+        )
+        .into(),
+    );
+    world.push(
+        Quad::new(
+            Vec3::new(0., 555., 0.),
+            Vec3::new(555., 0., 0.),
+            Vec3::new(0., 0., 555.),
+            white.clone().into(),
+            &nop,
+        )
+        .into(),
+    );
+    world.push(
+        Quad::new(
+            Vec3::new(0., 0., 555.),
+            Vec3::new(555., 0., 0.),
+            Vec3::new(0., 555., 0.),
+            white.clone().into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    // Small emitter in the ceiling. Small is the point: a light subtending a
+    // narrow solid angle is what makes an indirect hit on it improbable and
+    // therefore bright when it happens.
+    world.push(
+        Quad::new(
+            Vec3::new(213., 554., 227.),
+            Vec3::new(130., 0., 0.),
+            Vec3::new(0., 0., 105.),
+            light.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    // A tall white box, and a short black one that is where the fireflies land.
+    world.append(&mut Quad::new_box(
+        Vec3::new(0., 0., 0.),
+        Vec3::new(165., 330., 165.),
+        white.into(),
+        &Transformations::new(vec![
+            Box::new(RotationY::new(15.)),
+            Box::new(Translation::new(Vec3::new(265., 0., 295.))),
+        ]),
+    ));
+    world.append(&mut Quad::new_box(
+        Vec3::new(0., 0., 0.),
+        Vec3::new(165., 165., 165.),
+        black.into(),
+        &Transformations::new(vec![
+            Box::new(RotationY::new(-18.)),
+            Box::new(Translation::new(Vec3::new(130., 0., 65.))),
+        ]),
+    ));
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        // No ambient light whatsoever. An ambient background is what stops the
+        // other scenes here producing fireflies at all.
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    }
+}

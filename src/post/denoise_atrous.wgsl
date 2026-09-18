@@ -31,6 +31,36 @@ override use_guide: f32 = 1.0;
 // not SVGF's 1.
 override prefilter_radius: i32 = 2;
 
+// Outlier rejection, applied in prefilter_variance. See the block comment there
+// for what it does and why none of these is scaled by `strength`. Chosen on
+// `cornell_firefly_sweep` against `test_denoise_improves_specular_image`, which
+// is the scene that pushes back: a caustic is the same shape as a firefly and
+// these four are what have to tell them apart.
+override despeckle_k: f32 = 2.0;
+override despeckle_floor: f32 = 1.0;
+// Minimum summed guide weight over the 24 non-centre taps before the clamp may
+// fire at all, out of a possible 5.169. Much the most important of the four and
+// the least obvious. At 1.0 the pass would judge a pixel against whichever one
+// or two neighbours happened to survive the guide weighting, which on a curved
+// mirror or a textured floor is a couple of dark taps -- and it duly clamped
+// genuinely bright pixels to a tenth of their value, 41% of the specular scene
+// touched for a 0.5% energy loss concentrated in exactly the wrong places.
+// Raising it to 2.5 took that scene from 4% worse than no despeckle at all to
+// slightly better, and cost no fireflies.
+override despeckle_min_weight: f32 = 2.5;
+// Relative standard error at which the clamp reaches full strength. Matches
+// `full_strength_error` in denoise_resolve.wgsl deliberately: the two are the
+// same test, and the comment there is the one that explains the number.
+override despeckle_full_strength_error: f32 = 0.4;
+// Set to 0 when strength is 0, which is documented to be the identity.
+override despeckle_enabled: f32 = 1.0;
+
+// Floor on the luminance used as the denominator of a relative test, so a
+// near-black neighbourhood's tiny absolute noise does not read as enormous
+// relative to it. Matches LUMINANCE_FLOOR in denoise_resolve.wgsl and
+// ADAPTIVE_LUMINANCE_FLOOR in renderer/ray_trace.wgsl.
+const LUMINANCE_FLOOR = 1e-4;
+
 // xyz: colour, w: variance of the colour estimate.
 @group(0) @binding(0)
 var<storage, read> src: array<vec4<f32>>;
@@ -51,6 +81,25 @@ var<storage, read> gbuffer: array<vec4<u32>>;
 // and by the last one it describes the kernel rather than the pixel.
 @group(0) @binding(3)
 var<storage, read_write> pooled_variance: array<f32>;
+
+// The post-processing chain's working image, which denoise_resolve.wgsl blends
+// the filtered result back over. Written by prefilter_variance only, and only
+// for the pixels whose colour it clamped, so that the image the resolve pass
+// calls "the original" is the despeckled one rather than the raw outlier. The
+// A-Trous iterations bind it and never touch it.
+//
+// Without this the whole despeckle is defeated: the filter would remove a
+// firefly and the resolve pass would mix a fraction of it straight back in.
+@group(0) @binding(4)
+var<storage, read_write> working: array<vec4<f32>>;
+
+// The guide-weighted luminance of each pixel's neighbourhood, centre excluded.
+// Written by prefilter_variance, read by denoise_resolve.wgsl, which needs a
+// measure of how bright a pixel's surroundings are that the pixel's own noise
+// cannot move. See the comment on its use there. The A-Trous iterations bind it
+// and never touch it.
+@group(0) @binding(5)
+var<storage, read_write> local_level: array<f32>;
 
 struct Guide {
     albedo: vec3<f32>,
@@ -139,6 +188,38 @@ fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
 //
 // Deliberately no colour weight here: using a variance-driven weight to filter
 // the variance itself would be circular.
+//
+// The pass does one more thing, over the same taps and the same weights:
+// outlier rejection. The two belong together because they need exactly the same
+// gather -- a guide-weighted neighbourhood -- and the tap colours are already
+// in registers by the time the variance has been pooled. Nothing the despeckle
+// computes feeds back into `sum_variance`, so the no-colour-weight invariant
+// above survives intact.
+//
+// Why the filter needs it at all. An edge-avoiding filter cannot remove a
+// firefly on its own, because a firefly is an edge by every measure the filter
+// has. What saved it until now was the fade in denoise_resolve.wgsl, and that
+// is where it leaked -- twice, at two different scales.
+//
+// The broad leak is the fade's denominator, and it is fixed there rather than
+// here: dividing by a pixel's own luminance biases the test to preserve noise
+// that moved a pixel up and remove noise that moved it down, which is a field
+// of bright speckles by construction. See the comment on `level` in that file.
+//
+// What is left for this pass is the extreme tail, and the case the fade never
+// sees at all. For a pixel whose mean comes from one outlier sample out of n,
+// the Welford variance of the mean works out to the pixel's own value squared,
+// so the standard error and the mean cancel and the relative error the fade
+// tests is a constant: sqrt of this kernel's centre share, 1/6.169, which is
+// 0.4026 against a `full_strength_error` of 0.4. Every such firefly lands on
+// the threshold, scale-free in how bright it is. And below two samples the fade
+// does not run at all -- it takes the filtered result whole -- so at 1 spp
+// nothing but this pass stands between an outlier and the image. Measured, the
+// fade's fix alone leaves 1701 specks at 1 spp and this one takes it to 357.
+//
+// So: clamp a pixel that sits far above the neighbourhood its guide says it
+// belongs to, and write the result into `working` too, so that by the time the
+// resolve pass looks at "the original" the outlier is already gone from it.
 @compute @workgroup_size(8, 8)
 fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= width || gid.y >= height) {
@@ -146,10 +227,20 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let index = gid.y * width + gid.x;
 
+    let centre = src[index];
+    let centre_lum = luminance(centre.xyz);
     let centre_guide = load_guide(index);
 
     var sum_variance = 0.0;
     var sum_weight = 0.0;
+
+    // The neighbourhood's own luminance, with the centre left out, so the
+    // despeckle below compares a pixel against its surroundings rather than
+    // against a statistic it is itself part of.
+    var n_weight = 0.0;
+    var n_weight_sq = 0.0;
+    var n_lum = 0.0;
+    var n_lum_sq = 0.0;
 
     // Half the radius, so the kernel reaches two standard deviations.
     let sigma = max(f32(prefilter_radius), 1.0) * 0.5;
@@ -160,17 +251,112 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
             let n_index = u32(y) * width + u32(x);
 
             let d2 = f32(dx * dx + dy * dy);
+            let tap = src[n_index];
             let weight = exp(-d2 / (2.0 * sigma * sigma))
                 * guide_weight(centre_guide, load_guide(n_index), 1.0);
 
-            sum_variance += src[n_index].w * weight;
+            sum_variance += tap.w * weight;
             sum_weight += weight;
+
+            if (dx != 0 || dy != 0) {
+                let l = luminance(tap.xyz);
+                n_weight += weight;
+                n_weight_sq += weight * weight;
+                n_lum += weight * l;
+                n_lum_sq += weight * l * l;
+            }
         }
     }
 
     let variance = sum_variance / sum_weight;
     pooled_variance[index] = variance;
-    dst[index] = vec4<f32>(src[index].xyz, variance);
+
+    // Reliability-weighted variance, Bessel-corrected. The kernel's effective
+    // tap count excluding the centre is about eleven, so the correction is worth
+    // roughly a tenth and `despeckle_k` is calibrated with it in. The
+    // sum-of-squares form is the one denoise_prepare.wgsl already uses for its
+    // spatial fallback, with the same clamp at zero.
+    let n_mean = n_lum / max(n_weight, 1e-8);
+    let n_var = max(n_lum_sq / max(n_weight, 1e-8) - n_mean * n_mean, 0.0)
+        * (n_weight * n_weight)
+        / max(n_weight * n_weight - n_weight_sq, 1e-8);
+
+    // Published for the resolve pass. Where the guide leaves too little
+    // neighbourhood to average -- a silhouette, a curved mirror -- there is no
+    // honest local level to offer, so hand back the pixel's own luminance and
+    // let that pass behave as it did before.
+    local_level[index] = select(centre_lum, n_mean, n_weight >= despeckle_min_weight);
+
+    var colour = centre.xyz;
+
+    // The guide is what makes this safe, and it is not a refinement. It carries
+    // no sample noise -- trace_guide fires one deterministic ray per pixel per
+    // accumulation run -- so it separates "a bright pixel on the same flat
+    // surface as its neighbours", which is a firefly, from "a bright pixel
+    // looking at something else entirely", which is detail. A small emitter, a
+    // highlight on differently-oriented geometry, or a light against the
+    // background sentinel all collapse their neighbours' guide weights, and
+    // `despeckle_min_weight` then declines to judge the pixel at all. The
+    // maximum `n_weight` can reach is 5.169, the kernel's weight sum less its
+    // centre.
+    if (despeckle_enabled > 0.0 && n_weight >= despeckle_min_weight) {
+        // How far above its neighbours a pixel may sit before it reads as an
+        // outlier rather than as detail. Both terms are needed:
+        //
+        // - `despeckle_k` standard deviations covers the neighbourhood's own
+        //   spread, so a pixel on a gradient, a texture, or an edge the guide
+        //   did not catch is left alone.
+        // - the relative floor holds the bound at no less than (1 + floor)
+        //   times the local level. That is what stops a uniformly dark and
+        //   quiet neighbourhood -- where the spread really is near zero -- from
+        //   clamping a pixel down to its neighbours, and it is what carries the
+        //   converged case, where the spread has gone to nothing everywhere.
+        let bound = n_mean * (1.0 + despeckle_floor) + despeckle_k * sqrt(n_var);
+
+        if (centre_lum > bound && centre_lum > 1e-8) {
+            // Being far above your neighbours is not enough to make a pixel a
+            // firefly -- a caustic is too, and so is the lit side of anything
+            // small. What separates them is whether the pixel has any evidence
+            // behind it, and the accumulator already knows: fade the clamp in
+            // on the same relative standard error denoise_resolve.wgsl and the
+            // adaptive sampler in renderer/ray_trace.wgsl already test.
+            //
+            // Two departures from those two, both deliberate.
+            //
+            // The denominator is the *neighbourhood's* level rather than the
+            // pixel's own. A firefly's own mean is the thing the outlier
+            // inflated, so dividing by it is exactly what lets a firefly
+            // declare itself converged in proportion to how bright it is -- the
+            // defect described at the top of this function. The neighbourhood
+            // has no such conflict of interest.
+            //
+            // The numerator takes whichever of the pixel's own variance and the
+            // pooled one is larger. The pixel's own is the sharper signal where
+            // it can be trusted, but at two samples it carries one degree of
+            // freedom: a quarter of pixels read below a tenth of the truth, and
+            // a firefly that draws such a reading would talk its way out of
+            // being clamped. Pooling is what denoise_resolve.wgsl already
+            // reaches for against exactly that, and taking the larger keeps the
+            // sharper estimate wherever it is not the one that collapsed.
+            // Worth a third of the survivors at 2 spp and nothing anywhere
+            // else, which is the shape of a fix aimed at the right failure.
+            let evidence = sqrt(max(max(centre.w, variance), 0.0))
+                / max(n_mean, LUMINANCE_FLOOR);
+            let fade = clamp(evidence / despeckle_full_strength_error, 0.0, 1.0);
+
+            // A uniform scale rather than a move toward the neighbourhood, so
+            // hue and saturation survive at any fade.
+            colour = mix(colour, colour * (bound / centre_lum), fade);
+
+            // Written only where the clamp fired. A converged image therefore
+            // leaves this pass bit-identical rather than merely close to it,
+            // which is the property test_denoise_is_near_identity_at_high_samples
+            // pins. `.w` is carried through untouched, as the resolve pass does.
+            working[index] = vec4<f32>(colour, working[index].w);
+        }
+    }
+
+    dst[index] = vec4<f32>(colour, variance);
 }
 
 @compute @workgroup_size(8, 8)

@@ -19,10 +19,11 @@ use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
 
 use crate::scenes::{
-    create_blend_material_scene, create_light_attenuation_scene, create_normal_mapping_scene,
-    create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
-    create_obj_with_triangle, create_quad_rotation_scene, create_simple_test_scene,
-    create_specular_scene, create_test_scene, create_texture_mapping_scene, create_uv_scene,
+    create_blend_material_scene, create_cornell_scene, create_light_attenuation_scene,
+    create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
+    create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
+    create_simple_test_scene, create_specular_scene, create_test_scene,
+    create_texture_mapping_scene, create_uv_scene,
 };
 
 mod scenes;
@@ -889,6 +890,56 @@ fn grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
     (sum_sq / pixels_count).sqrt() / (sum_lum / pixels_count)
 }
 
+/// How many pixels read as an isolated bright speck: a count of those whose
+/// displayed luminance exceeds the brightest of their four neighbours by more
+/// than `excess`, on the 0-255 scale the image is finally written on.
+///
+/// Measured *through the display transform*, and that is the whole point. The
+/// first version of this counted in linear radiance, and it lied: it scored a
+/// change that removed 100% of the outliers it could see, while the rendered
+/// image looked all but unchanged. ACES plus gamma 2.0 compresses highlights
+/// hard, so a pixel pulled from twenty times its neighbourhood's brightness down
+/// to three times has lost 85% of its excess radiance and almost none of its
+/// visibility -- it is still a white dot on a dark ceiling. A metric in linear
+/// space rewards the first 85% and says nothing about the part a viewer sees.
+///
+/// Reference-free, like [`grain`], and for the same reason: it must not reward
+/// blur, since blur is what the thing being measured would otherwise hide
+/// behind. Unlike `grain`, which is an RMS over every pixel and so is dominated
+/// by the many small departures, this is a count -- a handful of pixels at ten
+/// times the local level barely moves an RMS and is the only thing the eye
+/// picks out.
+#[allow(dead_code)]
+fn fireflies(pixels: &[[f32; 4]], width: usize, height: usize, excess: f64) -> usize {
+    // The same display transform buffer_to_image applies, so what is counted is
+    // what is looked at.
+    let displayed: Vec<f64> = pixels
+        .iter()
+        .map(|p| {
+            let m = ToneMapper::default().map([p[0], p[1], p[2]]);
+            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
+        })
+        .collect();
+
+    let mut count = 0;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let at = |dx: usize, dy: usize| displayed[dy * width + dx];
+            let brightest_neighbour = at(x - 1, y)
+                .max(at(x + 1, y))
+                .max(at(x, y - 1))
+                .max(at(x, y + 1));
+
+            if at(x, y) - brightest_neighbour > excess {
+                count += 1;
+            }
+        }
+    }
+
+    count
+}
+
 fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let sum: f64 = a
         .iter()
@@ -1081,6 +1132,39 @@ fn specular_denoise_scene(samples_per_pixel: u32, strength: Option<f64>) -> Scen
         height: 100,
         samples_per_pixel,
         min_samples_per_pixel: 32,
+        post_processors,
+        ..Default::default()
+    })
+}
+
+/// `denoise_scene`'s counterpart on the Cornell box, which is the scene that
+/// actually produces fireflies. Adaptive sampling is off, as in `denoise_scene`,
+/// so every pixel really has the sample count asked for and the comparison
+/// across sample counts means what it says.
+fn cornell_denoise_scene(samples_per_pixel: u32, strength: Option<f64>) -> Scene {
+    cornell_denoise_scene_at(samples_per_pixel, strength, 200, 200)
+}
+
+fn cornell_denoise_scene_at(
+    samples_per_pixel: u32,
+    strength: Option<f64>,
+    width: usize,
+    height: usize,
+) -> Scene {
+    let (device, _) = get_wgpu_device_and_queue();
+    let post_processors = match strength {
+        Some(s) => vec![
+            DenoisePostProcessor::new(s, None, None, device)
+                .unwrap()
+                .into(),
+        ],
+        None => vec![],
+    };
+    create_cornell_scene(RenderConfig {
+        width,
+        height,
+        samples_per_pixel,
+        min_samples_per_pixel: u32::MAX,
         post_processors,
         ..Default::default()
     })
@@ -1388,4 +1472,244 @@ fn tone_map_visual_comparison() {
                 .unwrap();
         }
     }
+}
+
+/// The gate this whole change exists for: a denoised image must not keep
+/// fireflies, at any sample count.
+///
+/// Before the despeckle stage in `prefilter_variance` the denoiser removed
+/// between 61% and 91% of them depending on the sample count, which sounds
+/// respectable and looks terrible -- what is left is a scatter of single pixels
+/// tens of times brighter than the surface they sit on, and the eye finds every
+/// one. It also got *worse* with more samples in the sense that mattered: 1 spp
+/// at strength 5 was the one clean configuration in the whole grid, because it
+/// is the only one where `denoise_resolve.wgsl` takes the filtered result whole
+/// instead of blending a fraction of the raw outlier back in.
+///
+/// So the assertion is a proportion rather than an absolute count -- the scene
+/// produces a different number of outliers at every sample count and there is
+/// no point pinning that -- with a small absolute allowance so a configuration
+/// that produces almost none cannot fail on integer noise.
+#[test]
+fn test_denoise_removes_fireflies_at_every_sample_count() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let (width, height) = (400, 400);
+
+    let count = |spp, strength| {
+        let pixels = render_linear(
+            cornell_denoise_scene_at(spp, strength, width, height),
+            device,
+            queue,
+        );
+        // 20 of 255 above every neighbour. Below about 10 the count is
+        // dominated by ordinary grain, which is not what this is measuring;
+        // above about 40 only the very worst pixels are counted and the
+        // denoiser scored well there even before any of this work.
+        fireflies(&pixels, width, height, 20.)
+    };
+
+    for spp in [1, 2, 5, 10, 16] {
+        let noisy = count(spp, None);
+
+        // Both ends of the documented strength range. That strength barely
+        // moved the firefly count was half the original symptom: the stage that
+        // decided their fate read no sigma at all, so there was nothing for the
+        // knob to do.
+        for strength in [1., 5.] {
+            let denoised = count(spp, Some(strength));
+            println!(
+                "{:>2} spp, strength {}: {:>5} fireflies -> {:>4}",
+                spp, strength, noisy, denoised
+            );
+
+            let allowed = (noisy as f64 * 0.08) as usize + 4;
+            assert!(
+                denoised <= allowed,
+                "denoising {} spp at strength {} left {} fireflies of the {} the \
+                 raw render had, and at most {} is allowed",
+                spp,
+                strength,
+                denoised,
+                noisy,
+                allowed
+            );
+        }
+    }
+}
+
+/// The positive control for the test above, and the risk it introduces.
+///
+/// Clamping a pixel against its neighbours is a good way to remove fireflies
+/// and an excellent way to remove a caustic, which is the same shape --
+/// legitimately bright, high variance, and sitting on a surface whose guide
+/// matches its neighbours'. The specular scene's glass sphere puts one directly
+/// under it.
+///
+/// The 99.9th percentile rather than the maximum: the maximum is a light source
+/// seen directly, which the guide protects trivially and which would pass this
+/// however wrong the filter was.
+#[test]
+fn test_denoise_preserves_bright_detail_when_converged() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let percentile_999 = |pixels: &[[f32; 4]]| {
+        let mut lums: Vec<f64> = pixels
+            .iter()
+            .map(|p| (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) as f64)
+            .collect();
+        lums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        lums[lums.len() * 999 / 1000]
+    };
+
+    for (name, plain, denoised) in [
+        (
+            "specular",
+            specular_denoise_scene(2000, None),
+            specular_denoise_scene(2000, Some(1.)),
+        ),
+        (
+            "cornell",
+            cornell_denoise_scene(2000, None),
+            cornell_denoise_scene(2000, Some(1.)),
+        ),
+    ] {
+        let before = percentile_999(&render_linear(plain, device, queue));
+        let after = percentile_999(&render_linear(denoised, device, queue));
+
+        println!(
+            "{}: 99.9th percentile luminance {} -> {}",
+            name, before, after
+        );
+        assert!(
+            after > before * 0.97,
+            "denoising a converged {} scene dimmed its brightest detail, 99.9th \
+             percentile went {} -> {}",
+            name,
+            before,
+            after
+        );
+    }
+}
+
+/// Saves the same 1/2/5/10 spp by strength 1/5 grid as `denoise_examples/`,
+/// through the same display transform the renderer uses, so the change can be
+/// looked at rather than only measured.
+/// `cargo test cornell_visual_grid -- --ignored`
+#[test]
+#[ignore]
+fn cornell_visual_grid() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let tag = std::env::var("VISUAL_TAG").unwrap_or_else(|_| "actual".into());
+    let (width, height) = (500, 500);
+
+    for spp in [1, 2, 5, 10] {
+        for strength in [1., 5.] {
+            let pixels = render_linear(
+                cornell_denoise_scene_at(spp, Some(strength), width, height),
+                device,
+                queue,
+            );
+            encode(&pixels, width as u32, height as u32, ToneMapper::default())
+                .save(format!(
+                    "tests/output/out_actual_cornell_{}_{}spp_str{}.png",
+                    tag, spp, strength as u32
+                ))
+                .unwrap();
+        }
+    }
+}
+
+/// Diagnostic, not a gate: firefly counts across the sample-count and strength
+/// grid, reference-free so it needs no converged render. This is how
+/// `despeckle_k`, `despeckle_floor` and `despeckle_min_weight` in
+/// `denoise_atrous.wgsl` were chosen, and re-running it is how to re-choose
+/// them. `cargo test cornell_firefly_sweep -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn cornell_firefly_sweep() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let (width, height) = (500, 500);
+
+    // Rendered once per configuration and counted at every threshold, because
+    // where the cut is drawn decides how many marginal pixels are counted and
+    // the conclusion should not depend on it.
+    let thresholds = [10., 20., 40., 60.];
+    let counts = |spp, strength| {
+        let pixels = render_linear(
+            cornell_denoise_scene_at(spp, strength, width, height),
+            device,
+            queue,
+        );
+        thresholds
+            .iter()
+            .map(|&e| fireflies(&pixels, width, height, e))
+            .collect::<Vec<_>>()
+    };
+
+    for spp in [1, 2, 5, 10, 16, 64] {
+        let rows = [
+            ("raw", counts(spp, None)),
+            ("strength 1", counts(spp, Some(1.))),
+            ("strength 5", counts(spp, Some(5.))),
+        ];
+        println!("--- {} spp, {}x{} ---", spp, width, height);
+        print!("{:>12}", "excess >");
+        for e in thresholds {
+            print!("{:>8}", e as u32);
+        }
+        println!();
+        for (name, row) in rows {
+            print!("{:>12}", name);
+            for c in row {
+                print!("{:>8}", c);
+            }
+            println!();
+        }
+    }
+}
+
+/// A strength of 0 is the bottom of the documented range, where `sigma_colour`
+/// collapses the luminance tolerance to 1e-8 and every non-centre tap goes to
+/// zero weight. That is as close to the identity as this filter gets.
+///
+/// Outlier rejection does not read `sigma_colour`, and deliberately so: that
+/// their fate was decided by a stage reading no sigma at all is exactly why
+/// `strength` used to make so little difference to fireflies. So it has to be
+/// switched off explicitly at zero, or "off" would quietly stop meaning off,
+/// and this is the test that says so. Measured, the bound below has a hundred-
+/// fold margin when the switch is wired up and fails by three hundredfold when
+/// it is not.
+#[test]
+fn test_denoise_strength_zero_is_the_identity() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    // A sample count low enough that the despeckle would certainly fire if it
+    // were running at all: at 2 spp it clamps a few hundred pixels of this
+    // scene.
+    let plain = render_linear(cornell_denoise_scene(2, None), device, queue);
+    let denoised = render_linear(cornell_denoise_scene(2, Some(0.)), device, queue);
+
+    let mean: f64 = plain
+        .iter()
+        .map(|p| (p[0] + p[1] + p[2]) as f64 / 3.0)
+        .sum::<f64>()
+        / plain.len() as f64;
+    let relative = linear_rmse(&denoised, &plain) / mean;
+
+    println!(
+        "relative linear RMSE of the denoiser at strength 0: {}",
+        relative
+    );
+
+    // Not bit-exact, and never was: a tap whose luminance matches the centre's
+    // exactly still passes the collapsed tolerance, and the resolve pass still
+    // mixes. What the bound is here for is the despeckle -- left wired up at
+    // strength 0 it clamps a few hundred pixels of this scene and this number
+    // goes up by two orders of magnitude.
+    assert!(
+        relative < 0.001,
+        "a denoiser at strength 0 should be as close to the identity as the \
+         filter can be, relative RMSE was {}",
+        relative
+    );
 }
