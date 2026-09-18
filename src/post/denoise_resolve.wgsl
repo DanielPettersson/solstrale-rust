@@ -44,6 +44,11 @@ var<storage, read_write> working: array<vec4<f32>>;
 @group(0) @binding(3)
 var<storage, read> pooled_variance: array<f32>;
 
+// The guide-weighted luminance of each pixel's neighbourhood, centre excluded,
+// as denoise_atrous.wgsl's prefilter_variance measured it. Read-only here.
+@group(0) @binding(4)
+var<storage, read> local_level: array<f32>;
+
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
@@ -83,7 +88,27 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
         let variance_bound = pooled_variance[index] * (1.0 + sqrt(2.0 / dof));
 
         let standard_error = sqrt(variance_bound);
-        let relative = standard_error / max(luminance(original.xyz), LUMINANCE_FLOOR);
+
+        // The denominator is the pixel's brightness -- but *not* its own, where
+        // its own is the higher of the two readings available.
+        //
+        // Dividing by `luminance(original)` alone is not a neutral choice, and
+        // it is what put a field of bright speckles on an otherwise smooth
+        // image. Noise moves a pixel up as often as down; a pixel it moved up
+        // gets a larger denominator, so a smaller relative error, so a smaller
+        // blend, and keeps more of the raw value that was too bright. A pixel it
+        // moved down gets the opposite and is filtered harder. The test is
+        // therefore biased to preserve upward noise and remove downward noise,
+        // and preserved upward noise is exactly what a speckle is.
+        //
+        // The neighbourhood's level is the reading the pixel's own noise cannot
+        // move. Taking the lower of the two keeps the fix one-directional: a
+        // pixel brighter than its surroundings is judged against them and
+        // filtered accordingly, while one that is darker, or one sitting in a
+        // genuinely bright region where the two agree, behaves exactly as
+        // before.
+        let level = min(luminance(original.xyz), local_level[index]);
+        let relative = standard_error / max(level, LUMINANCE_FLOOR);
         blend = clamp(relative / full_strength_error, 0.0, 1.0);
     }
 

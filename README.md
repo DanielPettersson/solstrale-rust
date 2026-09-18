@@ -30,9 +30,10 @@ Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https:/
 * Denoiser: an edge-avoiding a-trous wavelet filter guided by the per-pixel
   variance the sample loop already tracks, which cuts error against a converged
   reference by about a third at 8 samples per pixel and leaves an already
-  converged image essentially untouched. Outlier rejection runs alongside the
-  filter's variance pre-pass, so fireflies do not survive the denoise the way an
-  edge-avoiding filter alone would let them
+  converged image essentially untouched. Fireflies do not survive it: the filter
+  is faded back in against each pixel's neighbourhood rather than against its own
+  noise-inflated brightness, and outlier rejection runs alongside the filter's
+  variance pre-pass for the tail an edge-avoiding filter cannot reach
 
 ### Display
 * Tone mapping: ACES filmic by default, with Khronos PBR Neutral, extended

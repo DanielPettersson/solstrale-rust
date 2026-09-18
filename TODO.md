@@ -83,29 +83,65 @@ come out cleaner, and the reflected horizon in the mirror sphere stays a line.
 `test_gbuffer_follows_specular_chain` (`renderer/mod.rs`) is what actually pins
 the behaviour, analytically.
 
-Also done: outlier rejection. An edge-avoiding filter cannot remove a firefly --
-a firefly is an edge by every measure it has -- so what decided their fate was
-the fade in `denoise_resolve.wgsl`, and it leaked. For a pixel whose mean is
-carried by one outlier sample out of n, the Welford variance of the mean comes
-out to the pixel's own value squared, so the standard error and the mean cancel
-and the relative error the fade tests is a constant: the square root of the
-variance pre-pass's centre share, 1/6.169, which is 0.4026 against a
-`full_strength_error` of 0.4. Every firefly landed on the threshold, the test was
-scale-free in how bright the firefly was, and any ordinary perturbation pushed it
-under -- leaving `(1 - blend)` times the raw outlier, unbounded in its brightness
-and independent of `strength`, since the fade reads no sigma at all. That is why
-1 spp was the one clean configuration: below two samples the fade does not run.
+Also done: fireflies no longer survive the denoiser. An edge-avoiding filter
+cannot remove one -- a firefly is an edge by every measure it has -- so what
+decided their fate was the fade in `denoise_resolve.wgsl`, and it leaked at two
+scales.
 
-`prefilter_variance` now clamps a pixel that sits far above the neighbourhood its
-guide says it belongs to, over the same taps and the same weights it was already
-gathering, and writes the result into the chain's working image so the fade
-blends against a despeckled original rather than a raw outlier. Measured on
-`create_cornell_scene` at 400x400, fireflies surviving the denoiser went from
-9-39% of the raw render's, depending on sample count, to under 2% at every
-sample count and none at all from 5 samples upwards. Both RMSE gates improved
-slightly rather than regressing. `test_denoise_removes_fireflies_at_every_sample_count`
-is the gate, `test_denoise_preserves_bright_detail_when_converged` the control,
-and `cornell_firefly_sweep` the diagnostic the constants were chosen on.
+The broad leak was the fade's denominator. `relative = standard_error /
+luminance(original)` divides by the pixel's own brightness, and noise moves a
+pixel up as often as down: a pixel it moved up gets a larger denominator, a
+smaller relative error, a smaller blend, and keeps more of the raw value that was
+too bright, while one it moved down is filtered harder. The test was therefore
+biased to preserve upward noise and remove downward noise, and preserved upward
+noise is what a speckle is. The denominator is now the lower of the pixel's own
+luminance and its guide-weighted neighbourhood level, which the variance
+pre-pass publishes -- one-directional, so a pixel that is darker than its
+surroundings, or one in a genuinely bright region where the two agree, behaves
+exactly as before.
+
+The narrow leak was the extreme tail, plus the case the fade never runs on. For
+a pixel whose mean is carried by one outlier sample out of n, the Welford
+variance of the mean comes out to the pixel's own value squared -- the standard
+error and the mean cancel -- so the relative error is a constant: the square root
+of the pre-filter kernel's centre share, 1/6.169, which is 0.4026 against a
+`full_strength_error` of 0.4. Every such firefly landed on the threshold,
+scale-free in how bright it was. And below two samples the fade does not run at
+all, so at 1 spp nothing stood between an outlier and the image. So
+`prefilter_variance` now also clamps a pixel sitting far above the neighbourhood
+its guide says it belongs to, over the taps and weights it was already
+gathering, and writes the result into the chain's working image. The two are
+complementary rather than redundant: the fade's fix alone leaves 1701 specks at
+1 spp where both together leave 357, and the clamp alone leaves over a thousand
+at every sample count above 2.
+
+Measured on `create_cornell_scene` through the display transform, counting
+pixels more than 20 of 255 brighter than every neighbour, at 500x500:
+
+    spp            1      2      5     10     16     64
+    raw        18262  15237  10778   7515   5321    995
+    before         0   2075   1872   1469   1042    167
+    after          0     46      7     12     13     12
+
+That is at strength 5; at strength 1 it is 2728/3068/2699/2105/1509/248 before
+against 616/365/82/59/50/41 after. Both RMSE gates improved rather than
+regressing -- 0.6720 to 0.6538 on the specular scene and 0.5513 to 0.5188 on the
+diffuse one -- and a converged image still passes through close to untouched,
+0.0045 against a gate of 0.02.
+
+Worth knowing for whoever measures this next: the first version of the metric
+counted outliers in linear radiance and it lied. ACES plus gamma 2.0 compresses
+highlights hard, so a pixel pulled from twenty times its neighbourhood down to
+three has lost 85% of its excess radiance and almost none of its visibility. The
+linear metric scored a change at "all outliers removed" that was visually almost
+indistinguishable from no change at all. `fireflies()` measures through the
+display transform for that reason.
+
+`test_denoise_removes_fireflies_at_every_sample_count` is the gate,
+`test_denoise_preserves_bright_detail_when_converged` the control against
+clamping a caustic, `test_denoise_strength_zero_is_the_identity` the guard on the
+switch that turns the despeckle off with the filter, and `cornell_firefly_sweep`
+the diagnostic the constants were chosen on.
 
 Two smaller ones from the same work:
 

@@ -890,53 +890,48 @@ fn grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
     (sum_sq / pixels_count).sqrt() / (sum_lum / pixels_count)
 }
 
-/// How many pixels sit far enough above their surroundings to read as a
-/// firefly: a count, over a 5x5 neighbourhood with the centre excluded, of
-/// pixels exceeding it by both `k` local standard deviations *and* a factor of
-/// `ratio` times its mean.
+/// How many pixels read as an isolated bright speck: a count of those whose
+/// displayed luminance exceeds the brightest of their four neighbours by more
+/// than `excess`, on the 0-255 scale the image is finally written on.
 ///
-/// A count rather than an RMS, and that is the point. [`grain`] is an RMS over
-/// every pixel, so it is dominated by the many small departures and a handful
-/// of pixels at fifty times the local mean barely move it. What the eye picks
-/// out is exactly those few pixels, and only a count tracks them.
-///
-/// Both conditions are needed. The sigma test alone fires all along a genuine
-/// edge, where the local spread really is large; the ratio test alone fires on
-/// any slightly bright pixel in a flat dark region. Together they select a
-/// pixel that disagrees with its neighbourhood in a way the neighbourhood's own
-/// spread cannot account for.
+/// Measured *through the display transform*, and that is the whole point. The
+/// first version of this counted in linear radiance, and it lied: it scored a
+/// change that removed 100% of the outliers it could see, while the rendered
+/// image looked all but unchanged. ACES plus gamma 2.0 compresses highlights
+/// hard, so a pixel pulled from twenty times its neighbourhood's brightness down
+/// to three times has lost 85% of its excess radiance and almost none of its
+/// visibility -- it is still a white dot on a dark ceiling. A metric in linear
+/// space rewards the first 85% and says nothing about the part a viewer sees.
 ///
 /// Reference-free, like [`grain`], and for the same reason: it must not reward
 /// blur, since blur is what the thing being measured would otherwise hide
-/// behind.
+/// behind. Unlike `grain`, which is an RMS over every pixel and so is dominated
+/// by the many small departures, this is a count -- a handful of pixels at ten
+/// times the local level barely moves an RMS and is the only thing the eye
+/// picks out.
 #[allow(dead_code)]
-fn fireflies(pixels: &[[f32; 4]], width: usize, height: usize, k: f64, ratio: f64) -> usize {
-    let lum = |p: &[f32; 4]| (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) as f64;
+fn fireflies(pixels: &[[f32; 4]], width: usize, height: usize, excess: f64) -> usize {
+    // The same display transform buffer_to_image applies, so what is counted is
+    // what is looked at.
+    let displayed: Vec<f64> = pixels
+        .iter()
+        .map(|p| {
+            let m = ToneMapper::default().map([p[0], p[1], p[2]]);
+            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
+        })
+        .collect();
+
     let mut count = 0;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let at = |dx: usize, dy: usize| displayed[dy * width + dx];
+            let brightest_neighbour = at(x - 1, y)
+                .max(at(x + 1, y))
+                .max(at(x, y - 1))
+                .max(at(x, y + 1));
 
-    for y in 0..height {
-        for x in 0..width {
-            let mut sum = 0.0;
-            let mut sum_sq = 0.0;
-            let mut taps = 0.0;
-            for dy in -2i32..=2 {
-                for dx in -2i32..=2 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    let nx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
-                    let ny = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
-                    let l = lum(&pixels[ny * width + nx]);
-                    sum += l;
-                    sum_sq += l * l;
-                    taps += 1.0;
-                }
-            }
-            let mean = sum / taps;
-            let sd = (sum_sq / taps - mean * mean).max(0.0).sqrt();
-
-            let centre = lum(&pixels[y * width + x]);
-            if centre > mean + k * sd && centre > ratio * mean {
+            if at(x, y) - brightest_neighbour > excess {
                 count += 1;
             }
         }
@@ -1506,7 +1501,11 @@ fn test_denoise_removes_fireflies_at_every_sample_count() {
             device,
             queue,
         );
-        fireflies(&pixels, width, height, 8., 4.)
+        // 20 of 255 above every neighbour. Below about 10 the count is
+        // dominated by ordinary grain, which is not what this is measuring;
+        // above about 40 only the very worst pixels are counted and the
+        // denoiser scored well there even before any of this work.
+        fireflies(&pixels, width, height, 20.)
     };
 
     for spp in [1, 2, 5, 10, 16] {
@@ -1631,31 +1630,40 @@ fn cornell_firefly_sweep() {
     let (device, queue) = get_wgpu_device_and_queue();
     let (width, height) = (500, 500);
 
-    let count = |spp, strength, k, ratio| {
+    // Rendered once per configuration and counted at every threshold, because
+    // where the cut is drawn decides how many marginal pixels are counted and
+    // the conclusion should not depend on it.
+    let thresholds = [10., 20., 40., 60.];
+    let counts = |spp, strength| {
         let pixels = render_linear(
             cornell_denoise_scene_at(spp, strength, width, height),
             device,
             queue,
         );
-        fireflies(&pixels, width, height, k, ratio)
+        thresholds
+            .iter()
+            .map(|&e| fireflies(&pixels, width, height, e))
+            .collect::<Vec<_>>()
     };
 
-    // Three thresholds, because where the cut is drawn decides how many
-    // marginal pixels are counted and the conclusion should not depend on it.
-    for (k, ratio) in [(8., 4.), (6., 3.), (4., 2.)] {
-        println!("--- k={} ratio={} ({}x{}) ---", k, ratio, width, height);
-        println!(
-            "{:>5} {:>8} {:>10} {:>10}",
-            "spp", "noisy", "str 1", "str 5"
-        );
-        for spp in [1, 2, 5, 10, 16, 64] {
-            println!(
-                "{:>5} {:>8} {:>10} {:>10}",
-                spp,
-                count(spp, None, k, ratio),
-                count(spp, Some(1.), k, ratio),
-                count(spp, Some(5.), k, ratio)
-            );
+    for spp in [1, 2, 5, 10, 16, 64] {
+        let rows = [
+            ("raw", counts(spp, None)),
+            ("strength 1", counts(spp, Some(1.))),
+            ("strength 5", counts(spp, Some(5.))),
+        ];
+        println!("--- {} spp, {}x{} ---", spp, width, height);
+        print!("{:>12}", "excess >");
+        for e in thresholds {
+            print!("{:>8}", e as u32);
+        }
+        println!();
+        for (name, row) in rows {
+            print!("{:>12}", name);
+            for c in row {
+                print!("{:>8}", c);
+            }
+            println!();
         }
     }
 }

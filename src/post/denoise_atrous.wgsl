@@ -93,6 +93,14 @@ var<storage, read_write> pooled_variance: array<f32>;
 @group(0) @binding(4)
 var<storage, read_write> working: array<vec4<f32>>;
 
+// The guide-weighted luminance of each pixel's neighbourhood, centre excluded.
+// Written by prefilter_variance, read by denoise_resolve.wgsl, which needs a
+// measure of how bright a pixel's surroundings are that the pixel's own noise
+// cannot move. See the comment on its use there. The A-Trous iterations bind it
+// and never touch it.
+@group(0) @binding(5)
+var<storage, read_write> local_level: array<f32>;
+
 struct Guide {
     albedo: vec3<f32>,
     normal: vec3<f32>,
@@ -190,23 +198,28 @@ fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
 //
 // Why the filter needs it at all. An edge-avoiding filter cannot remove a
 // firefly on its own, because a firefly is an edge by every measure the filter
-// has. What saved it until now was the fade in denoise_resolve.wgsl -- and that
-// is precisely where it leaked. For a pixel whose mean comes from one outlier
-// sample out of n, the Welford variance of the mean works out to the pixel's
-// own value squared, so the standard error and the mean cancel and the relative
-// error the resolve pass tests is a constant: sqrt of this kernel's centre
-// share, 1/6.169, which is 0.4026 against a `full_strength_error` of 0.4. Every
-// firefly lands on the threshold, the test is scale-free in how bright the
-// firefly is, and any ordinary perturbation -- two large samples rather than
-// one, or a pixel that also carries real signal -- pushes it under. What is
-// left on screen is (1 - blend) times the raw outlier: unbounded in its
-// brightness, and independent of `strength`, since the blend reads no sigma at
-// all. Measured on the Cornell scene at 2 spp and strength 5, forcing the blend
-// to 1 took the firefly count from 220 to 1.
+// has. What saved it until now was the fade in denoise_resolve.wgsl, and that
+// is where it leaked -- twice, at two different scales.
 //
-// So the fix is not to widen a tolerance. It is to make sure that by the time
-// the resolve pass looks at "the original", the outlier is already gone from
-// it -- which is what the write to `working` below is for.
+// The broad leak is the fade's denominator, and it is fixed there rather than
+// here: dividing by a pixel's own luminance biases the test to preserve noise
+// that moved a pixel up and remove noise that moved it down, which is a field
+// of bright speckles by construction. See the comment on `level` in that file.
+//
+// What is left for this pass is the extreme tail, and the case the fade never
+// sees at all. For a pixel whose mean comes from one outlier sample out of n,
+// the Welford variance of the mean works out to the pixel's own value squared,
+// so the standard error and the mean cancel and the relative error the fade
+// tests is a constant: sqrt of this kernel's centre share, 1/6.169, which is
+// 0.4026 against a `full_strength_error` of 0.4. Every such firefly lands on
+// the threshold, scale-free in how bright it is. And below two samples the fade
+// does not run at all -- it takes the filtered result whole -- so at 1 spp
+// nothing but this pass stands between an outlier and the image. Measured, the
+// fade's fix alone leaves 1701 specks at 1 spp and this one takes it to 357.
+//
+// So: clamp a pixel that sits far above the neighbourhood its guide says it
+// belongs to, and write the result into `working` too, so that by the time the
+// resolve pass looks at "the original" the outlier is already gone from it.
 @compute @workgroup_size(8, 8)
 fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= width || gid.y >= height) {
@@ -258,6 +271,22 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
     let variance = sum_variance / sum_weight;
     pooled_variance[index] = variance;
 
+    // Reliability-weighted variance, Bessel-corrected. The kernel's effective
+    // tap count excluding the centre is about eleven, so the correction is worth
+    // roughly a tenth and `despeckle_k` is calibrated with it in. The
+    // sum-of-squares form is the one denoise_prepare.wgsl already uses for its
+    // spatial fallback, with the same clamp at zero.
+    let n_mean = n_lum / max(n_weight, 1e-8);
+    let n_var = max(n_lum_sq / max(n_weight, 1e-8) - n_mean * n_mean, 0.0)
+        * (n_weight * n_weight)
+        / max(n_weight * n_weight - n_weight_sq, 1e-8);
+
+    // Published for the resolve pass. Where the guide leaves too little
+    // neighbourhood to average -- a silhouette, a curved mirror -- there is no
+    // honest local level to offer, so hand back the pixel's own luminance and
+    // let that pass behave as it did before.
+    local_level[index] = select(centre_lum, n_mean, n_weight >= despeckle_min_weight);
+
     var colour = centre.xyz;
 
     // The guide is what makes this safe, and it is not a refinement. It carries
@@ -271,16 +300,6 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
     // maximum `n_weight` can reach is 5.169, the kernel's weight sum less its
     // centre.
     if (despeckle_enabled > 0.0 && n_weight >= despeckle_min_weight) {
-        // Reliability-weighted variance, Bessel-corrected. The kernel's
-        // effective tap count excluding the centre is about eleven, so the
-        // correction is worth roughly a tenth and `despeckle_k` is calibrated
-        // with it in. The sum-of-squares form is the one denoise_prepare.wgsl
-        // already uses for its spatial fallback, with the same clamp at zero.
-        let n_mean = n_lum / n_weight;
-        let n_var = max(n_lum_sq / n_weight - n_mean * n_mean, 0.0)
-            * (n_weight * n_weight)
-            / max(n_weight * n_weight - n_weight_sq, 1e-8);
-
         // How far above its neighbours a pixel may sit before it reads as an
         // outlier rather than as detail. Both terms are needed:
         //
