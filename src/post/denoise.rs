@@ -330,8 +330,27 @@ impl PostProcessor for DenoisePostProcessor {
         // than the exact Welford one the sample loop hands us. Folded into the
         // base so that a `strength` of 1 is the tuned default rather than a
         // number users have to know to halve.
+        //
+        // Sub-linear in `strength`, which is new, and necessary now that the
+        // knob also opens the fade in denoise_resolve.wgsl. Two independent
+        // noisy pixels differ by something with a standard deviation of
+        // sqrt(2) * SE, so a sigma of 2 accepts taps within 1.4 standard
+        // deviations of that difference and SVGF's 4 within 2.8; the defensible
+        // band is somewhere in between. Linear scaling put a strength of 10 at
+        // 20, which is fourteen standard deviations -- at 100 samples per pixel
+        // that accepts any tap within 80% relative contrast of the centre, which
+        // is every gradient, soft shadow and colour bleed in a Cornell box. It
+        // was only ever harmless because the fade then discarded four fifths of
+        // the result.
+        //
+        // A square root because it is monotone with fixed points at exactly 0
+        // and exactly 1: strength 0 stays the identity, strength 1 stays the
+        // tuned default that every gate and golden is measured at, and only the
+        // range in between and above moves. 10 now gives 6.3, which is 4.5
+        // standard deviations -- outside the textbook band, but that is a
+        // defensible reading of "the user asked for maximum".
         let sigmas = [
-            ("sigma_colour", 2.0 * self.strength),
+            ("sigma_colour", 2.0 * self.strength.sqrt()),
             ("sigma_normal", 128.),
             ("sigma_depth", 1.),
             ("sigma_albedo", 0.1),

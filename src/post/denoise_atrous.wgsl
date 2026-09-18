@@ -61,9 +61,20 @@ override despeckle_floor: f32 = 1.0;
 // Raising it to 2.5 took that scene from 4% worse than no despeckle at all to
 // slightly better, and cost no fireflies.
 override despeckle_min_weight: f32 = 2.5;
-// Relative standard error at which the clamp reaches full strength. Matches
-// `full_strength_error` in denoise_resolve.wgsl deliberately: the two are the
-// same test, and the comment there is the one that explains the number.
+// Relative standard error at which the clamp reaches full strength.
+//
+// This used to match `full_strength_error` in denoise_resolve.wgsl, because the
+// two were the same test: is this pixel's estimate converged? That pass now asks
+// a different question -- would the remainder be visible on screen? -- so the
+// two are no longer related and sharing a number would be a coincidence.
+//
+// This one deliberately stays a relative standard error, because its calibration
+// depends on being one. For a mean carried by a single outlier sample the
+// standard error and the mean cancel exactly, leaving a relative error of
+// sqrt(1/6.169) = 0.4026 *however bright the firefly is* -- see the block comment
+// on prefilter_variance. One threshold therefore catches all of them. The same
+// firefly measured in code values ranges over 13 to 30 with brightness, and no
+// single number would do.
 override despeckle_full_strength_error: f32 = 0.4;
 // Set to 0 when strength is 0, which is documented to be the identity.
 override despeckle_enabled: f32 = 1.0;
@@ -222,10 +233,12 @@ fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
 // What is left for this pass is the extreme tail, and the case the fade never
 // sees at all. For a pixel whose mean comes from one outlier sample out of n,
 // the Welford variance of the mean works out to the pixel's own value squared,
-// so the standard error and the mean cancel and the relative error the fade
-// tests is a constant: sqrt of this kernel's centre share, 1/6.169, which is
-// 0.4026 against a `full_strength_error` of 0.4. Every such firefly lands on
-// the threshold, scale-free in how bright it is. And below two samples the fade
+// so the standard error and the mean cancel and the relative error tested here
+// is a constant: sqrt of this kernel's centre share, 1/6.169, which is
+// 0.4026 against a `despeckle_full_strength_error` of 0.4. Every such firefly
+// lands on the threshold, scale-free in how bright it is -- which is why this
+// stage keeps a relative standard error as its yardstick even though the resolve
+// pass has stopped using one. And below two samples the fade
 // does not run at all -- it takes the filtered result whole -- so at 1 spp
 // nothing but this pass stands between an outlier and the image. Measured, the
 // fade's fix alone leaves 1701 specks at 1 spp and this one takes it to 357.
@@ -331,10 +344,10 @@ fn prefilter_variance(@builtin(global_invocation_id) gid: vec3<u32>) {
             // firefly -- a caustic is too, and so is the lit side of anything
             // small. What separates them is whether the pixel has any evidence
             // behind it, and the accumulator already knows: fade the clamp in
-            // on the same relative standard error denoise_resolve.wgsl and the
-            // adaptive sampler in renderer/ray_trace.wgsl already test.
+            // on the same relative standard error the adaptive sampler in
+            // renderer/ray_trace.wgsl already tests.
             //
-            // Two departures from those two, both deliberate.
+            // Two departures from it, both deliberate.
             //
             // The denominator is the *neighbourhood's* level rather than the
             // pixel's own. A firefly's own mean is the thing the outlier
@@ -386,11 +399,26 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let centre_lum = luminance(centre.xyz);
     let centre_guide = load_guide(index);
 
-    // How far a neighbour's luminance may stray before it reads as a different
-    // surface rather than as noise. Driven by the pre-filtered variance of the
-    // estimate, so a pixel that has converged tolerates almost nothing and a
-    // pixel at one sample tolerates almost anything. This is the whole of the
+    // How far a neighbour may stray before it reads as a different surface
+    // rather than as noise. Driven by the pre-filtered variance of the estimate,
+    // so a pixel that has converged tolerates almost nothing and a pixel at one
+    // sample tolerates almost anything. This is the whole of the
     // "variance-guided" part.
+    //
+    // Measured and not done: comparing *compressed* luminance, log(1 + L), with
+    // the variance carried through by the delta method. The image is shown
+    // through a tone curve and gamma, so a linear tolerance is worth wildly
+    // different amounts of visibility depending on where it sits, and TODO.md
+    // records the fix. To first order it is identically this filter -- numerator
+    // and denominator are scaled by the same derivative and it cancels -- so
+    // what it actually changes is the tail. Measured at strength 1 with the
+    // asymmetric form, it took fireflies from 129 to 84 at 1 spp and 77 to 63 at
+    // 2, moved denoised grain by under 1%, and cost 4% of the specular scene's
+    // RMSE against a converged reference and 7% of the diffuse scene's -- the
+    // price of a weight that is not symmetric in (centre, tap) and so does not
+    // conserve energy locally. The firefly budget was not under pressure at 129
+    // against a gate of 946, so it was paying accuracy for a margin that was
+    // already there. See TODO.md.
     let lum_tolerance = sigma_colour * sqrt(max(centre.w, 1e-8)) + 1e-8;
 
     var sum = vec3<f32>(0.0);
