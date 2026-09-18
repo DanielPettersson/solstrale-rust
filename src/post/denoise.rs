@@ -1,6 +1,7 @@
 //! Post-processor for removing Monte Carlo noise
 
 use crate::post::{PIXEL_SIZE, PostProcessContext, PostProcessor};
+use crate::util::tone_map::ToneMapper;
 use crate::util::wgpu_util::{
     add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline,
     compute_pipeline_with_entry, storage_binding,
@@ -77,10 +78,16 @@ pub struct DenoisePostProcessor {
     iterations: u32,
     strength: f64,
     guide: DenoiseGuide,
+    /// The display transform the resolve pass judges residual noise through.
+    /// See [`DenoisePostProcessor::with_tone_mapper`].
+    tone_mapper: ToneMapper,
 
     prepare_module: wgpu::ShaderModule,
     atrous_module: wgpu::ShaderModule,
-    resolve_module: wgpu::ShaderModule,
+    /// Built in `initialize` rather than at construction, because the tone
+    /// curve is spliced into its source and `with_tone_mapper` may still change
+    /// it after `new` has returned.
+    resolve_module: Option<wgpu::ShaderModule>,
 
     prepare_bind_group_layout: wgpu::BindGroupLayout,
     atrous_bind_group_layout: wgpu::BindGroupLayout,
@@ -140,8 +147,6 @@ impl DenoisePostProcessor {
         let prepare_module =
             device.create_shader_module(wgpu::include_wgsl!("denoise_prepare.wgsl"));
         let atrous_module = device.create_shader_module(wgpu::include_wgsl!("denoise_atrous.wgsl"));
-        let resolve_module =
-            device.create_shader_module(wgpu::include_wgsl!("denoise_resolve.wgsl"));
 
         let prepare_bind_group_layout = bind_group_layout(
             device,
@@ -182,9 +187,10 @@ impl DenoisePostProcessor {
             iterations,
             strength,
             guide: guide.unwrap_or_default(),
+            tone_mapper: ToneMapper::default(),
             prepare_module,
             atrous_module,
-            resolve_module,
+            resolve_module: None,
             prepare_bind_group_layout,
             atrous_bind_group_layout,
             resolve_bind_group_layout,
@@ -197,6 +203,26 @@ impl DenoisePostProcessor {
             variance_buffer: None,
             level_buffer: None,
         })
+    }
+
+    /// Sets the display transform the resolve pass judges residual noise
+    /// through. Defaults to [`ToneMapper::default`].
+    ///
+    /// The denoiser fades itself out on how visible the remaining noise would
+    /// be *on screen*, which means it has to know the curve the image will be
+    /// shown through. That curve is chosen by whoever calls
+    /// [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image), not by the
+    /// post-processing chain, so the two are set independently and this is how
+    /// they are kept in step. Getting it wrong is bounded rather than
+    /// catastrophic -- at linear 0.64 the ACES slope is 69 code values per unit
+    /// radiance against a plain gamma's 160, so the filter would misjudge
+    /// brightish regions by about 2.3x -- but there is no reason to.
+    ///
+    /// A builder rather than a fifth argument to [`Self::new`] so that adding
+    /// it breaks nobody.
+    pub fn with_tone_mapper(mut self, tone_mapper: ToneMapper) -> Self {
+        self.tone_mapper = tone_mapper;
+        self
     }
 }
 
@@ -270,11 +296,33 @@ impl PostProcessor for DenoisePostProcessor {
             &constants(1),
         ));
 
+        // The tone curve is spliced in ahead of the shader's own source, so
+        // nothing relies on WGSL resolving a call to a function declared later
+        // in the module. `ToneMapper::wgsl` emits one free function named
+        // `solstrale_tone_map` with no bindings or entry point, which is what
+        // makes it safe to concatenate.
+        let resolve_module = self
+            .resolve_module
+            .insert(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("denoise_resolve.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!(
+                        "{}\n{}",
+                        self.tone_mapper.wgsl(),
+                        include_str!("denoise_resolve.wgsl")
+                    )
+                    .into(),
+                ),
+            }));
+
+        let mut resolve_constants = dimensions.to_vec();
+        resolve_constants.push(("full_strength_error", 0.4));
+
         self.resolve_pipeline = Some(compute_pipeline(
             device,
             &self.resolve_bind_group_layout,
-            &self.resolve_module,
-            &dimensions,
+            resolve_module,
+            &resolve_constants,
         ));
 
         self.atrous_pipelines = (0..self.iterations)
@@ -398,5 +446,46 @@ impl PostProcessor for DenoisePostProcessor {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::wgpu_util::get_wgpu_device_and_queue;
+
+    /// The resolve shader is the one module in the crate that is assembled from
+    /// two sources at run time rather than compiled from a single file, so a
+    /// splice that does not parse is not a compile error -- it surfaces as a
+    /// panic out of wgpu's uncaptured-error handler, in the middle of a user's
+    /// render, for whichever tone mapper they happened to pick.
+    ///
+    /// So build it for every curve in the enum. The sibling of
+    /// `wgsl_matches_the_cpu_curve` in `util/tone_map.rs`: that one pins what
+    /// the emitted source *computes*, this one pins that it still compiles once
+    /// something else is concatenated onto it.
+    #[test]
+    fn the_resolve_shader_compiles_against_every_tone_mapper() {
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        for mapper in [
+            ToneMapper::Aces,
+            ToneMapper::PbrNeutral,
+            ToneMapper::Reinhard { white_point: 4. },
+            ToneMapper::Clamp,
+        ] {
+            let mut denoiser = DenoisePostProcessor::new(1., None, None, device)
+                .unwrap()
+                .with_tone_mapper(mapper);
+
+            denoiser.initialize(device, queue, 64, 32);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+
+            assert!(
+                denoiser.resolve_pipeline.is_some(),
+                "resolve pipeline missing for {:?}",
+                mapper
+            );
+        }
     }
 }
