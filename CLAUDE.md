@@ -1,0 +1,1 @@
+When running tests, do not use the --release flag unless for a very specific reason. It only makes builds much slower.
