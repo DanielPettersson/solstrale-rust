@@ -32,9 +32,30 @@ pub enum DenoiseGuide {
 /// The filter fades out as the render converges, so it is safe to leave enabled:
 /// its tolerance is set by the variance of the pixel *mean*, which falls as
 /// `1/n`, and the result is then blended back over the original in proportion to
-/// each pixel's remaining relative standard error. Measured against a converged
-/// reference on the test scene, it cuts linear RMSE by about 45% at 8 samples
-/// per pixel, by about a fifth at 64, and changes a 2000-sample image by 0.2%.
+/// how much of the remaining noise would be **visible on screen** -- through the
+/// same tone curve and gamma the readback applies, reaching full strength at
+/// [`FULL_STRENGTH_GRAIN`] code values. Measured against a converged reference
+/// on the test scene, it cuts linear RMSE by half at 8 samples per pixel and by
+/// about a quarter at 64.
+///
+/// That criterion replaced the pixel's relative standard error, and the
+/// difference is the whole of why a denoised image now gets smoother as the
+/// sample count rises. On a Cornell box, displayed grain in code values:
+///
+/// ```text
+///                2 spp   8 spp  32 spp  128 spp
+/// raw           15.366   9.428   5.645    3.121
+/// before         3.009   3.566   3.512    2.632
+/// now            2.066   1.739   1.426    1.060
+/// ```
+///
+/// The old fade was linear in the standard error while the standard error falls
+/// as `1/sqrt(n)`, so it handed noise back at the rate the sampler removed it --
+/// and it only committed fully to noise worth 13 to 30 code values, where the
+/// eye picks grain out of a flat wall at about one. The cost of the new one is
+/// that "converged" no longer means "untouched": at 2000 samples per pixel the
+/// filter still moves the test scene by 2.4% of linear RMSE, though half the
+/// frame moves by under half a code value. See `denoise_resolve.wgsl`.
 ///
 /// An edge-avoiding filter cannot remove a firefly on its own -- a firefly is an
 /// edge by every measure such a filter has -- so what decided a firefly's fate
@@ -48,8 +69,8 @@ pub enum DenoiseGuide {
 ///
 /// Measured on a Cornell box through the display transform, counting pixels more
 /// than 20 of 255 brighter than every neighbour, the denoiser used to leave
-/// 1000-3000 of them at every sample count from 2 upwards. It now leaves 7-46 at
-/// strength 5 and under 4% of the raw render's at strength 1.
+/// 1000-3000 of them at every sample count from 2 upwards. It now leaves at most
+/// one at strength 5, and 129 of a raw render's 11780 at strength 1.
 ///
 /// Costs eight compute dispatches, run once on the finished image: 6.6 ms at
 /// 800x600 on a Radeon RX 5700 XT, against 52 ms for the render itself at 16
@@ -196,8 +217,16 @@ impl DenoisePostProcessor {
     /// Creates a new denoiser.
     ///
     /// # Arguments
-    /// * `strength` Multiplies the luminance tolerance. 1 is neutral, below 1
-    ///   keeps more detail and more noise, above 1 blurs harder. 0 to 10.
+    /// * `strength` How hard to filter, from 0 to 10. 1 is the tuned default,
+    ///   below 1 keeps more detail and more noise, above 1 blurs harder. It
+    ///   scales two things: the luminance tolerance the edge stop allows, as the
+    ///   square root so that the top of the range stays usable, and the
+    ///   threshold at which the fade commits to the filtered result, in
+    ///   proportion. 0 is exactly the identity -- every non-centre tap goes to
+    ///   zero weight, the despeckle switches off and the fade blends nothing --
+    ///   and 10 puts the fade's threshold at 0.2 code values, below the
+    ///   quantisation step of the final image, so the filtered result is taken
+    ///   essentially whole at any sample count.
     /// * `iterations` Number of à-trous iterations, each doubling the tap
     ///   spacing. If not specified, defaults to 5. 1 to 8.
     /// * `guide` Which guide channels may guide the filter. If not specified,

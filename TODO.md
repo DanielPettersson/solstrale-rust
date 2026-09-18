@@ -116,7 +116,10 @@ complementary rather than redundant: the fade's fix alone leaves 1701 specks at
 at every sample count above 2.
 
 Measured on `create_cornell_scene` through the display transform, counting
-pixels more than 20 of 255 brighter than every neighbour, at 500x500:
+pixels more than 20 of 255 brighter than every neighbour, at 500x500. Note these
+numbers predate the fade and `sigma_colour` changes recorded below and have not
+been re-measured at 500x500 since; `test_denoise_removes_fireflies_at_every_sample_count`
+is the current reading, and it is better at every point:
 
     spp            1      2      5     10     16     64
     raw        18262  15237  10778   7515   5321    995
@@ -143,21 +146,87 @@ clamping a caustic, `test_denoise_strength_zero_is_the_identity` the guard on th
 switch that turns the despeckle off with the filter, and `cornell_firefly_sweep`
 the diagnostic the constants were chosen on.
 
-Two smaller ones from the same work:
+Also done: the denoised image now gets smoother as the sample count rises, which
+it did not. Displayed grain on a Cornell box, in code values of the final image:
 
-- **A compressed-luminance edge stop.** `w_colour` compares raw linear radiance
-  while the image is shown through ACES and gamma 2.0, so noise inside a
-  legitimately bright region survives the filter almost untouched -- its linear
-  differences dwarf `lum_tolerance` even though they are invisible on screen.
-  Replacing `luminance()` in the weight with `log(1 + L)` and carrying the
-  variance through the same transform by the delta method,
-  `Var(log(1+L)) ~= Var(L)/(1+L)^2`, would fix that. Deliberately not done with
-  the despeckle above: it changes the filter's character everywhere and re-opens
-  the tuned `sigma_colour` default, which wants its own `denoise_strength_sweep`
-  and probably its own goldens. Note the textbook form makes firefly isolation
-  slightly *worse* -- the tolerance is evaluated at the bright centre and shrinks
-  faster than the numerator does -- so it needs the asymmetric variant, with
-  `f'` at the tap rather than the centre.
+    spp             2       8      32     128
+    raw        15.366   9.428   5.645   3.121
+    before      3.009   3.566   3.512   2.632
+    after       2.066   1.739   1.426   1.060
+
+Sixty-four times the samples used to buy 13%, and 2 spp came out smoother than
+8. Two independent causes, both now fixed.
+
+The fade in `denoise_resolve.wgsl` blended on the pixel's relative standard
+error over a `full_strength_error` of 0.4. That is linear in sigma while sigma
+falls as `1/sqrt(n)`, so the residual is `sigma * (1 - sigma / (0.4 L))` -- a
+downward parabola peaking at `sigma = 0.2 L`, and any two noise levels symmetric
+about that peak leave *identical* grain. A wall at 10 and at 100 spp is almost
+exactly that pair. And 0.4 relative linear error is not a small quantity: through
+ACES and gamma 2.0 it is 13 to 30 code values depending on brightness, where the
+eye picks grain out of a flat wall at about one, so the filter only ever
+committed fully to noise nobody could miss. It now fades on how far the residue
+would move the pixel *on screen*, as a secant through the same transform the
+readback applies -- which needs no derivative of the tone curve, stays honest
+where sigma is the size of L, and gives a blown highlight a blend of zero for
+free. Because the ramp is linear, `FULL_STRENGTH_GRAIN / 4` bounds what it can
+leave anywhere at any sample count: half a code value at the default.
+
+`strength` reaches that threshold, which it did not reach before -- the override
+was never passed from `denoise.rs`, so the knob moved `sigma_colour` and nothing
+else. That is also why `sigma_colour` is now `2 * sqrt(strength)`: linear scaling
+put strength 10 at fourteen standard deviations of the inter-pixel difference,
+harmless only because the fade then discarded four fifths of the result.
+
+The second cause was the variance the à-trous cascade tracks. `sum(w^2 * var)` is
+the variance of a weighted mean of *independent* taps, true on the first
+iteration and false after it, because each tap is a pixel that already averaged a
+neighbourhood overlapping its neighbours'. The composite kernel after N
+iterations is the four-fold self-convolution of a box of width `2^N`, whose
+`sum k^2` falls as `0.4886/M` rather than as `sum h^2` to the N, so the tracked
+variance was 96x too low by the fifth iteration and the tolerance ten times too
+tight -- the four widest passes were very nearly the identity, which is exactly
+the shape of "clears blotches, leaves grain". With the per-iteration factors in,
+the tolerance halves from the second iteration onward, which is Dammertz's
+`sigma/2^i` schedule arrived at rather than assumed. The factors are faded in on
+how much of the kernel survived its edge stops: applying them whole cost the
+specular scene 18% of its RMSE, concentrated on the mirror and the caustic.
+
+`test_denoised_grain_keeps_falling_with_samples` is the gate,
+`denoise_display_sweep` the diagnostic the threshold was chosen on, and
+`displayed_grain` the metric -- a *median* absolute departure from the 3x3 mean,
+through the display transform, because object silhouettes put a floor under any
+RMS high-pass and that floor is precisely what hid the defect. The same scene at
+4000 spp measures 0.628 code values of that floor, which is how much headroom is
+left.
+
+`test_denoise_is_near_identity_at_high_samples` was restated rather than retuned;
+see the note under *Known limitations* below.
+
+One smaller one from the same work:
+
+- **Measured and not done: a compressed-luminance edge stop.** `w_colour`
+  compares raw linear radiance while the image is shown through ACES and gamma
+  2.0, so noise inside a legitimately bright region survives the filter almost
+  untouched -- its linear differences dwarf `lum_tolerance` even though they are
+  invisible on screen. Replacing `luminance()` in the weight with `log(1 + L)`
+  and carrying the variance through by the delta method,
+  `Var(log(1+L)) ~= Var(L)/(1+L)^2`, is the textbook fix, in the asymmetric
+  variant with `f'` at the tap rather than the centre -- the centre-evaluated
+  form is backwards on both halves of the firefly case, refusing to average the
+  firefly down *and* letting it leak into its neighbours.
+
+  Implemented and measured at strength 1 rather than left as a suggestion, and
+  the answer was no. To first order it is *identically* the current filter: the
+  delta method scales numerator and denominator by the same derivative and it
+  cancels, so all it changes is the tail. Against the same build it took
+  fireflies from 129 to 84 at 1 spp and 77 to 63 at 2, moved denoised grain by
+  under 1%, and cost 4% of the specular scene's RMSE against a converged
+  reference and 7% of the diffuse scene's -- a weight that is not symmetric in
+  (centre, tap) does not conserve energy locally, and the RMSE is seeing that
+  bias. The firefly budget was at 129 against a gate of 946, so it was buying
+  margin that was already there with accuracy that was not. Revisit only if a
+  scene turns up where fireflies survive at a sample count anyone renders at.
 
 - **Depth weight without a gradient.** `guide_weight` uses a relative depth test,
   which is scale-free and handles the background sentinel, but is more permissive
@@ -165,6 +234,14 @@ Two smaller ones from the same work:
   to the horizon will over-blur slightly near the horizon. The G-buffer's `.w`
   holds the material type in its low byte and the specular depth above it, so
   bits 12 upward are still free for a forward-difference gradient if it shows.
+
+  More pressing than it was. `sigma_depth` is 1.0 against a *relative* test
+  scaled by the tap spacing, so it means "a 100% depth change per unit of
+  spacing is one e-fold" -- on the Cornell box the largest discontinuity in the
+  scene, the near floor against the back wall, gives `w_depth = 0.47` at step 1
+  but `0.95` at step 16. The channel is very nearly inert at wide spacings, which
+  was harmless while the outer iterations were doing nothing and is not now that
+  the variance correction has let them run.
 - **Interactive previews.** Post-processing still runs only on the final batch,
   so a camera drag is never denoised — which is the regime where it would help
   most. The chain already runs on a scratch copy, so this is now safe to add: it
@@ -284,6 +361,15 @@ sub-BVH. Misleading as a comparison.
 
 Recorded so they aren't reconsidered without new information.
 
+- **A second step-1 à-trous pass.** The obvious lever once the cascade's outer
+  iterations were found to be idle, and unnecessary once they were not. Every
+  pass attenuates white noise, including the step-16 one -- taps 16 apart are
+  still independent -- and in the all-weights-one limit the five-iteration
+  cascade is a width-32 four-fold box, worth 65x on white noise. The schedule was
+  never the problem; the variance feeding the tolerance was. A second step-1 pass
+  would also cost a dispatch and muddy the documented "each doubling the tap
+  spacing" contract.
+
 - **Single-light fast path for `light_pdf_value`.** `sample_light` already
   intersects the chosen light, so its PDF could be computed without the extra
   traversal when `light_count == 1`. Worth ~2%, but it duplicates the PDF formula
@@ -305,6 +391,50 @@ Recorded so they aren't reconsidered without new information.
 ## Known limitations (by design)
 
 Correct but imperfect; documented so they read as choices rather than bugs.
+
+- **"Converged" no longer means "untouched".** The denoiser used to change a
+  2000 spp render of the test scene by 0.2% of linear RMSE, and now changes it by
+  2.4%. That is the fade's criterion working as intended rather than a
+  regression: that image still carries about two code values of visible grain,
+  and the filter is now built to remove visible grain rather than to retire on a
+  relative error. What it costs is real, though, and it is charged in linear
+  radiance -- `denoise_strength_sweep` shows the denoiser going from neutral to
+  net-harmful in linear RMSE above roughly 200 spp on the diffuse scene and 800
+  on the specular one, while `denoise_display_sweep` still shows it helping at
+  512. The two metrics genuinely disagree, and which one is right depends on
+  whether the output is being looked at or measured. `test_denoise_is_near_identity_at_high_samples`
+  now pins the visible quantity: half the frame moves by under one code value
+  (0.478 measured), and four times the samples still more than halves it (0.33),
+  which is what rules out a permanent blur floor.
+
+- **The fade's criterion is a luminance, not three.** `displayed()` in
+  `denoise_resolve.wgsl` evaluates the display curve on a grey of the pixel's
+  level, because the chain carries exactly one variance and it is a luminance
+  variance. On a saturated surface that understates the noise by up to 2x -- a
+  pure primary's luminance weight is as low as 0.0722 -- so a coloured wall keeps
+  a little more grain than a white one at the same sample count. A
+  channel-proportional gain, `max_c g(c_i) * c_i / Y`, reduces to `g(Y)` on grey
+  and would fix it, at the cost of dragging the pixel's own chroma -- pure noise
+  at 2 spp -- into the criterion.
+
+- **The denoiser has an opinion about the display curve.** It has to: the fade
+  measures visibility, which is meaningless without one. But the curve used for
+  the readback is chosen by whoever calls `buffer_to_image`, independently of the
+  post-processing chain, so `with_tone_mapper` exists to keep them in step and
+  nothing enforces it. Getting it wrong is bounded rather than catastrophic -- at
+  linear 0.64 the ACES slope is 69 code values per unit radiance against a plain
+  gamma's 160 -- but it is the same "the display transform lives in more than one
+  place" complaint recorded in the tone-mapping section, seen from a third side.
+
+- **The variance-correlation correction assumes unit edge-stop weights.** Its
+  derivation is for the unweighted à-trous kernel. `denoise_atrous.wgsl` fades
+  each factor in on the fraction of the kernel that actually survived its
+  weights, which is exact at both ends -- a kernel reduced to its centre tap
+  introduces no correlation, a kernel with every weight at one is the derived
+  case -- but a first-order interpolation in between. It errs toward leaving
+  noise rather than blurring detail, which is the safe direction, and the
+  specular scene is the control: applying the factors whole cost it 18% of its
+  RMSE against a converged reference.
 
 - **ACES lifts midtones and skews saturated highlights.** The default curve is
   the per-channel Narkowicz fit, so linear 0.5 comes out at 0.616 rather than
