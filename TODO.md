@@ -4,6 +4,19 @@ Suggestions raised during the performance and integrator work that were **not**
 implemented, plus limitations recorded deliberately so they don't get
 re-litigated later.
 
+Deliberately declined: a *relative* firefly clamp in the renderer, to replace
+the absolute `CLAMPING_THRESHOLD = 10.0`. It would have to be relative to the
+running mean, which depends on how many samples happened to land before the
+current batch -- and `samples_per_batch` is re-tuned from measured dispatch
+time, so the image would depend on GPU timing. That breaks the property
+`test_denoise_improves_low_sample_image` rests on, that a noisy and a denoised
+render trace bit-identical sample streams. It would also charge the bias to
+every pixel permanently, and most to exactly the pixels whose true radiance is
+driven by rare bright events. The denoiser has strictly better information --
+the neighbourhood, the noise-free guide, the exact Welford variance -- runs once
+after the fact, and a mistake there costs one frame rather than being baked into
+the accumulator.
+
 Already done and not repeated here: the 24-item performance sweep (BVH2 node
 layout, binned SAH build, hot/cold primitive split, deferred shading, 2-D tiled
 dispatch, sample batching, Russian roulette, closed-form sampling), next-event
@@ -70,7 +83,45 @@ come out cleaner, and the reflected horizon in the mirror sphere stays a line.
 `test_gbuffer_follows_specular_chain` (`renderer/mod.rs`) is what actually pins
 the behaviour, analytically.
 
+Also done: outlier rejection. An edge-avoiding filter cannot remove a firefly --
+a firefly is an edge by every measure it has -- so what decided their fate was
+the fade in `denoise_resolve.wgsl`, and it leaked. For a pixel whose mean is
+carried by one outlier sample out of n, the Welford variance of the mean comes
+out to the pixel's own value squared, so the standard error and the mean cancel
+and the relative error the fade tests is a constant: the square root of the
+variance pre-pass's centre share, 1/6.169, which is 0.4026 against a
+`full_strength_error` of 0.4. Every firefly landed on the threshold, the test was
+scale-free in how bright the firefly was, and any ordinary perturbation pushed it
+under -- leaving `(1 - blend)` times the raw outlier, unbounded in its brightness
+and independent of `strength`, since the fade reads no sigma at all. That is why
+1 spp was the one clean configuration: below two samples the fade does not run.
+
+`prefilter_variance` now clamps a pixel that sits far above the neighbourhood its
+guide says it belongs to, over the same taps and the same weights it was already
+gathering, and writes the result into the chain's working image so the fade
+blends against a despeckled original rather than a raw outlier. Measured on
+`create_cornell_scene` at 400x400, fireflies surviving the denoiser went from
+9-39% of the raw render's, depending on sample count, to under 2% at every
+sample count and none at all from 5 samples upwards. Both RMSE gates improved
+slightly rather than regressing. `test_denoise_removes_fireflies_at_every_sample_count`
+is the gate, `test_denoise_preserves_bright_detail_when_converged` the control,
+and `cornell_firefly_sweep` the diagnostic the constants were chosen on.
+
 Two smaller ones from the same work:
+
+- **A compressed-luminance edge stop.** `w_colour` compares raw linear radiance
+  while the image is shown through ACES and gamma 2.0, so noise inside a
+  legitimately bright region survives the filter almost untouched -- its linear
+  differences dwarf `lum_tolerance` even though they are invisible on screen.
+  Replacing `luminance()` in the weight with `log(1 + L)` and carrying the
+  variance through the same transform by the delta method,
+  `Var(log(1+L)) ~= Var(L)/(1+L)^2`, would fix that. Deliberately not done with
+  the despeckle above: it changes the filter's character everywhere and re-opens
+  the tuned `sigma_colour` default, which wants its own `denoise_strength_sweep`
+  and probably its own goldens. Note the textbook form makes firefly isolation
+  slightly *worse* -- the tolerance is evaluated at the bright centre and shrinks
+  faster than the numerator does -- so it needs the asymmetric variant, with
+  `f'` at the tap rather than the centre.
 
 - **Depth weight without a gradient.** `guide_weight` uses a relative depth test,
   which is scale-free and handles the background sentinel, but is more permissive

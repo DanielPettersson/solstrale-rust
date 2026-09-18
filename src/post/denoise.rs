@@ -35,10 +35,23 @@ pub enum DenoiseGuide {
 /// reference on the test scene, it cuts linear RMSE by about 45% at 8 samples
 /// per pixel, by about a fifth at 64, and changes a 2000-sample image by 0.2%.
 ///
-/// Costs seven compute dispatches, run once on the finished image: 4.2 ms at
+/// An edge-avoiding filter cannot remove a firefly on its own -- a firefly is an
+/// edge by every measure such a filter has -- so the variance pre-pass also does
+/// outlier rejection, clamping a pixel that sits far above the neighbourhood its
+/// guide says it belongs to. Without it the fade above was what decided a
+/// firefly's fate, and it leaked: see the block comment on `prefilter_variance`
+/// in `denoise_atrous.wgsl` for the arithmetic, which lands on the fade's
+/// threshold by coincidence and is scale-free in how bright the firefly is.
+/// Measured on a Cornell box, the denoiser used to leave between 9% and 39% of
+/// the raw render's fireflies depending on the sample count, and now leaves
+/// under 2% at every sample count and none at all from 5 samples upwards.
+///
+/// Costs eight compute dispatches, run once on the finished image: 6.6 ms at
 /// 800x600 on a Radeon RX 5700 XT, against 52 ms for the render itself at 16
 /// samples per pixel. The cost is per pixel and independent of sample count, so
-/// it matters less the longer the render.
+/// it matters less the longer the render. Outlier rejection adds no dispatch of
+/// its own: it needs the same guide-weighted neighbourhood the variance pre-pass
+/// was already gathering.
 ///
 /// Place this first in [`crate::renderer::RenderConfig::post_processors`].
 /// Denoising a bloomed image blurs the bloom; bloom applied to a denoised image
@@ -140,6 +153,7 @@ impl DenoisePostProcessor {
                 storage_binding(false, 16), // destination
                 storage_binding(true, 16),  // guide
                 storage_binding(false, 4),  // pooled variance, written by the pre-filter
+                storage_binding(false, 16), // working image, despeckled by the pre-filter
             ],
         );
 
@@ -216,6 +230,19 @@ impl PostProcessor for DenoisePostProcessor {
                     DenoiseGuide::ColorOnly => 0.,
                 },
             ),
+            // Outlier rejection, deliberately *not* scaled by `strength`. The
+            // whole reason fireflies survived was that the stage which decided
+            // their fate read no sigma at all, so turning the knob did nothing;
+            // re-coupling the two would reintroduce exactly that. See
+            // prefilter_variance in denoise_atrous.wgsl.
+            //
+            // At a strength of 0 the luminance tolerance collapses to 1e-8 and
+            // every non-centre tap goes to zero weight, which is as close to
+            // the identity as this filter gets. The despeckle reads no sigma,
+            // so it would go on clamping right through that unless it is
+            // switched off too -- and "off" would quietly stop meaning off.
+            // test_denoise_strength_zero_is_the_identity is the guard.
+            ("despeckle_enabled", f64::from(self.strength != 0.)),
         ];
 
         let constants = |step_width: u32| {
@@ -299,6 +326,7 @@ impl PostProcessor for DenoisePostProcessor {
                     wgpu::BindingResource::Buffer(dst.as_entire_buffer_binding()),
                     wgpu::BindingResource::Buffer(ctx.gbuffer.as_entire_buffer_binding()),
                     wgpu::BindingResource::Buffer(variance_buffer.as_entire_buffer_binding()),
+                    wgpu::BindingResource::Buffer(ctx.buffer.as_entire_buffer_binding()),
                 ],
             )
         };
