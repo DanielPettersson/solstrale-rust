@@ -19,6 +19,7 @@ use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{BloomPostProcessor, DenoisePostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
+use solstrale::util::rgb_color::linear_to_srgb;
 
 use crate::scenes::{
     create_blend_material_scene, create_cornell_scene, create_light_attenuation_scene,
@@ -961,7 +962,7 @@ fn displayed_grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
         .iter()
         .map(|p| {
             let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            let encode = |v: f32| (linear_to_srgb(v).min(0.999) * 256.) as f64;
             0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
         })
         .collect();
@@ -1000,7 +1001,7 @@ fn displayed_grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
 fn displayed_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let encode = |p: &[f32; 4]| {
         let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-        m.map(|v| (v.sqrt().min(0.999) * 256.) as f64)
+        m.map(|v| (linear_to_srgb(v).min(0.999) * 256.) as f64)
     };
 
     let sum: f64 = a
@@ -1025,7 +1026,7 @@ fn displayed_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
 fn displayed_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let encode = |p: &[f32; 4]| {
         let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-        m.map(|v| (v.sqrt().min(0.999) * 256.) as f64)
+        m.map(|v| (linear_to_srgb(v).min(0.999) * 256.) as f64)
     };
 
     let mut diffs: Vec<f64> = a
@@ -1048,7 +1049,7 @@ fn displayed_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
 /// Measured *through the display transform*, and that is the whole point. The
 /// first version of this counted in linear radiance, and it lied: it scored a
 /// change that removed 100% of the outliers it could see, while the rendered
-/// image looked all but unchanged. ACES plus gamma 2.0 compresses highlights
+/// image looked all but unchanged. ACES plus the sRGB encode compresses highlights
 /// hard, so a pixel pulled from twenty times its neighbourhood's brightness down
 /// to three times has lost 85% of its excess radiance and almost none of its
 /// visibility -- it is still a white dot on a dark ceiling. A metric in linear
@@ -1068,7 +1069,7 @@ fn fireflies(pixels: &[[f32; 4]], width: usize, height: usize, excess: f64) -> u
         .iter()
         .map(|p| {
             let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            let encode = |v: f32| (linear_to_srgb(v).min(0.999) * 256.) as f64;
             0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
         })
         .collect();
@@ -1372,26 +1373,30 @@ fn test_denoise_improves_low_sample_image() {
 
     // Two gates, because the ratio alone is misleading here.
     //
-    // The ratio was 0.56 against white noise and is 0.62 against the
-    // low-discrepancy sampler, and that loosening is the sampler working: the
-    // filter has less to remove because the sampler removed it first. The
-    // denominator shrank by 25% (0.375 -> 0.282) while the numerator shrank by
-    // 10% (0.195 -> 0.175), so the absolute denoised error -- the thing anyone
-    // actually looks at -- improved while the ratio got worse.
+    // The ratio was 0.56 against white noise, 0.62 against the low-discrepancy
+    // sampler and is 0.71 now that image textures are sRGB decoded, and both
+    // loosenings are the same effect: the denominator falls faster than the
+    // numerator. The sampler removed noise before the filter could; the decode
+    // darkened this scene's textured floor, which is the easy, flat majority of
+    // the frame, leaving the RMSE dominated by the untextured reds and the
+    // glass the filter was always going to struggle with. Across the decode the
+    // denominator shrank 17% (0.282 -> 0.234) against the numerator's 5%
+    // (0.175 -> 0.167), so the absolute denoised error -- the thing anyone
+    // actually looks at -- improved again while the ratio got worse again.
     //
-    // The absolute assertion is what stops the next sampler change having to
-    // make that argument again.
+    // The absolute assertion is what stops the next such change having to make
+    // that argument a third time.
     assert!(
-        rmse_denoised < rmse_noisy * 0.7,
-        "denoising 8 spp should cut linear RMSE against the reference by at least 30%, \
+        rmse_denoised < rmse_noisy * 0.75,
+        "denoising 8 spp should cut linear RMSE against the reference by at least 25%, \
          was {} against {}",
         rmse_denoised,
         rmse_noisy
     );
-    // 0.175 measured.
+    // 0.167 measured.
     assert!(
-        rmse_denoised < 0.21,
-        "denoised 8 spp should land within 0.21 linear RMSE of the reference, was {}",
+        rmse_denoised < 0.2,
+        "denoised 8 spp should land within 0.2 linear RMSE of the reference, was {}",
         rmse_denoised
     );
 }
@@ -1427,24 +1432,25 @@ fn test_denoise_improves_specular_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
-    // 0.78 measured, from 0.68 against white noise, and re-baselined for the
-    // same reason as the diffuse gate above: the denominator shrank by 28%
-    // (0.115 -> 0.083) against the numerator's 21% (0.083 -> 0.065). The
+    // 0.84 measured, from 0.68 against white noise and 0.78 before image
+    // textures were sRGB decoded, and re-baselined each time for the same
+    // reason as the diffuse gate above: the denominator falls faster than the
+    // numerator. 0.115 -> 0.083 -> 0.063 against 0.083 -> 0.065 -> 0.053. The
     // absolute figure is the one that improved, so it is asserted too.
     //
     // The margin is wider than the diffuse scene's because the 2000 spp
     // reference is itself adaptively sampled and moves a little run to run.
     assert!(
-        rmse_denoised < rmse_noisy * 0.85,
+        rmse_denoised < rmse_noisy * 0.88,
         "denoising 8 spp of a specular scene should cut linear RMSE against the \
-         reference by at least 15%, was {} against {}",
+         reference by at least 12%, was {} against {}",
         rmse_denoised,
         rmse_noisy
     );
-    // 0.065 measured.
+    // 0.053 measured.
     assert!(
-        rmse_denoised < 0.078,
-        "denoised 8 spp of a specular scene should land within 0.078 linear RMSE of \
+        rmse_denoised < 0.063,
+        "denoised 8 spp of a specular scene should land within 0.063 linear RMSE of \
          the reference, was {}",
         rmse_denoised
     );
@@ -1805,7 +1811,7 @@ fn encode(pixels: &[[f32; 4]], width: u32, height: u32, tone_mapper: ToneMapper)
     let mut img = RgbImage::new(width, height);
     for (i, p) in pixels.iter().enumerate() {
         let m = tone_mapper.map([p[0], p[1], p[2]]);
-        let c = |v: f32| (v.sqrt().min(0.999) * 256.) as u8;
+        let c = |v: f32| (linear_to_srgb(v).min(0.999) * 256.) as u8;
         img.put_pixel(
             i as u32 % width,
             i as u32 / width,

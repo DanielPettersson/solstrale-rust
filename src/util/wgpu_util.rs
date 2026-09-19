@@ -281,7 +281,7 @@ fn pipeline_layout(
 /// Converts a wgpu buffer of linear HDR radiance to an RgbImage.
 ///
 /// This is the display transform: `tone_mapper` brings unbounded radiance into
-/// `[0, 1]`, then gamma encoding makes it displayable. Everything upstream --
+/// `[0, 1]`, then the sRGB encode makes it displayable. Everything upstream --
 /// the accumulator, bloom, the denoiser -- works on the untouched linear
 /// values, so the curve chosen here changes only what is shown, never what is
 /// computed.
