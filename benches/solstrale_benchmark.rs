@@ -290,7 +290,7 @@ pub fn render_benchmark(c: &mut Criterion) {
 }
 
 /// Adaptive sampling on vs. effectively disabled, at the same total sample
-/// budget -- isolates the win TODO.md's "per-pixel adaptive sampling" item
+/// budget -- isolates the win LIMITATIONS.md's "per-pixel adaptive sampling" item
 /// describes from everything else `render_benchmark` already measures.
 /// Disabling is done by setting `min_samples_per_pixel` above the render's
 /// total sample count, so no pixel is ever eligible to be skipped, rather

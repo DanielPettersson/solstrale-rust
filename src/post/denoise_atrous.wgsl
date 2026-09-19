@@ -408,7 +408,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Measured and not done: comparing *compressed* luminance, log(1 + L), with
     // the variance carried through by the delta method. The image is shown
     // through a tone curve and gamma, so a linear tolerance is worth wildly
-    // different amounts of visibility depending on where it sits, and TODO.md
+    // different amounts of visibility depending on where it sits, and LIMITATIONS.md
     // records the fix. To first order it is identically this filter -- numerator
     // and denominator are scaled by the same derivative and it cancels -- so
     // what it actually changes is the tail. Measured at strength 1 with the
@@ -418,7 +418,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     // price of a weight that is not symmetric in (centre, tap) and so does not
     // conserve energy locally. The firefly budget was not under pressure at 129
     // against a gate of 946, so it was paying accuracy for a margin that was
-    // already there. See TODO.md.
+    // already there. See LIMITATIONS.md.
     let lum_tolerance = sigma_colour * sqrt(max(centre.w, 1e-8)) + 1e-8;
 
     var sum = vec3<f32>(0.0);
