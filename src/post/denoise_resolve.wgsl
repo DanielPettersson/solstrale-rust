@@ -11,8 +11,10 @@
 // relative standard error that adaptive sampling retires pixels on, reaching
 // full strength at 0.4. That is the wrong yardstick, for a reason that is only
 // visible once it is written in the units the image is finally looked at. The
-// readback applies a tone curve and then gamma 2.0, so a relative error of 0.4
-// is worth, in code values of the 0-255 scale:
+// readback applies a tone curve and then a transfer function, so a relative
+// error of 0.4 is worth, in code values of the 0-255 scale (measured when that
+// function was gamma 2.0 rather than the sRGB OETF it is now, which moves each
+// of these by a code value or two):
 //
 //     linear L        0.05   0.18   0.445   0.64   0.89
 //     0.4 L in cv     16.9   29.8    22.8   17.7   13.4
@@ -74,9 +76,10 @@ fn luminance(c: vec3<f32>) -> f32 {
 }
 
 // Linear radiance as the image will finally be written: through the tone curve,
-// then gamma 2.0, on the 0-255 scale. The curve is spliced in ahead of this file
-// by DenoisePostProcessor::initialize; the 0.999 and the 256.0 are
-// buffer_to_image's, not decoration, and must stay in step with it.
+// then the sRGB OETF, on the 0-255 scale. The curve is spliced in ahead of this
+// file by DenoisePostProcessor::initialize; the transfer function, the 0.999
+// and the 256.0 are buffer_to_image's, not decoration, and must stay in step
+// with it.
 //
 // Evaluated on a grey of the pixel's level rather than per channel. The chain
 // has exactly one variance and it is a luminance variance -- denoise_prepare
@@ -90,9 +93,13 @@ fn luminance(c: vec3<f32>) -> f32 {
 // The cost is that a saturated surface is judged by its luminance, which for a
 // pure primary understates its noise by up to 2x -- the direction of leaving a
 // little more grain on a coloured wall than on a white one.
+fn linear_to_srgb(c: f32) -> f32 {
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+
 fn displayed(radiance: f32) -> f32 {
     let mapped = solstrale_tone_map(vec3<f32>(radiance)).x;
-    return min(sqrt(mapped), 0.999) * 256.0;
+    return min(linear_to_srgb(mapped), 0.999) * 256.0;
 }
 
 @compute @workgroup_size(8, 8)

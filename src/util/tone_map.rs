@@ -4,7 +4,7 @@
 //! This is a *display* transform, not a post-process. It runs in
 //! [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image), at the point
 //! the renderer's linear HDR buffer becomes an 8-bit image, and it is the last
-//! thing to touch the values before gamma. Nothing upstream of it -- bloom,
+//! thing to touch the values before the sRGB encode. Nothing upstream -- bloom,
 //! the denoiser, the accumulator itself -- ever sees a tone-mapped value, which
 //! is what keeps those filters operating on real radiance.
 //!
@@ -16,7 +16,7 @@
 /// A curve mapping unbounded linear radiance to the `[0, 1]` display range.
 ///
 /// All of these operate per channel on linear values, and all are applied
-/// *before* gamma encoding.
+/// *before* the sRGB encode.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 #[non_exhaustive]
 pub enum ToneMapper {

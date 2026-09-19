@@ -893,3 +893,74 @@ pub fn create_cornell_scene(render_config: RenderConfig) -> Scene {
         render_config,
     }
 }
+
+/// A five-walled box, every wall carrying the material under test, lit by a
+/// sphere hanging inside it. Built for the sRGB decode tests.
+///
+/// The walls face each other, so a path bounces off the same albedo two or
+/// three times before it dies and the albedo enters the product as `albedo^n`.
+/// A decode that is missing, doubled, or applied at the wrong point in the
+/// chain shows up here as a compounding error rather than a flat shift that a
+/// loose tolerance could swallow.
+#[allow(dead_code)]
+pub fn create_srgb_decode_scene(
+    render_config: RenderConfig,
+    albedo: Textures,
+    normal: Option<Textures>,
+) -> Scene {
+    let mat = Lambertian::new(albedo, normal);
+    let nop = NopTransformer();
+
+    let wall = |origin: Vec3, u: Vec3, v: Vec3| -> Hittables {
+        Quad::new(origin, u, v, mat.clone().into(), &nop).into()
+    };
+
+    let world: Vec<Hittables> = vec![
+        // Floor, ceiling, back, left, right. The front is left open for the
+        // camera; rays that escape through it hit the black background.
+        wall(
+            Vec3::new(-1., 0., -1.),
+            Vec3::new(2., 0., 0.),
+            Vec3::new(0., 0., 2.),
+        ),
+        wall(
+            Vec3::new(-1., 2., -1.),
+            Vec3::new(2., 0., 0.),
+            Vec3::new(0., 0., 2.),
+        ),
+        wall(
+            Vec3::new(-1., 0., -1.),
+            Vec3::new(2., 0., 0.),
+            Vec3::new(0., 2., 0.),
+        ),
+        wall(
+            Vec3::new(-1., 0., -1.),
+            Vec3::new(0., 0., 2.),
+            Vec3::new(0., 2., 0.),
+        ),
+        wall(
+            Vec3::new(1., 0., -1.),
+            Vec3::new(0., 0., 2.),
+            Vec3::new(0., 2., 0.),
+        ),
+        Sphere::new(
+            Vec3::new(0., 1.5, -0.2),
+            0.25,
+            DiffuseLight::new(12., 12., 12., None).into(),
+        )
+        .into(),
+    ];
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 55.,
+            aperture_size: 0.,
+            look_from: Vec3::new(0., 1., 2.6),
+            look_at: Vec3::new(0., 0.9, 0.),
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+    }
+}

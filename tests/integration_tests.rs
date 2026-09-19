@@ -1,8 +1,10 @@
 use std::default::Default;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::thread;
 
+use image::Rgb;
 use image::RgbImage;
 use image::imageops::FilterType;
 use image_compare::Algorithm::RootMeanSquared;
@@ -12,18 +14,19 @@ use solstrale::geo::transformation::{
 };
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
-use solstrale::material::texture::SolidColor;
+use solstrale::material::texture::{ImageMap, SolidColor, Textures};
 use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{BloomPostProcessor, DenoisePostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
+use solstrale::util::rgb_color::linear_to_srgb;
 
 use crate::scenes::{
     create_blend_material_scene, create_cornell_scene, create_light_attenuation_scene,
     create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
     create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
     create_simple_test_scene, create_smooth_vs_flat_scene, create_specular_scene,
-    create_test_scene, create_texture_mapping_scene, create_uv_scene,
+    create_srgb_decode_scene, create_test_scene, create_texture_mapping_scene, create_uv_scene,
 };
 
 mod scenes;
@@ -959,7 +962,7 @@ fn displayed_grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
         .iter()
         .map(|p| {
             let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            let encode = |v: f32| (linear_to_srgb(v).min(0.999) * 256.) as f64;
             0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
         })
         .collect();
@@ -998,7 +1001,7 @@ fn displayed_grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
 fn displayed_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let encode = |p: &[f32; 4]| {
         let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-        m.map(|v| (v.sqrt().min(0.999) * 256.) as f64)
+        m.map(|v| (linear_to_srgb(v).min(0.999) * 256.) as f64)
     };
 
     let sum: f64 = a
@@ -1023,7 +1026,7 @@ fn displayed_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
 fn displayed_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let encode = |p: &[f32; 4]| {
         let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-        m.map(|v| (v.sqrt().min(0.999) * 256.) as f64)
+        m.map(|v| (linear_to_srgb(v).min(0.999) * 256.) as f64)
     };
 
     let mut diffs: Vec<f64> = a
@@ -1046,7 +1049,7 @@ fn displayed_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
 /// Measured *through the display transform*, and that is the whole point. The
 /// first version of this counted in linear radiance, and it lied: it scored a
 /// change that removed 100% of the outliers it could see, while the rendered
-/// image looked all but unchanged. ACES plus gamma 2.0 compresses highlights
+/// image looked all but unchanged. ACES plus the sRGB encode compresses highlights
 /// hard, so a pixel pulled from twenty times its neighbourhood's brightness down
 /// to three times has lost 85% of its excess radiance and almost none of its
 /// visibility -- it is still a white dot on a dark ceiling. A metric in linear
@@ -1066,7 +1069,7 @@ fn fireflies(pixels: &[[f32; 4]], width: usize, height: usize, excess: f64) -> u
         .iter()
         .map(|p| {
             let m = ToneMapper::default().map([p[0], p[1], p[2]]);
-            let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as f64;
+            let encode = |v: f32| (linear_to_srgb(v).min(0.999) * 256.) as f64;
             0.2126 * encode(m[0]) + 0.7152 * encode(m[1]) + 0.0722 * encode(m[2])
         })
         .collect();
@@ -1370,26 +1373,30 @@ fn test_denoise_improves_low_sample_image() {
 
     // Two gates, because the ratio alone is misleading here.
     //
-    // The ratio was 0.56 against white noise and is 0.62 against the
-    // low-discrepancy sampler, and that loosening is the sampler working: the
-    // filter has less to remove because the sampler removed it first. The
-    // denominator shrank by 25% (0.375 -> 0.282) while the numerator shrank by
-    // 10% (0.195 -> 0.175), so the absolute denoised error -- the thing anyone
-    // actually looks at -- improved while the ratio got worse.
+    // The ratio was 0.56 against white noise, 0.62 against the low-discrepancy
+    // sampler and is 0.71 now that image textures are sRGB decoded, and both
+    // loosenings are the same effect: the denominator falls faster than the
+    // numerator. The sampler removed noise before the filter could; the decode
+    // darkened this scene's textured floor, which is the easy, flat majority of
+    // the frame, leaving the RMSE dominated by the untextured reds and the
+    // glass the filter was always going to struggle with. Across the decode the
+    // denominator shrank 17% (0.282 -> 0.234) against the numerator's 5%
+    // (0.175 -> 0.167), so the absolute denoised error -- the thing anyone
+    // actually looks at -- improved again while the ratio got worse again.
     //
-    // The absolute assertion is what stops the next sampler change having to
-    // make that argument again.
+    // The absolute assertion is what stops the next such change having to make
+    // that argument a third time.
     assert!(
-        rmse_denoised < rmse_noisy * 0.7,
-        "denoising 8 spp should cut linear RMSE against the reference by at least 30%, \
+        rmse_denoised < rmse_noisy * 0.75,
+        "denoising 8 spp should cut linear RMSE against the reference by at least 25%, \
          was {} against {}",
         rmse_denoised,
         rmse_noisy
     );
-    // 0.175 measured.
+    // 0.167 measured.
     assert!(
-        rmse_denoised < 0.21,
-        "denoised 8 spp should land within 0.21 linear RMSE of the reference, was {}",
+        rmse_denoised < 0.2,
+        "denoised 8 spp should land within 0.2 linear RMSE of the reference, was {}",
         rmse_denoised
     );
 }
@@ -1425,24 +1432,25 @@ fn test_denoise_improves_specular_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
-    // 0.78 measured, from 0.68 against white noise, and re-baselined for the
-    // same reason as the diffuse gate above: the denominator shrank by 28%
-    // (0.115 -> 0.083) against the numerator's 21% (0.083 -> 0.065). The
+    // 0.84 measured, from 0.68 against white noise and 0.78 before image
+    // textures were sRGB decoded, and re-baselined each time for the same
+    // reason as the diffuse gate above: the denominator falls faster than the
+    // numerator. 0.115 -> 0.083 -> 0.063 against 0.083 -> 0.065 -> 0.053. The
     // absolute figure is the one that improved, so it is asserted too.
     //
     // The margin is wider than the diffuse scene's because the 2000 spp
     // reference is itself adaptively sampled and moves a little run to run.
     assert!(
-        rmse_denoised < rmse_noisy * 0.85,
+        rmse_denoised < rmse_noisy * 0.88,
         "denoising 8 spp of a specular scene should cut linear RMSE against the \
-         reference by at least 15%, was {} against {}",
+         reference by at least 12%, was {} against {}",
         rmse_denoised,
         rmse_noisy
     );
-    // 0.065 measured.
+    // 0.053 measured.
     assert!(
-        rmse_denoised < 0.078,
-        "denoised 8 spp of a specular scene should land within 0.078 linear RMSE of \
+        rmse_denoised < 0.063,
+        "denoised 8 spp of a specular scene should land within 0.063 linear RMSE of \
          the reference, was {}",
         rmse_denoised
     );
@@ -1803,7 +1811,7 @@ fn encode(pixels: &[[f32; 4]], width: u32, height: u32, tone_mapper: ToneMapper)
     let mut img = RgbImage::new(width, height);
     for (i, p) in pixels.iter().enumerate() {
         let m = tone_mapper.map([p[0], p[1], p[2]]);
-        let c = |v: f32| (v.sqrt().min(0.999) * 256.) as u8;
+        let c = |v: f32| (linear_to_srgb(v).min(0.999) * 256.) as u8;
         img.put_pixel(
             i as u32 % width,
             i as u32 / width,
@@ -2229,5 +2237,130 @@ fn test_denoise_strength_zero_is_the_identity() {
         "a denoiser at strength 0 should be as close to the identity as the \
          filter can be, relative RMSE was {}",
         relative
+    );
+}
+
+/// The linear value the sRGB decode turns byte 188 into. Spelled out rather
+/// than computed, so the test is a statement about the transfer function and
+/// not a restatement of the code under test.
+const BYTE_188_LINEAR: f64 = 0.502_886_6;
+
+/// A solid `size` x `size` image, for use as an albedo or a normal map.
+fn solid_image(size: u32, rgb: [u8; 3]) -> Textures {
+    ImageMap::new(Arc::new(RgbImage::from_pixel(size, size, Rgb(rgb)))).into()
+}
+
+fn srgb_decode_config() -> RenderConfig {
+    RenderConfig {
+        width: 80,
+        height: 60,
+        samples_per_pixel: 256,
+        // Three bounces is enough for the albedo to enter the product more than
+        // once, and short enough that Russian roulette -- which starts at depth
+        // 3 -- never fires. Without that, a path in one scene can survive while
+        // its twin in the other terminates, and the two buffers stop being
+        // comparable pixel by pixel.
+        max_depth: 3,
+        // Adaptive sampling retires pixels on their own variance, so two scenes
+        // could end up with different sample counts on the same pixel.
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    }
+}
+
+fn max_channel_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b.iter())
+        .flat_map(|(x, y)| (0..3).map(move |c| (x[c] - y[c]).abs() as f64))
+        .fold(0.0, f64::max)
+}
+
+/// Where the sRGB decode of an image texture lands, pinned without reference to
+/// any golden image.
+///
+/// Two renders of the same box: one whose walls are textured with a solid image
+/// of byte 188, one whose walls are the [`SolidColor`] that byte decodes to. If
+/// the decode is missing the textured arm renders at linear 0.737 instead of
+/// 0.503, and three bounces off the walls turn that 47% error into a much
+/// larger one. If it were applied twice, or to the value after the light's
+/// contribution rather than to the texel, the two arms disagree the same way.
+///
+/// Both arms carry the same normal map, so the atlas holds two textures in both
+/// and the albedo lookup has to pick the right region of it.
+#[test]
+fn test_srgb_decode_matches_equivalent_solid_color() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let textured = render_linear(
+        create_srgb_decode_scene(
+            srgb_decode_config(),
+            solid_image(4, [188, 188, 188]),
+            Some(solid_image(4, [128, 128, 255])),
+        ),
+        device,
+        queue,
+    );
+    let solid = render_linear(
+        create_srgb_decode_scene(
+            srgb_decode_config(),
+            SolidColor::new(BYTE_188_LINEAR, BYTE_188_LINEAR, BYTE_188_LINEAR).into(),
+            Some(solid_image(4, [128, 128, 255])),
+        ),
+        device,
+        queue,
+    );
+
+    let difference = max_channel_difference(&textured, &solid);
+    println!("max linear channel difference, textured vs solid: {difference}");
+
+    assert!(
+        difference < 1e-3,
+        "an image texture of byte 188 should render as the linear colour it \
+         decodes to, largest channel difference was {difference}"
+    );
+}
+
+/// The other half of the placement: the decode must not reach the normal map.
+///
+/// The atlas is shared between albedo and normal maps, so decoding it as a
+/// whole -- by giving the texture an `Rgba8UnormSrgb` format, or by moving the
+/// call above the branch in `surface_at` -- would compile and would look right
+/// on the albedo. Byte 128 is the neutral axis of a normal map: read raw it is
+/// the surface's own normal, read as sRGB it is 0.216, which tilts the shading
+/// normal by 39 degrees. So a render through a neutral normal map has to match
+/// one with no normal map at all.
+#[test]
+fn test_srgb_decode_is_not_applied_to_normal_maps() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let albedo = || SolidColor::new(0.6, 0.6, 0.6).into();
+
+    let normal_mapped = render_linear(
+        create_srgb_decode_scene(
+            srgb_decode_config(),
+            albedo(),
+            Some(solid_image(4, [128, 128, 255])),
+        ),
+        device,
+        queue,
+    );
+    let plain = render_linear(
+        create_srgb_decode_scene(srgb_decode_config(), albedo(), None),
+        device,
+        queue,
+    );
+
+    let difference = max_channel_difference(&normal_mapped, &plain);
+    println!("max linear channel difference, neutral normal map vs none: {difference}");
+
+    // Not zero: byte 128 is 0.5020, not 0.5, so the map tilts the normal by
+    // 0.22 degrees and the scattered directions shift with it. That residue
+    // measures 0.013 here and shrinks with samples; decoding the normal map
+    // instead puts it at 0.73, which is what the bound is placed between.
+    assert!(
+        difference < 0.1,
+        "a neutral normal map should be close to no normal map, largest \
+         channel difference was {difference}"
     );
 }
