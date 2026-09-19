@@ -75,6 +75,18 @@ const LEAF_OFFSET_MASK = 0x00FFFFFFu;
 const PRIM_TYPE_SHIFT = 30u;
 const PRIM_INDEX_MASK = 0x3FFFFFFFu;
 
+// Traversal defers only the farther child, so a tree of this depth pushes at
+// most one entry fewer than there are slots here. `Bvh::new` asserts its
+// depth against the matching MAX_TRAVERSAL_DEPTH, because overflowing this
+// array is not an error the GPU can report: the bounds-checking policy clamps
+// the store, the deferred subtree is lost, and geometry quietly vanishes.
+const MAX_TRAVERSAL_DEPTH = 32u;
+
+// One stack, shared by world_hit and occluded. They are never live at the same
+// time -- occluded is called from the NEE block of trace_sample, long after
+// world_hit has returned -- so two declarations only ever cost storage.
+var<private> traversal_stack: array<u32, MAX_TRAVERSAL_DEPTH>;
+
 struct Material {
     albedo: vec3<f32>,
     attenuation_factor: f32,
@@ -1079,10 +1091,6 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, hit_ref: ptr<function, HitRef>) -> 
     var hit_anything = false;
     var closest_so_far = t_max;
 
-    // Only farther children are ever pushed, so the tree depth bounds this and
-    // 32 entries covers any balanced tree far beyond the addressable
-    // primitive count.
-    var stack: array<u32, 32>;
     var stack_ptr = 0u;
     var node_idx = 0u;
 
@@ -1116,11 +1124,11 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, hit_ref: ptr<function, HitRef>) -> 
         if (left_next != NO_NODE && right_next != NO_NODE) {
             // Descend into the nearer child, defer the farther one.
             if (t_left <= t_right) {
-                stack[stack_ptr] = right_next;
+                traversal_stack[stack_ptr] = right_next;
                 stack_ptr++;
                 node_idx = left_next;
             } else {
-                stack[stack_ptr] = left_next;
+                traversal_stack[stack_ptr] = left_next;
                 stack_ptr++;
                 node_idx = right_next;
             }
@@ -1131,7 +1139,7 @@ fn world_hit(r: Ray, t_min: f32, t_max: f32, hit_ref: ptr<function, HitRef>) -> 
         } else {
             if (stack_ptr == 0u) { break; }
             stack_ptr--;
-            node_idx = stack[stack_ptr];
+            node_idx = traversal_stack[stack_ptr];
         }
     }
 
@@ -1173,7 +1181,6 @@ fn occluded(origin: vec3<f32>, direction: vec3<f32>, t_max: f32) -> bool {
     let inv_dir = ray_inv_dir(direction);
     let r = Ray(origin, direction);
 
-    var stack: array<u32, 32>;
     var stack_ptr = 0u;
     var node_idx = 0u;
 
@@ -1205,7 +1212,7 @@ fn occluded(origin: vec3<f32>, direction: vec3<f32>, t_max: f32) -> bool {
 
         if (left_next != NO_NODE) {
             if (right_next != NO_NODE) {
-                stack[stack_ptr] = right_next;
+                traversal_stack[stack_ptr] = right_next;
                 stack_ptr++;
             }
             node_idx = left_next;
@@ -1214,7 +1221,7 @@ fn occluded(origin: vec3<f32>, direction: vec3<f32>, t_max: f32) -> bool {
         } else {
             if (stack_ptr == 0u) { break; }
             stack_ptr--;
-            node_idx = stack[stack_ptr];
+            node_idx = traversal_stack[stack_ptr];
         }
     }
 

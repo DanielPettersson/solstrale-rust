@@ -35,6 +35,27 @@ const LEAF_OFFSET_MASK: u32 = 0x00FF_FFFF;
 /// Largest scene the leaf encoding can address.
 pub const MAX_PRIMITIVES: usize = LEAF_OFFSET_MASK as usize;
 
+/// Entries in the GPU traversal stack (`traversal_stack` in `ray_trace.wgsl`).
+///
+/// Traversal only ever pushes the farther child, so a tree of depth `d` --
+/// counting levels of internal nodes -- needs at most `d - 1` entries: the
+/// deepest internal node has two leaves and pushes nothing. Asserting
+/// `d <= MAX_TRAVERSAL_DEPTH` therefore leaves one slot spare.
+///
+/// The bound has to be checked here because overflowing it on the GPU is
+/// silent: WGSL's bounds-checking policy clamps the out-of-range store, the
+/// deferred subtree is never visited, and geometry disappears from the image
+/// with no error at all. Nothing built a balanced tree, so nothing made this
+/// true by construction -- `split` can legitimately return a 1/N-1 split.
+///
+/// 32 is kept because the measured excess over a balanced tree is what scales,
+/// not the depth itself. The `bvh_build` cloud reaches 14 / 17 / 22 at
+/// 10k / 100k / 1M, two to four levels over balanced; clustered real geometry
+/// is worse, with the 1370-triangle spider mesh at 14 against a balanced 9.
+/// Five levels of slack over a balanced [`MAX_PRIMITIVES`] tree is 27, so this
+/// is headroom rather than waste and shrinking it is not free.
+pub const MAX_TRAVERSAL_DEPTH: u32 = 32;
+
 /// Packs an inline leaf: `count` primitives starting at `offset`.
 fn leaf_meta(offset: u32, count: usize) -> u32 {
     debug_assert!(count <= MAX_LEAF_PRIMS);
@@ -60,15 +81,18 @@ pub struct Bvh {
     /// Primitives in leaf order, so a leaf is a contiguous range.
     pub(crate) prims: Vec<Hittables>,
     b_box: Aabb,
+    /// Levels of internal nodes on the longest root-to-leaf path; 0 when empty.
+    depth: u32,
 }
 
 impl Display for Bvh {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{{\"nodes\": {}, \"primitives\": {}}}",
+            "{{\"nodes\": {}, \"primitives\": {}, \"depth\": {}}}",
             self.nodes.len(),
-            self.prims.len()
+            self.prims.len(),
+            self.depth
         )
     }
 }
@@ -100,6 +124,7 @@ impl Bvh {
                 nodes: Vec::new(),
                 prims: Vec::new(),
                 b_box: Default::default(),
+                depth: 0,
             };
         }
 
@@ -126,21 +151,32 @@ impl Bvh {
 
         let mut indices: Vec<u32> = (0..prims.len() as u32).collect();
 
-        let nodes = if prims.len() <= MAX_LEAF_PRIMS {
+        let (nodes, depth) = if prims.len() <= MAX_LEAF_PRIMS {
             // Everything fits in one leaf. Emit a root whose left child is that
             // leaf and whose right child is an empty leaf: a zero-count leaf
             // intersects nothing, so its box never needs to fail the slab test.
-            vec![BvhNode {
-                left_box: b_box.clone(),
-                right_box: Aabb::default(),
-                left_meta: leaf_meta(0, prims.len()),
-                right_meta: leaf_meta(0, 0),
-            }]
+            (
+                vec![BvhNode {
+                    left_box: b_box.clone(),
+                    right_box: Aabb::default(),
+                    left_meta: leaf_meta(0, prims.len()),
+                    right_meta: leaf_meta(0, 0),
+                }],
+                1,
+            )
         } else {
             let mut nodes = Vec::with_capacity(prims.len() / MAX_LEAF_PRIMS);
-            build_parallel(&mut nodes, &mut indices, 0, &boxes, &centroids);
-            nodes
+            let depth = build_parallel(&mut nodes, &mut indices, 0, &boxes, &centroids);
+            (nodes, depth)
         };
+
+        assert!(
+            depth <= MAX_TRAVERSAL_DEPTH,
+            "BVH depth {} exceeds the {} levels the GPU traversal stack can \
+             hold, which would silently drop geometry from the image",
+            depth,
+            MAX_TRAVERSAL_DEPTH
+        );
 
         permute_in_place(&mut prims, &indices);
 
@@ -148,7 +184,16 @@ impl Bvh {
             nodes,
             prims,
             b_box,
+            depth,
         }
+    }
+
+    /// Levels of internal nodes on the longest root-to-leaf path.
+    ///
+    /// This is what [`MAX_TRAVERSAL_DEPTH`] bounds; see it for the exact
+    /// relation to the GPU stack.
+    pub fn depth(&self) -> u32 {
+        self.depth
     }
 }
 
@@ -206,16 +251,17 @@ fn permute_in_place(prims: &mut [Hittables], indices: &[u32]) {
 /// Builds a subtree, forking the two halves onto rayon while they are large
 /// enough to be worth it. Subtree nodes are built into their own vectors and
 /// spliced, which only happens for the handful of levels above the cutoff.
+///
+/// Returns the subtree's depth, in levels of internal nodes.
 fn build_parallel(
     nodes: &mut Vec<BvhNode>,
     indices: &mut [u32],
     offset: u32,
     boxes: &[Aabb32],
     centroids: &[[f32; 3]],
-) {
+) -> u32 {
     if indices.len() < PARALLEL_CUTOFF {
-        build_serial(nodes, indices, offset, boxes, centroids);
-        return;
+        return build_serial(nodes, indices, offset, boxes, centroids).1;
     }
 
     let mid = split(indices, boxes, centroids);
@@ -227,20 +273,24 @@ fn build_parallel(
     let l_leaf = l_idx.len() <= MAX_LEAF_PRIMS;
     let r_leaf = r_idx.len() <= MAX_LEAF_PRIMS;
 
-    let (l_sub, r_sub) = rayon::join(
+    let ((l_sub, l_depth), (r_sub, r_depth)) = rayon::join(
         || {
             let mut v = Vec::new();
-            if !l_leaf {
-                build_parallel(&mut v, l_idx, offset, boxes, centroids);
-            }
-            v
+            let d = if l_leaf {
+                0
+            } else {
+                build_parallel(&mut v, l_idx, offset, boxes, centroids)
+            };
+            (v, d)
         },
         || {
             let mut v = Vec::new();
-            if !r_leaf {
-                build_parallel(&mut v, r_idx, r_offset, boxes, centroids);
-            }
-            v
+            let d = if r_leaf {
+                0
+            } else {
+                build_parallel(&mut v, r_idx, r_offset, boxes, centroids)
+            };
+            (v, d)
         },
     );
 
@@ -275,16 +325,24 @@ fn build_parallel(
             nodes.push(n);
         }
     }
+
+    1 + l_depth.max(r_depth)
 }
 
-/// Builds a subtree directly into `nodes`, returning this subtree's root index.
+/// Builds a subtree directly into `nodes`, returning its root index and its
+/// depth in levels of internal nodes.
+///
+/// The recursion here is as deep as the tree, so the depth the caller asserts
+/// against [`MAX_TRAVERSAL_DEPTH`] also bounds this stack -- but only after the
+/// fact: a distribution pathological enough to overflow the native stack does
+/// so before there is a depth to check.
 fn build_serial(
     nodes: &mut Vec<BvhNode>,
     indices: &mut [u32],
     offset: u32,
     boxes: &[Aabb32],
     centroids: &[[f32; 3]],
-) -> u32 {
+) -> (u32, u32) {
     let my = nodes.len() as u32;
     nodes.push(BvhNode {
         left_box: Aabb::default(),
@@ -300,13 +358,13 @@ fn build_serial(
     let left_box = union_of(l_idx, boxes);
     let right_box = union_of(r_idx, boxes);
 
-    let left_meta = if l_idx.len() <= MAX_LEAF_PRIMS {
-        leaf_meta(offset, l_idx.len())
+    let (left_meta, left_depth) = if l_idx.len() <= MAX_LEAF_PRIMS {
+        (leaf_meta(offset, l_idx.len()), 0)
     } else {
         build_serial(nodes, l_idx, offset, boxes, centroids)
     };
-    let right_meta = if r_idx.len() <= MAX_LEAF_PRIMS {
-        leaf_meta(r_offset, r_idx.len())
+    let (right_meta, right_depth) = if r_idx.len() <= MAX_LEAF_PRIMS {
+        (leaf_meta(r_offset, r_idx.len()), 0)
     } else {
         build_serial(nodes, r_idx, r_offset, boxes, centroids)
     };
@@ -317,7 +375,7 @@ fn build_serial(
         left_meta,
         right_meta,
     };
-    my
+    (my, 1 + left_depth.max(right_depth))
 }
 
 /// Chooses a split point with a binned SAH sweep over the widest centroid axis.
@@ -594,5 +652,72 @@ mod tests {
         let mut prims: Vec<Hittables> = (0..3).map(tagged).collect();
         permute_in_place(&mut prims, &[1, 2, 0]);
         assert_eq!(vec![1, 2, 0], tags(&prims));
+    }
+
+    /// Depth read back off the finished node array, which is the only thing the
+    /// GPU traversal actually walks.
+    fn measured_depth(nodes: &[BvhNode], idx: u32) -> u32 {
+        let child = |meta: u32| {
+            if meta & LEAF_FLAG != 0 {
+                0
+            } else {
+                measured_depth(nodes, meta)
+            }
+        };
+        1 + child(nodes[idx as usize].left_meta).max(child(nodes[idx as usize].right_meta))
+    }
+
+    /// A cloud of `n` triangles at pseudo-random positions, as in the bench.
+    fn cloud(n: u32) -> Vec<Hittables> {
+        let mut state: u32 = 0x9E37_79B9;
+        let mut next = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 8) as f64 / 16777216.0
+        };
+        let extent = (n as f64).cbrt() * 2.0;
+        (0..n)
+            .map(|_| {
+                let c = Vec3::new(next() * extent, next() * extent, next() * extent);
+                let mat = Lambertian::new(SolidColor::new(1., 1., 1.).into(), None);
+                Triangle::new(
+                    c,
+                    c + Vec3::new(0.6, 0.1, 0.2),
+                    c + Vec3::new(0.2, 0.7, -0.1),
+                    mat.into(),
+                    &NopTransformer(),
+                )
+                .into()
+            })
+            .collect()
+    }
+
+    /// The depth the assert trusts has to be the depth the tree actually has --
+    /// the splice in `build_parallel` is where that is easiest to get wrong, so
+    /// the largest size here is over `PARALLEL_CUTOFF`.
+    #[test]
+    fn depth_matches_the_built_tree() {
+        for n in [1u32, 4, 5, 100, 9000] {
+            let bvh = Bvh::new(cloud(n));
+            assert_eq!(measured_depth(&bvh.nodes, 0), bvh.depth(), "n = {}", n);
+            assert!(bvh.depth() <= MAX_TRAVERSAL_DEPTH, "n = {}", n);
+        }
+
+        assert_eq!(0, Bvh::new(Vec::new()).depth());
+    }
+
+    /// The constant is only worth anything while both sides agree on it.
+    #[test]
+    fn max_traversal_depth_matches_the_shader() {
+        let wgsl = include_str!("../renderer/ray_trace.wgsl");
+        let literal = format!("const MAX_TRAVERSAL_DEPTH = {}u;", MAX_TRAVERSAL_DEPTH);
+        assert!(
+            wgsl.contains(&literal),
+            "ray_trace.wgsl no longer declares `{}`; the stack and the assert have drifted",
+            literal
+        );
+        assert!(
+            wgsl.contains("var<private> traversal_stack: array<u32, MAX_TRAVERSAL_DEPTH>;"),
+            "the traversal stack is no longer sized by MAX_TRAVERSAL_DEPTH"
+        );
     }
 }

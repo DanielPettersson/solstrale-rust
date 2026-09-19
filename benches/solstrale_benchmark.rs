@@ -70,6 +70,12 @@ pub fn bvh_build_benchmark(c: &mut Criterion) {
     for n in [10_000u32, 100_000, 1_000_000] {
         group.throughput(Throughput::Elements(n as u64));
         group.sample_size(10);
+
+        // What sizes MAX_TRAVERSAL_DEPTH. The GPU stack has to hold one entry
+        // per level, and the build asserts against it, so the constant should
+        // track a measured number rather than a guess.
+        println!("bvh_build/{}: {}", n, Bvh::new(triangle_cloud(n)));
+
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter_with_setup(|| triangle_cloud(n), |tris| black_box(Bvh::new(tris)));
         });
