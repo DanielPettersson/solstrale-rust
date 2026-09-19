@@ -1,4 +1,18 @@
 //! Contains textures to be used by materials
+//!
+//! Colour authored in code is linear; colour read from an image file is not.
+//! A [`SolidColor`] is taken at face value, and so is an MTL `Kd` triple,
+//! because a number written by hand is a linear radiance. Image data is sRGB
+//! encoded, so [`ImageMap::color`] decodes it. The asymmetry is deliberate:
+//! the two live in different spaces because they were authored in different
+//! spaces.
+//!
+//! Only *colour* is decoded. Normal and height maps are geometry stored in a
+//! byte, never a colour, and go through the raw
+//! [`rgb_to_vec3`](crate::util::rgb_color::rgb_to_vec3) -- including the
+//! normal-versus-height heuristic in `load_bump_map`, which decides on whether
+//! pixel triples have unit length and would misclassify every bump map in the
+//! project if the bytes were bent through a transfer function first.
 use std::error::Error;
 use std::sync::Arc;
 
@@ -11,7 +25,7 @@ use crate::geo::Uv;
 use crate::geo::vec3::Vec3;
 use crate::material::texture::BumpMap::{Height, Normal};
 use crate::util::height_map;
-use crate::util::rgb_color::rgb_to_vec3;
+use crate::util::rgb_color::{rgb_to_vec3, srgb_to_vec3};
 
 /// Describes the color of a material.
 /// The color can vary by the uv coordinates of the hittable
@@ -168,7 +182,10 @@ impl Texture for ImageMap {
         let y = v * self.max_y;
 
         let pixel = self.image.get_pixel(x as u32, y as u32);
-        rgb_to_vec3(pixel)
+        // sRGB decode, matching what the shader applies to the atlas. This is
+        // the CPU fallback for materials whose colour is flattened rather than
+        // sampled, so the two must agree.
+        srgb_to_vec3(pixel)
     }
 }
 

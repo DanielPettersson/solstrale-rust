@@ -1,8 +1,10 @@
 use std::default::Default;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::sync::mpsc::channel;
 use std::thread;
 
+use image::Rgb;
 use image::RgbImage;
 use image::imageops::FilterType;
 use image_compare::Algorithm::RootMeanSquared;
@@ -12,7 +14,7 @@ use solstrale::geo::transformation::{
 };
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
-use solstrale::material::texture::SolidColor;
+use solstrale::material::texture::{ImageMap, SolidColor, Textures};
 use solstrale::material::{DiffuseLight, Lambertian};
 use solstrale::post::{BloomPostProcessor, DenoisePostProcessor, SaturationPostProcessor};
 use solstrale::ray_trace;
@@ -23,7 +25,7 @@ use crate::scenes::{
     create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
     create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
     create_simple_test_scene, create_smooth_vs_flat_scene, create_specular_scene,
-    create_test_scene, create_texture_mapping_scene, create_uv_scene,
+    create_srgb_decode_scene, create_test_scene, create_texture_mapping_scene, create_uv_scene,
 };
 
 mod scenes;
@@ -2229,5 +2231,130 @@ fn test_denoise_strength_zero_is_the_identity() {
         "a denoiser at strength 0 should be as close to the identity as the \
          filter can be, relative RMSE was {}",
         relative
+    );
+}
+
+/// The linear value the sRGB decode turns byte 188 into. Spelled out rather
+/// than computed, so the test is a statement about the transfer function and
+/// not a restatement of the code under test.
+const BYTE_188_LINEAR: f64 = 0.502_886_6;
+
+/// A solid `size` x `size` image, for use as an albedo or a normal map.
+fn solid_image(size: u32, rgb: [u8; 3]) -> Textures {
+    ImageMap::new(Arc::new(RgbImage::from_pixel(size, size, Rgb(rgb)))).into()
+}
+
+fn srgb_decode_config() -> RenderConfig {
+    RenderConfig {
+        width: 80,
+        height: 60,
+        samples_per_pixel: 256,
+        // Three bounces is enough for the albedo to enter the product more than
+        // once, and short enough that Russian roulette -- which starts at depth
+        // 3 -- never fires. Without that, a path in one scene can survive while
+        // its twin in the other terminates, and the two buffers stop being
+        // comparable pixel by pixel.
+        max_depth: 3,
+        // Adaptive sampling retires pixels on their own variance, so two scenes
+        // could end up with different sample counts on the same pixel.
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    }
+}
+
+fn max_channel_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b.iter())
+        .flat_map(|(x, y)| (0..3).map(move |c| (x[c] - y[c]).abs() as f64))
+        .fold(0.0, f64::max)
+}
+
+/// Where the sRGB decode of an image texture lands, pinned without reference to
+/// any golden image.
+///
+/// Two renders of the same box: one whose walls are textured with a solid image
+/// of byte 188, one whose walls are the [`SolidColor`] that byte decodes to. If
+/// the decode is missing the textured arm renders at linear 0.737 instead of
+/// 0.503, and three bounces off the walls turn that 47% error into a much
+/// larger one. If it were applied twice, or to the value after the light's
+/// contribution rather than to the texel, the two arms disagree the same way.
+///
+/// Both arms carry the same normal map, so the atlas holds two textures in both
+/// and the albedo lookup has to pick the right region of it.
+#[test]
+fn test_srgb_decode_matches_equivalent_solid_color() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let textured = render_linear(
+        create_srgb_decode_scene(
+            srgb_decode_config(),
+            solid_image(4, [188, 188, 188]),
+            Some(solid_image(4, [128, 128, 255])),
+        ),
+        device,
+        queue,
+    );
+    let solid = render_linear(
+        create_srgb_decode_scene(
+            srgb_decode_config(),
+            SolidColor::new(BYTE_188_LINEAR, BYTE_188_LINEAR, BYTE_188_LINEAR).into(),
+            Some(solid_image(4, [128, 128, 255])),
+        ),
+        device,
+        queue,
+    );
+
+    let difference = max_channel_difference(&textured, &solid);
+    println!("max linear channel difference, textured vs solid: {difference}");
+
+    assert!(
+        difference < 1e-3,
+        "an image texture of byte 188 should render as the linear colour it \
+         decodes to, largest channel difference was {difference}"
+    );
+}
+
+/// The other half of the placement: the decode must not reach the normal map.
+///
+/// The atlas is shared between albedo and normal maps, so decoding it as a
+/// whole -- by giving the texture an `Rgba8UnormSrgb` format, or by moving the
+/// call above the branch in `surface_at` -- would compile and would look right
+/// on the albedo. Byte 128 is the neutral axis of a normal map: read raw it is
+/// the surface's own normal, read as sRGB it is 0.216, which tilts the shading
+/// normal by 39 degrees. So a render through a neutral normal map has to match
+/// one with no normal map at all.
+#[test]
+fn test_srgb_decode_is_not_applied_to_normal_maps() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let albedo = || SolidColor::new(0.6, 0.6, 0.6).into();
+
+    let normal_mapped = render_linear(
+        create_srgb_decode_scene(
+            srgb_decode_config(),
+            albedo(),
+            Some(solid_image(4, [128, 128, 255])),
+        ),
+        device,
+        queue,
+    );
+    let plain = render_linear(
+        create_srgb_decode_scene(srgb_decode_config(), albedo(), None),
+        device,
+        queue,
+    );
+
+    let difference = max_channel_difference(&normal_mapped, &plain);
+    println!("max linear channel difference, neutral normal map vs none: {difference}");
+
+    // Not zero: byte 128 is 0.5020, not 0.5, so the map tilts the normal by
+    // 0.22 degrees and the scattered directions shift with it. That residue
+    // measures 0.013 here and shrinks with samples; decoding the normal map
+    // instead puts it at 0.73, which is what the bound is placed between.
+    assert!(
+        difference < 0.1,
+        "a neutral normal map should be close to no normal map, largest \
+         channel difference was {difference}"
     );
 }

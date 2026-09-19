@@ -479,6 +479,16 @@ fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// sRGB EOTF, the exact piecewise form with the linear toe rather than
+// `pow(x, 2.2)`: it is what the encoders that wrote these images used, and it
+// is the exact inverse of the OETF `buffer_to_image` encodes with. Mirrors
+// `srgb_to_linear` in `util/rgb_color.rs`, which the CPU fallback uses.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
+
 // Closed-form samplers.
 //
 // These were rejection loops of up to 100 iterations. On a GPU every lane in a
@@ -872,7 +882,13 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     if (material.texture_index >= 0) {
         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
         let uv_atlas = material.albedo_offset + uv * material.albedo_scale;
-        surface.albedo = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
+        // Decoded here rather than by the hardware, because the atlas is
+        // shared with normal maps, which must stay raw. Decoding after the
+        // filter rather than before it costs nothing while the sampler is
+        // `Nearest` on every axis; if mipmaps land (#60), switch to a second
+        // `Rgba8UnormSrgb` view over the same texture and sample albedo
+        // through that.
+        surface.albedo = srgb_to_linear(textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb);
     }
 
     surface.normal = rec.normal;
