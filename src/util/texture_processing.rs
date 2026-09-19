@@ -1,7 +1,11 @@
 //! Utilities for processing textures.
 
+use image::RgbImage;
+use image::imageops::{self, FilterType};
+use rayon::prelude::*;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 /// Represents the position and dimensions of a texture within the atlas.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,6 +56,54 @@ impl TexturePacker {
         Self {
             max_width,
             max_height,
+        }
+    }
+
+    /// Packs the given images, halving every one of them until the set fits.
+    ///
+    /// Returns the layout together with the images at the size they were placed
+    /// at, which is the original `Arc` whenever nothing had to shrink. A single
+    /// 8192x8192 map already fills an 8192 atlas, so a scene carrying a handful
+    /// of them can only be rendered with them scaled down.
+    pub fn pack_images(
+        &self,
+        images: &[Arc<RgbImage>],
+    ) -> Result<(AtlasLayout, Vec<Arc<RgbImage>>), PackingError> {
+        let original: Vec<(u32, u32)> = images.iter().map(|i| (i.width(), i.height())).collect();
+        let mut divisor = 1;
+
+        loop {
+            let dims: Vec<(u32, u32)> = original
+                .iter()
+                .map(|&(w, h)| ((w / divisor).max(1), (h / divisor).max(1)))
+                .collect();
+
+            if let Ok(layout) = self.pack(&dims) {
+                let placed = if divisor == 1 {
+                    images.to_vec()
+                } else {
+                    println!(
+                        "Scaling {} textures down by {divisor} to fit the {}x{} atlas",
+                        images.len(),
+                        self.max_width,
+                        self.max_height
+                    );
+                    images
+                        .par_iter()
+                        .zip(&dims)
+                        .map(|(img, &(w, h))| {
+                            Arc::new(imageops::resize(img.as_ref(), w, h, FilterType::Triangle))
+                        })
+                        .collect()
+                };
+                return Ok((layout, placed));
+            }
+
+            // Every image is a single pixel and they still do not fit.
+            if dims.iter().all(|&(w, h)| w == 1 && h == 1) {
+                return Err(PackingError);
+            }
+            divisor *= 2;
         }
     }
 

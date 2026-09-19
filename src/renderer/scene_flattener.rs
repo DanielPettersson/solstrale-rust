@@ -83,6 +83,10 @@ impl Hasher for FxHasher {
     }
 }
 
+/// Side of the square texture atlas. 8192 is the `max_texture_dimension_2d`
+/// every backend we target guarantees.
+const ATLAS_SIZE: u32 = 8192;
+
 /// Container for all scene data flattened for the GPU
 pub struct SceneData {
     /// Flattened BVH nodes
@@ -101,7 +105,8 @@ pub struct SceneData {
     pub quad_attr: Vec<QuadAttr>,
     /// Materials
     pub materials: Vec<GpuMaterial>,
-    /// Unique decoded textures, shared with the scene (not copied).
+    /// Unique decoded textures at atlas size, shared with the scene unless they
+    /// had to be scaled down to fit.
     pub textures: Vec<Arc<RgbImage>>,
     /// Atlas placement for `textures`, computed once here and reused by the renderer.
     pub atlas_layout: Option<AtlasLayout>,
@@ -129,19 +134,17 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     let mut unique_textures: Vec<Arc<RgbImage>> = Vec::new();
     collect_unique_textures(&scene.world, &mut unique_textures);
 
-    let atlas_layout = if !unique_textures.is_empty() {
-        let packer = TexturePacker::new(8192, 8192);
-        let dims: Vec<(u32, u32)> = unique_textures
-            .iter()
-            .map(|img| (img.width(), img.height()))
-            .collect();
-        Some(
-            packer
-                .pack(&dims)
-                .expect("Failed to pack textures into atlas"),
-        )
+    // `unique_textures` stays the identity list the material lookup matches the
+    // scene's `Arc`s against; `atlas_textures` is what gets blitted, which is the
+    // same images unless they had to shrink to fit.
+    let (atlas_layout, atlas_textures) = if !unique_textures.is_empty() {
+        let packer = TexturePacker::new(ATLAS_SIZE, ATLAS_SIZE);
+        let (layout, placed) = packer
+            .pack_images(&unique_textures)
+            .expect("Failed to pack textures into atlas");
+        (Some(layout), placed)
     } else {
-        None
+        (None, Vec::new())
     };
 
     // Process world
@@ -184,7 +187,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
 
     // Hand the renderer the shared Arcs and the layout we already computed above;
     // it used to deep-copy every decoded image and re-run the identical packing.
-    data.textures = unique_textures;
+    data.textures = atlas_textures;
     data.atlas_layout = atlas_layout;
 
     data
