@@ -3,7 +3,7 @@ use solstrale::geo::Uv;
 use solstrale::geo::transformation::{
     NopTransformer, RotationY, Transformations, Transformer, Translation,
 };
-use solstrale::geo::vec3::Vec3;
+use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
 use solstrale::hittable::Hittables;
 use solstrale::hittable::Sphere;
 use solstrale::hittable::Triangle;
@@ -11,7 +11,7 @@ use solstrale::hittable::{Bvh, Quad};
 use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
 use solstrale::material::texture::{ImageMap, SolidColor, Textures, load_normal_texture};
-use solstrale::material::{Blend, Dielectric, DiffuseLight, Lambertian, Metal};
+use solstrale::material::{Blend, Dielectric, DiffuseLight, Lambertian, Materials, Metal};
 use solstrale::renderer::{RenderConfig, Scene};
 
 /// A scene built to exercise the denoiser's specular guide: a mirror sphere and
@@ -971,3 +971,127 @@ pub fn create_srgb_decode_scene(
         render_config,
     }
 }
+
+/// Five metal spheres across the roughness range, over the textured floor, lit
+/// by one small quad light.
+///
+/// Small on purpose. A small light is exactly the configuration the fuzz-sphere
+/// metal could not render: with no pdf it could not take a shadow ray, so a
+/// rough metal had to find the light by chance through its own lobe, which is
+/// the noisiest way there is. With a GGX lobe and next-event estimation the
+/// same frame is clean, and `test_rough_metal_converges_with_nee` is what
+/// measures the difference.
+///
+/// The textured floor gives the roughest spheres something with structure to
+/// blur, so the roughness sequence reads as a sequence rather than as five
+/// grey balls.
+#[allow(dead_code)]
+pub fn create_rough_metal_scene(render_config: RenderConfig) -> Scene {
+    let camera = CameraConfig {
+        vertical_fov_degrees: 34.,
+        aperture_size: 0.,
+        look_from: Vec3::new(0., 1.8, 8.),
+        look_at: Vec3::new(0., 0.75, 0.),
+        up: Vec3::new(0., 1., 0.),
+    };
+
+    let image_tex = ImageMap::load("resources/textures/tex.jpg").unwrap();
+    let floor_material = Lambertian::new(image_tex.into(), None);
+    let light_mat = DiffuseLight::new(300., 300., 300., None);
+
+    let nop = NopTransformer();
+    let mut world: Vec<Hittables> = Vec::new();
+
+    world.push(
+        Quad::new(
+            Vec3::new(-10., 0., -8.),
+            Vec3::new(20., 0., 0.),
+            Vec3::new(0., 0., 16.),
+            floor_material.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    // Mirror through to nearly diffuse. A gold-ish f0 rather than grey, so the
+    // Fresnel rim -- a coloured metal going white at a grazing angle -- is
+    // visible on every one of them.
+    for (i, fuzz) in ROUGH_METAL_FUZZ.iter().enumerate() {
+        let mat = Metal::new(SolidColor::new(0.9, 0.7, 0.3).into(), None, *fuzz);
+        world
+            .push(Sphere::new(rough_metal_sphere_center(i), ROUGH_METAL_RADIUS, mat.into()).into());
+    }
+
+    // One small light, high and slightly forward. Its solid angle from the
+    // spheres is a fraction of a degree.
+    world.push(
+        Quad::new(
+            Vec3::new(-0.3, 4.5, 0.7),
+            Vec3::new(0.6, 0., 0.),
+            Vec3::new(0., 0., 0.6),
+            light_mat.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        // Dim, so the light is what the spheres are lit by. A bright
+        // environment would flood the lobe and hide the thing being measured.
+        background_color: Vec3::new(0.02, 0.03, 0.05),
+        render_config,
+    }
+}
+
+/// The spheres [`create_rough_metal_scene`] lays out, so a test can restrict a
+/// measurement to them without re-deriving where they are.
+#[allow(dead_code)]
+pub const ROUGH_METAL_FUZZ: [f64; 5] = [0., 0.15, 0.3, 0.5, 0.8];
+#[allow(dead_code)]
+pub const ROUGH_METAL_RADIUS: f64 = 0.7;
+#[allow(dead_code)]
+pub fn rough_metal_sphere_center(i: usize) -> Vec3 {
+    Vec3::new(-2.8 + 1.4 * i as f64, ROUGH_METAL_RADIUS, 0.)
+}
+
+/// One sphere of the given material under a uniform unit environment, with
+/// nothing else in the scene.
+///
+/// A furnace: a perfectly energy-conserving BRDF under a uniform environment of
+/// radiance 1 returns exactly 1, whatever its roughness, so whatever the sphere
+/// reads below 1 *is* the energy the BRDF loses. A sphere is convex, so a path
+/// leaves it after one bounce and never comes back -- there is no second
+/// surface, no light, and no depth dependence to confound the measurement.
+#[allow(dead_code)]
+pub fn create_furnace_scene(render_config: RenderConfig, material: Materials) -> Scene {
+    Scene {
+        world: Bvh::new(vec![
+            Sphere::new(FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, material).into(),
+        ])
+        .into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 40.,
+            aperture_size: 0.,
+            look_from: FURNACE_LOOK_FROM,
+            look_at: FURNACE_SPHERE_CENTER,
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: Vec3::new(1., 1., 1.),
+        render_config,
+    }
+}
+
+/// Geometry of [`create_furnace_scene`], so the test can mask the sphere's
+/// projected disc without re-deriving where it is.
+#[allow(dead_code)]
+pub const FURNACE_SPHERE_CENTER: Vec3 = ZERO_VECTOR;
+#[allow(dead_code)]
+pub const FURNACE_SPHERE_RADIUS: f64 = 1.;
+#[allow(dead_code)]
+pub const FURNACE_LOOK_FROM: Vec3 = Vec3 {
+    x: 0.,
+    y: 0.,
+    z: 4.,
+};

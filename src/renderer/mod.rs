@@ -442,9 +442,13 @@ impl<'a> Renderer<'a> {
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
     ) -> Result<Self, Box<dyn Error>> {
-        if !scene.world.has_lights() {
+        // A scene lit only by its background is a scene -- a uniform
+        // environment is what a furnace test is made of, and next-event
+        // estimation simply has nothing to sample there. What is rejected is a
+        // scene with no light of either kind, which can only render black.
+        if !scene.world.has_lights() && scene.background_color.near_zero() {
             return Err(Box::new(SimpleError::new(
-                "Scene should have at least one light",
+                "Scene should have at least one light or a non-black background",
             )));
         }
 
