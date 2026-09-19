@@ -203,17 +203,28 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   primary-hit guide. Both are deliberate: a jittered guide ray would make
   neighbouring pixels disagree about what they are looking at, which is the one
   thing an edge stop cannot survive.
-- **Metal is single-scatter GGX, so it loses energy with roughness.** A
-  microfacet that reflects light onto another microfacet instead of out of the
-  surface is light the model drops, and the deficit grows with roughness. It is
-  measured rather than guessed:
-  `test_ggx_metal_is_energy_conserving_in_a_furnace` puts a white metal in a
-  uniform unit environment, where an energy-conserving BRDF must read exactly
-  1, and reads 1.0000 / 0.9942 / 0.8976 / 0.6318 / 0.3503 at fuzz 0 / 0.25 /
-  0.5 / 0.75 / 1. A CPU quadrature of the BRDF's definition agrees with every
-  one of those to 0.0015, so what the test pins is the model rather than this
-  implementation of it. The same test is what a compensation term would have to
-  move.
+- **Metal's multiple scattering is a fitted correction, not a simulation.**
+  Single-scatter GGX drops every ray a microfacet reflects onto another
+  microfacet, and the loss grows with roughness: measured in a white furnace,
+  where an energy-conserving BRDF must read exactly 1, it read 1.0000 / 0.9942
+  / 0.8976 / 0.6318 / 0.3503 at fuzz 0 / 0.25 / 0.5 / 0.75 / 1 -- a fully rough
+  metal kept a third of the light it was given. A CPU quadrature of the BRDF's
+  definition agrees with every one of those to 0.0015, so they measure the
+  model rather than this implementation of it.
+
+  Turquin 2019's factor `1 + f0 * (1 / E - 1)` puts the rest back, and
+  `test_ggx_metal_is_energy_conserving_in_a_furnace` now reads 1.0000 / 0.9970
+  / 0.9983 / 0.9980 / 0.9975. What remains is the error of the fit of `E`, the
+  single-scatter directional albedo: within 1.4% for `cos_o >= 0.4`, rising to
+  3.3% at the last few degrees of the silhouette, where a polynomial cannot
+  follow a function that is nearly 1 everywhere except a narrow dip. The
+  furnace numbers are better than the pointwise fit because a disc average
+  cancels errors of both signs. A Kulla-Conty table would be exact and would
+  raise the question of how naga handles a large `const` array initialiser;
+  that is the trade that was made.
+
+  The correction is a factor on `f`, not on the sampling density, so it is
+  identical for both estimators at a vertex and MIS is untouched by it.
 
 - **`Metal`'s parameters changed meaning with GGX.** `fuzz` was a sphere radius
   around the mirror direction, calibrated against nothing; it is now a

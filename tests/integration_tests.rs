@@ -2599,9 +2599,9 @@ fn masked_linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]], mask: &[bool]) -> f64 {
 /// Under a uniform environment of radiance 1 an energy-conserving BRDF reflects
 /// exactly 1 at every angle and every roughness, so whatever the sphere reads
 /// below 1 is energy the BRDF lost. With `albedo = 1` the Fresnel term is 1
-/// everywhere too, so what is left is the masking-shadowing term and the
-/// samples GGX reflects below the horizon -- the multiple scattering a
-/// single-scatter model does not carry.
+/// everywhere too, so what is left is the masking-shadowing term, the samples
+/// GGX reflects below the horizon, and how much of both the multiple-scattering
+/// factor puts back.
 ///
 /// Three ways the obvious version of this measurement lies:
 ///
@@ -2665,28 +2665,36 @@ fn test_ggx_metal_is_energy_conserving_in_a_furnace() {
             (measured - expected).abs() < 0.01,
             "furnace reading for fuzz {fuzz} moved: {measured:.4} against the pinned {expected:.4}"
         );
+        // The physical criterion, separate from the pin above: a compensated
+        // conductor conserves energy, and 2% is the room the fit is allowed.
+        assert!(
+            measured > 0.98,
+            "a compensated metal at fuzz {fuzz} loses {:.1}% of the energy it is given",
+            (1. - measured) * 100.
+        );
     }
 }
 
 /// What the furnace reads per roughness. Pinned rather than bounded, so that
 /// anything which moves them shows up in a diff.
 ///
-/// These are the single-scatter energy of GGX, and nothing else: a mirror keeps
-/// all of it, and a fully rough metal keeps a third. The same quantity computed
-/// on the CPU from the BRDF's definition, by quadrature rather than by this
-/// renderer, agrees with every one of them to 0.0015 -- so what they pin is the
-/// model, not this implementation of it.
+/// Uncompensated, the same five readings were 1.0000 / 0.9942 / 0.8976 /
+/// 0.6318 / 0.3503 -- a fully rough metal kept a third of the light it was
+/// given. A CPU quadrature of the BRDF's definition agreed with every one of
+/// those to 0.0015, so that table pinned the single-scatter model rather than
+/// this implementation of it, and this one pins how much of the rest Turquin's
+/// factor puts back.
 ///
-/// The deficit is the multiple scattering a single-scatter model does not
-/// carry: light that a microfacet reflects onto another microfacet instead of
-/// out of the surface. The commit that compensates for it is the commit that
-/// moves this table to 1.
+/// `albedo = 1` is the hardest case for it, not the easiest: with f0 = 1 the
+/// factor is exactly `1 / E`, so the compensated reading is `E_true / E_fit`
+/// and the fit's error appears undiluted. A coloured metal is compensated less,
+/// by design -- light that bounces twice between microfacets is tinted twice.
 const FURNACE_EXPECTED: [(f64, f64); 5] = [
     (0., 1.0000),
-    (0.25, 0.9942),
-    (0.5, 0.8976),
-    (0.75, 0.6318),
-    (1., 0.3503),
+    (0.25, 0.9970),
+    (0.5, 0.9983),
+    (0.75, 0.9980),
+    (1., 0.9975),
 ];
 
 /// Next-event estimation now reaches a rough metal, and this is the measurement
@@ -2698,7 +2706,9 @@ const FURNACE_EXPECTED: [(f64, f64); 5] = [
 /// darker and an absolute error would have scored it *better* for being dark.
 /// Measured on this scene, at 64 spp against each model's own 1024 spp
 /// reference: the fuzz-sphere metal with no next-event estimation ran 0.886 of
-/// its own mean, and the GGX metal with it runs 0.346.
+/// its own mean, the single-scatter GGX metal with it ran 0.346, and with the
+/// multiple-scattering factor -- which brightens the rough spheres and so
+/// raises the mean the error is taken against -- it runs 0.256.
 ///
 /// The golden harness provably cannot capture this. It resizes to 100x50 before
 /// comparing, which averages the noise away -- the noisy before and the clean
@@ -2754,8 +2764,8 @@ fn test_rough_metal_converges_with_nee() {
     );
 }
 
-/// Pinned above the 0.346 measured, with room for a different driver's
+/// Pinned above the 0.256 measured, with room for a different driver's
 /// arithmetic. Well below the 0.886 the same scene scored before metal could
 /// take a shadow ray, which is the point of the bound rather than its exact
 /// value.
-const ROUGH_METAL_RMSE_BOUND: f64 = 0.45;
+const ROUGH_METAL_RMSE_BOUND: f64 = 0.35;

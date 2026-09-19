@@ -798,6 +798,51 @@ fn fresnel_schlick(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * (m2 * m2 * m);
 }
 
+// The directional albedo of the single-scatter lobe with F = 1: how much of
+// what arrives from a uniform environment at `cos_o` leaves again. Everything
+// it does not return is light a microfacet reflected onto another microfacet
+// and the single-scatter model then dropped.
+//
+// A fit, because the alternative is Kulla-Conty's precomputed table and with it
+// the question of how naga handles a large `const` array initialiser. Fitted in
+// log space -- what matters is relative error, since the factor built on it
+// divides by E -- against E computed from the BRDF's own definition by
+// quadrature. In `fuzz` rather than `alpha`: the same sixteen terms are worth
+// 1.4% against 1.8% for cos_o >= 0.4, and 3.3% against 6.8% over the whole
+// range, because in `alpha` nearly all of the variation is crowded into the
+// first quarter.
+//
+// The residual 3.3% is the last few degrees of the silhouette, where E is
+// nearly 1 everywhere except a narrow dip no low-order polynomial follows and
+// the correction is a few per cent of a sliver. What the fit is worth end to
+// end is what the furnace test reads, and a disc average cancels errors of
+// both signs: better than 0.3%.
+fn ggx_directional_albedo(cos_o: f32, alpha: f32) -> f32 {
+    let r = sqrt(alpha);
+    let m = clamp(cos_o, 0.0, 1.0);
+    let p1 = -1.152223 + m * (8.928465 + m * (-16.619661 + m * 8.678675));
+    let p2 = 3.873487 + m * (-43.813387 + m * (91.923225 + m * -50.492525));
+    let p3 = -4.397634 + m * (58.765802 + m * (-136.618743 + m * 78.573419));
+    let p4 = 1.598114 + m * (-26.063835 + m * (63.194110 + m * -37.572948));
+    // Clamped both ways: the fit overshoots 1 by a per cent near the mirror
+    // end, where the compensation should do nothing at all.
+    return clamp(exp(r * (p1 + r * (p2 + r * (p3 + r * p4)))), 0.05, 1.0);
+}
+
+// Turquin 2019, "Practical multiple scattering compensation for microfacet
+// models": one multiplicative factor returns the energy the single-scatter lobe
+// drops.
+//
+//   f_ms = f_ss * (1 + f0 * (1 / E(cos_o, alpha) - 1))
+//
+// The f0 weighting is what makes a coloured metal saturate rather than merely
+// brighten: light that bounces twice between microfacets is tinted twice. It
+// multiplies `f` alone -- the sampling density is untouched, so MIS is
+// untouched, and both estimators of a vertex get the same factor.
+fn ggx_multiscatter(f0: vec3<f32>, cos_o: f32, alpha: f32) -> vec3<f32> {
+    return vec3<f32>(1.0) + f0 * (1.0 / ggx_directional_albedo(cos_o, alpha) - 1.0);
+}
+
 // Samples a visible normal of the GGX distribution: Dupuy & Benyoub 2023,
 // "Sampling Visible GGX Normals with Spherical Caps". The same distribution as
 // Heitz 2018, with no stretched frame to build and no special case for a `wo`
@@ -1114,7 +1159,7 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         let f = fresnel_schlick(b.base_color, dot(wo_l, h));
 
         // f * cos_i, with the BRDF's own 1 / cos_i already cancelled against it.
-        e.f_cos = f * (d * g2 / (4.0 * wo_l.z));
+        e.f_cos = f * (d * g2 / (4.0 * wo_l.z)) * ggx_multiscatter(b.base_color, wo_l.z, b.alpha);
         // The VNDF sampling density, G1(wo) * D(h) / (4 cos_o), which is what
         // the MIS denominator needs: the pdf this lobe *would* have had for the
         // light's direction.
@@ -1188,7 +1233,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             // The VNDF cancellation: f * cos / pdf collapses to F * G2 / G1(wo),
             // with D, the 4 cos_o cos_i and G1 all gone.
             s.weight = fresnel_schlick(b.base_color, dot(wo_l, h))
-                * ((1.0 + lambda_o) / (1.0 + lambda_o + lambda_i));
+                * ((1.0 + lambda_o) / (1.0 + lambda_o + lambda_i))
+                * ggx_multiscatter(b.base_color, wo_l.z, b.alpha);
             s.pdf = ggx_d(h.z, b.alpha) / ((1.0 + lambda_o) * 4.0 * wo_l.z);
             s.specular = false;
             s.valid = true;
