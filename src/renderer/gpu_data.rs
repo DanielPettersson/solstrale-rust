@@ -139,6 +139,12 @@ pub struct QuadAttr {
 /// an inline leaf: primitive count in bits 30..24, offset into `prim_refs` in
 /// bits 23..0. A leaf with count 0 is the empty child of a single-leaf root and
 /// intersects nothing.
+///
+/// The two padding words are free space, not waste that has to stay: a parent
+/// index and a which-child-am-I bit fit in them at the same 64 bytes, which is
+/// what a stackless Laine-style restart trail would need. Worth knowing if the
+/// traversal stack ever shows up as scratch traffic; not a reason to rewrite
+/// the loop before it does.
 pub struct BvhNode {
     /// Left child AABB minimum
     pub left_min: [f32; 3],
