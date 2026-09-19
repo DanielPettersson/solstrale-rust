@@ -22,6 +22,8 @@ use simple_error::SimpleError;
 use wgpu::BufferUsages;
 
 pub mod gpu_data;
+#[cfg(test)]
+mod sampler_test;
 pub mod scene_flattener;
 
 ///Input to the ray tracer for how the image should be rendered
@@ -84,6 +86,32 @@ pub struct RenderConfig {
     /// its keep in the interactive viewport, where the alternative is a
     /// blurrier frame, rather than in a long offline render.
     pub variance_threshold: f32,
+    /// Whether samples are drawn from an Owen-scrambled Sobol sequence rather
+    /// than from white noise.
+    ///
+    /// Resolved into the tracing pipeline as an override constant, so switching
+    /// it off costs nothing at run time. It changes nothing about what the
+    /// converged image is -- only how many samples it takes to get there -- and
+    /// is on by default. Off is for measuring what it buys;
+    /// `sampler_convergence_sweep` is what does the measuring.
+    ///
+    /// One second-order cost, recorded in LIMITATIONS.md: low-discrepancy
+    /// samples are negatively correlated, so the Welford estimator behind
+    /// adaptive sampling overstates the variance of the mean and retires each
+    /// pixel a little later than it needs to.
+    pub low_discrepancy: bool,
+    /// Distinguishes two otherwise identical renders of the same scene.
+    ///
+    /// Feeds the initial `restart_index`, which is mixed into every pixel's
+    /// sampler seed. Equal seeds give bit-identical images; different seeds
+    /// give the same image with independent noise.
+    ///
+    /// This matters for reference renders. A converged reference that shares
+    /// its seed with the render being measured against it shares the sample
+    /// stream too -- with `low_discrepancy` on, an 8-sample render is literally
+    /// a sub-net of a 4000-sample reference -- so the error between them is
+    /// correlated and biased low. Give references a different seed.
+    pub seed: u32,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
 }
@@ -98,6 +126,8 @@ impl Default for RenderConfig {
             samples_per_batch: 4,
             min_samples_per_pixel: 32,
             variance_threshold: 0.01,
+            low_discrepancy: true,
+            seed: 0,
             post_processors: vec![],
         }
     }
@@ -578,7 +608,7 @@ impl<'a> Renderer<'a> {
             samples_per_batch: scene.render_config.samples_per_batch.max(1),
             min_samples_per_pixel: scene.render_config.min_samples_per_pixel,
             variance_threshold: scene.render_config.variance_threshold,
-            restart_index: 0,
+            restart_index: scene.render_config.seed,
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -610,7 +640,21 @@ impl<'a> Renderer<'a> {
             ],
         );
 
-        let pipeline = compute_pipeline(device, &bind_group_layout, &module, &[]);
+        // An override rather than a uniform: the sampler's backing is decided
+        // once, here, instead of branching on every draw.
+        let pipeline = compute_pipeline(
+            device,
+            &bind_group_layout,
+            &module,
+            &[(
+                "low_discrepancy",
+                if scene.render_config.low_discrepancy {
+                    1.
+                } else {
+                    0.
+                },
+            )],
+        );
 
         let size = (width * height * 16) as u64; // vec3 is 16 bytes aligned (as vec4 effectively)
 

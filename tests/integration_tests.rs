@@ -835,6 +835,25 @@ fn mean_linear_radiance(
 }
 
 /// Renders a scene and returns its raw linear pixels, before gamma.
+/// Marks a scene as the converged reference an error metric is measured
+/// against, by moving it off the seed every other render uses.
+///
+/// Without this the reference shares its sample-stream prefix with the render
+/// being measured, so the error between them is correlated and biased low. With
+/// white noise that was about 0.2% at 8 spp against 4000 and ignorable; with
+/// the low-discrepancy sampler it is structural, because an 8-sample render is
+/// literally a sub-net of the 4000-sample reference.
+fn as_reference(mut scene: Scene) -> Scene {
+    scene.render_config.seed = 1;
+    scene
+}
+
+/// Picks the sampler backing for one arm of a comparison.
+fn with_sampler(mut scene: Scene, low_discrepancy: bool) -> Scene {
+    scene.render_config.low_discrepancy = low_discrepancy;
+    scene
+}
+
 fn render_linear(
     scene: Scene,
     device: &'static wgpu::Device,
@@ -1068,6 +1087,26 @@ fn fireflies(pixels: &[[f32; 4]], width: usize, height: usize, excess: f64) -> u
     }
 
     count
+}
+
+/// [`linear_rmse`] with the worst 0.1% of pixels dropped.
+///
+/// RMSE is a mean of squares, so a single firefly dominates it: one pixel off
+/// by 40 on a 200x200 image is 0.16 of RMSE on its own, which is the whole
+/// figure at any sample count worth measuring. That makes the plain number the
+/// right one for "how wrong is this image" and the wrong one for "how well is
+/// the estimator converging on the smooth part". Read the pair. On the Cornell
+/// box the two disagree by a factor of four, because white noise's error there
+/// is mostly a handful of fireflies.
+fn trimmed_linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
+    let mut squared: Vec<f64> = a
+        .iter()
+        .zip(b.iter())
+        .map(|(p, q)| (0..3).map(|c| ((p[c] - q[c]) as f64).powi(2)).sum::<f64>())
+        .collect();
+    squared.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let keep = squared.len() * 999 / 1000;
+    (squared[..keep].iter().sum::<f64>() / (keep * 3) as f64).sqrt()
 }
 
 fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
@@ -1317,7 +1356,7 @@ fn cornell_denoise_scene_at(
 fn test_denoise_improves_low_sample_image() {
     let (device, queue) = get_wgpu_device_and_queue();
 
-    let reference = render_linear(denoise_scene(2000, None, true), device, queue);
+    let reference = render_linear(as_reference(denoise_scene(2000, None, true)), device, queue);
     let noisy = render_linear(denoise_scene(8, None, true), device, queue);
     let denoised = render_linear(denoise_scene(8, Some(1.), true), device, queue);
 
@@ -1329,13 +1368,29 @@ fn test_denoise_improves_low_sample_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
-    // 0.56 measured.
+    // Two gates, because the ratio alone is misleading here.
+    //
+    // The ratio was 0.56 against white noise and is 0.62 against the
+    // low-discrepancy sampler, and that loosening is the sampler working: the
+    // filter has less to remove because the sampler removed it first. The
+    // denominator shrank by 25% (0.375 -> 0.282) while the numerator shrank by
+    // 10% (0.195 -> 0.175), so the absolute denoised error -- the thing anyone
+    // actually looks at -- improved while the ratio got worse.
+    //
+    // The absolute assertion is what stops the next sampler change having to
+    // make that argument again.
     assert!(
-        rmse_denoised < rmse_noisy * 0.65,
-        "denoising 8 spp should cut linear RMSE against the reference by at least 35%, \
+        rmse_denoised < rmse_noisy * 0.7,
+        "denoising 8 spp should cut linear RMSE against the reference by at least 30%, \
          was {} against {}",
         rmse_denoised,
         rmse_noisy
+    );
+    // 0.175 measured.
+    assert!(
+        rmse_denoised < 0.21,
+        "denoised 8 spp should land within 0.21 linear RMSE of the reference, was {}",
+        rmse_denoised
     );
 }
 
@@ -1354,7 +1409,11 @@ fn test_denoise_improves_low_sample_image() {
 fn test_denoise_improves_specular_image() {
     let (device, queue) = get_wgpu_device_and_queue();
 
-    let reference = render_linear(specular_denoise_scene(2000, None), device, queue);
+    let reference = render_linear(
+        as_reference(specular_denoise_scene(2000, None)),
+        device,
+        queue,
+    );
     let noisy = render_linear(specular_denoise_scene(8, None), device, queue);
     let denoised = render_linear(specular_denoise_scene(8, Some(1.)), device, queue);
 
@@ -1366,15 +1425,26 @@ fn test_denoise_improves_specular_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
-    // 0.68 measured. The margin is wider than the one the diffuse scene asserts
-    // because the 2000 spp reference is itself adaptively sampled and moves a
-    // little run to run.
+    // 0.78 measured, from 0.68 against white noise, and re-baselined for the
+    // same reason as the diffuse gate above: the denominator shrank by 28%
+    // (0.115 -> 0.083) against the numerator's 21% (0.083 -> 0.065). The
+    // absolute figure is the one that improved, so it is asserted too.
+    //
+    // The margin is wider than the diffuse scene's because the 2000 spp
+    // reference is itself adaptively sampled and moves a little run to run.
     assert!(
-        rmse_denoised < rmse_noisy * 0.75,
+        rmse_denoised < rmse_noisy * 0.85,
         "denoising 8 spp of a specular scene should cut linear RMSE against the \
-         reference by at least 25%, was {} against {}",
+         reference by at least 15%, was {} against {}",
         rmse_denoised,
         rmse_noisy
+    );
+    // 0.065 measured.
+    assert!(
+        rmse_denoised < 0.078,
+        "denoised 8 spp of a specular scene should land within 0.078 linear RMSE of \
+         the reference, was {}",
+        rmse_denoised
     );
 }
 
@@ -1617,7 +1687,11 @@ fn test_denoise_is_near_identity_at_high_samples() {
 #[ignore]
 fn denoise_strength_sweep() {
     let (device, queue) = get_wgpu_device_and_queue();
-    let reference = render_linear(denoise_scene(4000, None, false), device, queue);
+    let reference = render_linear(
+        as_reference(denoise_scene(4000, None, false)),
+        device,
+        queue,
+    );
 
     for adaptive in [false, true] {
         for spp in [8u32, 64, 2000] {
@@ -1662,7 +1736,11 @@ fn denoise_strength_sweep() {
 #[ignore]
 fn specular_denoise_sweep() {
     let (device, queue) = get_wgpu_device_and_queue();
-    let reference = render_linear(specular_denoise_scene(4000, None), device, queue);
+    let reference = render_linear(
+        as_reference(specular_denoise_scene(4000, None)),
+        device,
+        queue,
+    );
 
     for spp in [8u32, 32, 64, 200, 800] {
         let plain = render_linear(specular_denoise_scene(spp, None), device, queue);
@@ -1930,6 +2008,78 @@ fn cornell_visual_grid() {
     }
 }
 
+/// Diagnostic, not a gate: what the low-discrepancy sampler buys, as linear
+/// RMSE against a converged reference, on all three scenes across sample
+/// counts. This is the measurement the sampler was landed on, and re-running it
+/// is how to re-judge it.
+/// `cargo test sampler_convergence_sweep -- --ignored --nocapture`
+///
+/// Adaptive sampling is off in every arm. With it on, the two arms spend
+/// different numbers of samples -- low-discrepancy samples are negatively
+/// correlated, so Welford's marginal variance overstates the variance of the
+/// mean and retires each pixel later -- and the comparison stops meaning
+/// anything.
+///
+/// RMSE rather than `grain`, deliberately. `grain` is reference-free and a 3x3
+/// high-pass, so it cannot tell "less error" from "error moved to a different
+/// spatial frequency", and it would under-report a technique whose whole effect
+/// is on the smooth part of the integrand. RMSE's usual objection -- that it
+/// rewards blur at a low sample count -- does not apply, because nothing here
+/// blurs.
+///
+/// Every reference is rendered at a different seed from the arms measured
+/// against it; see [`as_reference`] for why that stops mattering the moment the
+/// sampler is low-discrepancy.
+#[test]
+#[ignore]
+fn sampler_convergence_sweep() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    /// A scene at a sample count, with a sampler picked.
+    type Arm = fn(u32, bool) -> Scene;
+
+    let scenes: [(&str, Arm); 3] = [
+        ("test_scene", |spp, ld| {
+            with_sampler(denoise_scene(spp, None, false), ld)
+        }),
+        ("specular", |spp, ld| {
+            let mut scene = specular_denoise_scene(spp, None);
+            scene.render_config.min_samples_per_pixel = u32::MAX;
+            with_sampler(scene, ld)
+        }),
+        ("cornell", |spp, ld| {
+            with_sampler(cornell_denoise_scene(spp, None), ld)
+        }),
+    ];
+
+    for (name, scene_of) in scenes {
+        let reference = render_linear(as_reference(scene_of(4000, true)), device, queue);
+        for spp in [8u32, 32, 64, 256] {
+            let white = render_linear(scene_of(spp, false), device, queue);
+            let sobol = render_linear(scene_of(spp, true), device, queue);
+            let (w, wt) = (
+                linear_rmse(&white, &reference),
+                trimmed_linear_rmse(&white, &reference),
+            );
+            let (s, st) = (
+                linear_rmse(&sobol, &reference),
+                trimmed_linear_rmse(&sobol, &reference),
+            );
+            println!(
+                "{:<10} spp={:<4} rmse {:.5} -> {:.5} ({:+.0}%)   trimmed {:.5} -> {:.5} ({:+.0}%)",
+                name,
+                spp,
+                w,
+                s,
+                (s / w - 1.) * 100.,
+                wt,
+                st,
+                (st / wt - 1.) * 100.
+            );
+        }
+    }
+}
+
 /// Diagnostic, not a gate: what the denoiser leaves on screen, across the
 /// sample-count and strength grid. This is how `FULL_STRENGTH_GRAIN` in
 /// `post/denoise.rs` was chosen, and re-running it is how to re-choose it.
@@ -1956,7 +2106,11 @@ fn denoise_display_sweep() {
     let (device, queue) = get_wgpu_device_and_queue();
     let (width, height) = (200, 200);
 
-    let reference = render_linear(cornell_denoise_scene(4000, None), device, queue);
+    let reference = render_linear(
+        as_reference(cornell_denoise_scene(4000, None)),
+        device,
+        queue,
+    );
     println!(
         "detail floor (4000 spp, no denoiser): {:.3} cv",
         displayed_grain(&reference, width, height)
