@@ -147,6 +147,32 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   `adaptive_sampling/forced_off` and `render` (800x600, 64 spp) both moved
   within noise — so this is the skip heuristic no longer being fed an
   artificially quiet signal, not the shader doing more work per sample.
+- **Welford under-reads the low-discrepancy sampler, and two things believe
+  it.** `M2` estimates the *marginal* per-sample variance, and both consumers
+  divide it by `n` to get the variance of the mean. That division assumes the
+  samples are independent. Owen-scrambled Sobol samples are negatively
+  correlated by construction -- that is the entire point of them -- so the true
+  variance of the mean sits below `var/n` while the estimator still reports
+  `var/n`. Every pixel therefore looks less converged than it is, so adaptive
+  sampling retires each one later, and the denoiser is handed an overstated
+  variance and filters a little harder than the residue warrants -- which is why
+  `test_denoise_improves_low_sample_image`'s ratio loosened by more than the raw
+  RMSE improved.
+
+  Smaller than it sounds on the bench, and worth recording as such rather than
+  as the regression it was expected to be: the sampler costs
+  `adaptive_sampling/adaptive` +2.3% (1.855 s -> 1.898 s) against
+  `adaptive_sampling/forced_off`'s +2.0%, so only 0.3 percentage points of that
+  is the estimator being misled. Adaptive sampling still wins on that scene,
+  just by 0.42% instead of 0.66% -- it was never winning much there, which is
+  also why the effect has so little room to show. Expect a scene with large
+  genuinely converged regions to pay more.
+
+  Both consumers are accepted as they are: the sampler's win is far larger than
+  what this costs back. The honest fix -- splitting the batch into half-streams
+  and estimating the variance of the mean directly -- touches Welford, adaptive
+  sampling and the denoiser's variance input at once, and is a change of its
+  own.
 - **Dielectrics block NEE shadow rays.** Light through glass is found only by
   BSDF-sampled paths, at full MIS weight. Unbiased, but caustics stay noisy —
   the standard trade-off of naive NEE.
@@ -222,8 +248,8 @@ Recorded so they aren't reconsidered without new information.
   for a better reason.
 
   Path state that would have to cross global memory between stages is origin 12
-  + direction 12 + throughput 12 + rng 4 + flags 4 + `prev_bsdf_pdf` 4 +
-  `path_length` 4 + the two accumulators 24, about **80 bytes**. At 800x600 each
+  + direction 12 + throughput 12 + sampler 8 + flags 4 + `prev_bsdf_pdf` 4 +
+  `path_length` 4 + the two accumulators 24, about **84 bytes**. At 800x600 each
   stage reads and writes it: 2 x 480000 x 80 B = 76.8 MB per stage per bounce.
   At roughly 4 bounces and 2 stages per bounce that is **~614 MB per sample**,
   which at the RX 5700 XT's 448 GB/s is **1.37 ms per sample** -- against a
@@ -293,6 +319,21 @@ Recorded so they aren't reconsidered without new information.
   bias. The firefly budget was at 129 against a gate of 946, so it was buying
   margin that was already there with accuracy that was not. Revisit only if a
   scene turns up where fireflies survive at a sample count anyone renders at.
+
+- **Screen-space blue-noise error distribution (Heitz-Belcour).** The obvious
+  companion to the low-discrepancy sampler, and it should wait. Three reasons,
+  in order of weight. It does not reduce per-pixel variance at all; it
+  reorganises where the error sits spatially. This repo's metrics would punish
+  it: `grain` and `displayed_grain` are 3x3 high-passes and blue noise by
+  definition moves error *into* the high frequencies, so a genuine improvement
+  would read as a 20-50% regression against the live gates in
+  `test_denoise_grain_does_not_grow_with_samples` and
+  `test_denoised_grain_keeps_falling_with_samples`. And it needs precomputed
+  scrambling and ranking tiles, which `Cargo.toml`'s `exclude = ["resources/*"]`
+  would keep from reaching crate users. Revisit alongside a gate on the RMSE of
+  the *denoised* image, which is the metric that would see the win -- at which
+  point the cheap version is a per-pixel blue-noise offset into the Owen
+  scramble seed, about five lines.
 
 ---
 
@@ -451,3 +492,80 @@ left.
 
 `test_denoise_is_near_identity_at_high_samples` was restated rather than retuned;
 see the note under *Known limitations* above.
+
+### The sampler
+
+Done: every budgeted draw comes from an Owen-scrambled Sobol sequence
+(`ray_trace.wgsl`, `sampler_2d`), hash-based and table-free after Burley 2020, so
+there are no direction-number tables and `sobol_0` is `reverseBits`. It is behind
+the `low_discrepancy` pipeline override, which is what `sampler_convergence_sweep`
+flips to produce the table below.
+
+Linear RMSE against a 4000 spp reference, adaptive sampling off in every arm,
+white noise → Owen-scrambled Sobol. The `trimmed` column drops the worst 0.1% of
+pixels, and is there because the plain figure on the Cornell box is four fifths
+fireflies:
+
+| scene | spp | rmse | trimmed |
+|---|---|---|---|
+| test scene | 8 | −25% | −24% |
+| test scene | 64 | −39% | −39% |
+| test scene | 256 | −39% | −40% |
+| specular | 8 | −28% | −23% |
+| specular | 256 | −46% | −40% |
+| Cornell | 8 | −60% | −16% |
+| Cornell | 256 | −75% | −42% |
+
+Cost: `render` (800x600, 64 spp) 191.97 ms -> 199.24 ms, **+4.2%**. That figure
+is entirely down to `sobol_1` not being a loop. The Antonov-Saleev recurrence
+over the set bits of a *scrambled* index runs ~16 iterations every draw and put
+the same benchmark at **+19%**; the five-layer closed form it was replaced with
+(Pascal mod 2 plus Lucas, see the function) brought it back inside budget. The
+fallback that was budgeted for and turned out not to be needed was an
+`LD_PAIR_LIMIT` -- Sobol for the first few pairs, hashing for the deeper
+bounces, which are the ones low-discrepancy sampling helps least.
+
+A 39% RMSE reduction is 2.7x fewer samples for the same error. None of this beats
+O(N^-0.5) asymptotically and it is not meant to — padded Sobol reverts to that
+rate once discontinuities dominate, which for Cornell's shadow boundaries is
+early.
+
+**The expensive finding: scrambling the outputs without shuffling the index does
+nothing, and it fails silently.** Owen-scrambling each pair's two dimensions with
+its own seed is the obvious reading of "padding", and it is not enough. Work out
+the top bit of a scrambled dimension and it comes to the *low bit of the sample
+index* XOR a per-dimension constant: every dimension of every pair crosses into
+its other half on the same sample, however independent the seeds are. The pads
+walk in lockstep, so the joint distribution across pairs never equidistributes
+and the estimator stops converging. Measured, linear RMSE on the test scene
+flattened at 0.17 from 64 spp upward instead of halving per 4x samples, while at
+8 spp it still looked like a 17% win — the regime a quick check would have looked
+at. The fix is one line, `nested_uniform_scramble` applied to the sample index
+before the sequence is generated, and it is safe for the same reason the output
+scramble is: a nested permutation maps the prefix `0..2^m` onto a 2^m-*aligned
+contiguous block* of the sequence, and every aligned block of a (0,2)-sequence is
+a (0,m,2)-net exactly as a prefix is. No sample count has to be known up front,
+which is the requirement adaptive sampling imposes.
+
+`renderer/sampler_test.rs` is what would have caught it in milliseconds, and now
+does: it mirrors the three shader functions on the CPU and checks the scramble is
+a bijection, that it is nested, that the first 2^k points form a (0,k,2)-net for
+k = 1..10 before and after scrambling, and that two pads agree on a top bit about
+half the time rather than always.
+
+**Why Owen and not stratification.** Plain stratified or jittered sampling cannot
+be used here at all. Adaptive sampling retires each pixel at a different,
+unpredictable `n`, and stratification needs N up front: a jittered point is
+uniform only *within* its stratum, so evaluating a partial set of strata is
+biased, not merely noisier. Owen scrambling makes every individual point
+marginally uniform, so a truncated prefix stays unbiased. That is not a nicety
+here, it is the thing that makes low-discrepancy sampling compatible with this
+renderer.
+
+**Seeds.** `RenderConfig::seed` exists because every reference render in the
+sweeps used to share its exact sample-stream prefix with the render measured
+against it, making the RMSE correlated and biased low. With white noise that was
+about 0.2% at 8 spp against 4000 and ignorable. With this sampler it is
+structural — an 8-sample render is literally a sub-net of the 4000-sample
+reference — and it flattered every arm by roughly 10% before the references were
+moved to `seed: 1`.

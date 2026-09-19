@@ -138,6 +138,25 @@ const PI = 3.14159265359;
 const RAY_EPS = 0.001;
 const TWO_PI = 6.28318530718;
 
+// Dimension-pair budget for the sampler, which is indexed in pairs because its
+// Sobol backing is 2D. Pixel jitter, then the lens, then three pairs per
+// bounce: 2 + 3 * max_depth, which is 32 pairs at the default depth of 10.
+const PAIR_PIXEL_JITTER = 0u;
+const PAIR_LENS = 1u;
+const PAIR_BOUNCE_BASE = 2u;
+const PAIRS_PER_BOUNCE = 3u;
+// Offsets within a bounce's three pairs. The point sampled on the light, the
+// BSDF direction, and a shared pair whose .x carries the bounce's one scalar
+// draw -- light selection on a diffuse surface, the Fresnel coin on a
+// dielectric, the fuzz radius on metal, which are mutually exclusive -- and
+// whose .y carries Russian roulette.
+const PAIR_LIGHT_POINT = 0u;
+const PAIR_BSDF = 1u;
+const PAIR_SCALARS = 2u;
+
+// Keeps sampler_extra's stream clear of the budgeted pairs'.
+const EXTRA_TAG_SALT = 0x51633e2du;
+
 // Path depth at which Russian roulette starts. Below it every path survives,
 // so the cheap early bounces that carry most of the energy are never cut.
 const RR_MIN_DEPTH = 3u;
@@ -168,11 +187,12 @@ struct RenderConfig {
     min_samples_per_pixel: u32,
     // Relative standard-error threshold below which a pixel is converged.
     variance_threshold: f32,
-    // Distinguishes successive accumulation restarts. Dragging the camera
-    // restarts the accumulation every frame, and without this the seed in
-    // trace_sample is a pure function of pixel and sample index, so every
-    // frame replays an identical sample sequence -- which reads as a static
-    // grain pinned to the screen rather than as noise.
+    // Distinguishes successive accumulation restarts, and carries
+    // RenderConfig::seed as its initial value. Dragging the camera restarts the
+    // accumulation every frame, and without this the seed in trace_sample is a
+    // pure function of pixel and sample index, so every frame replays an
+    // identical sample sequence -- which reads as a static grain pinned to the
+    // screen rather than as noise.
     //
     // Scalar, not a vec3: a vec3 here would align to 16 and push the struct
     // to 64 bytes, which no longer matches the Rust mirror.
@@ -269,15 +289,183 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
 
+// Selects the sampler backing: 1 draws from an Owen-scrambled Sobol sequence,
+// 0 from white noise. An override rather than a uniform because an override is
+// resolved at pipeline creation, where a uniform would cost a branch on every
+// single draw.
+override low_discrepancy: f32 = 1.0;
+
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
     return (word >> 22u) ^ word;
 }
 
-fn rand_float(state: ptr<function, u32>) -> f32 {
-    *state = pcg_hash(*state);
-    return f32(*state) / 4294967296.0;
+// Combining seed terms with a bare XOR collides. The seed used to be
+// `index ^ (sample_index * A) ^ (restart_index * B)`, which is not injective in
+// the triple: at 1920x1080 and 4096 samples that form gives pixel (0, 0) at
+// sample 0 and pixel (21, 626) at sample 1597 the identical seed, and two
+// thousand more such pairs. Those two pixels then trace identical relative
+// paths, which reads as low-frequency blotching -- invisible to `grain`, which
+// is a 3x3 high-pass. Hashing one side before the XOR removes the structure.
+fn hash_combine(a: u32, b: u32) -> u32 {
+    return pcg_hash(a ^ pcg_hash(b));
+}
+
+// 24 bits rather than 32: f32(u32) rounds to nearest, so the top of the range
+// converts to exactly 1.0 and a draw used to index an array would run off its
+// end. Taking the high bits keeps the stratification, which lives there.
+fn unit_float(x: u32) -> f32 {
+    return f32(x >> 8u) * 5.9604645e-8;
+}
+
+// ---------------------------------------------------------------------------
+// Sampler
+//
+// Owen-scrambled Sobol, hash-based and table-free, after Burley 2020.
+//
+// Why Owen and not stratification: adaptive sampling retires each pixel at its
+// own unpredictable n, and stratification needs N up front -- a jittered point
+// is uniform only *within* its stratum, so a partial set of strata is biased,
+// not merely noisier. Owen scrambling makes every individual point marginally
+// uniform, so a truncated prefix stays unbiased. That is what makes
+// low-discrepancy sampling usable here at all, rather than a nicety.
+//
+// Everything down to sobol_1 is mirrored in Rust in renderer/sampler_test.rs,
+// which checks the bijection and the net property on the CPU in milliseconds.
+// Its constants are transcribed by hand, so it also pins them against this
+// file's text -- that drift is the one thing it could not otherwise see.
+
+// Laine-Karras permutation. Every multiplier is even, which makes each
+// `v ^= v * C` triangular with a unit diagonal and so a bijection on u32 -- the
+// property the whole scramble rests on, and the first thing to check if a
+// golden image ever fails.
+fn laine_karras_permutation(x: u32, seed: u32) -> u32 {
+    var v = x + seed;
+    v ^= v * 0x6c50b47cu;
+    v ^= v * 0xb82f1e52u;
+    v ^= v * 0xc7afe638u;
+    v ^= v * 0x8d22f6e6u;
+    return v;
+}
+
+// Hash-based Owen scramble. Bit k of the result depends only on bits 31..k of
+// the input, which is what makes it a nested permutation of the unit interval
+// rather than an arbitrary shuffle, and therefore what lets it preserve the net
+// property of the sequence it is applied to.
+fn nested_uniform_scramble(x: u32, seed: u32) -> u32 {
+    return reverseBits(laine_karras_permutation(reverseBits(x), seed));
+}
+
+// Sobol dimension 0 is plain van der Corput.
+fn sobol_0(index: u32) -> u32 {
+    return reverseBits(index);
+}
+
+// Sobol dimension 1. The Antonov-Saleev recurrence gives direction numbers
+// v_0 = 1 << 31 and v_{i+1} = v_i ^ (v_i >> 1), XORed for every set bit of the
+// index -- a loop over ~16 set bits, which on a scrambled index is every draw's
+// dominant cost.
+//
+// The loop is not needed. Those direction numbers are the rows of Pascal's
+// triangle mod 2, so by Lucas' theorem bit j of the result is the parity of the
+// set bits of the index that are supersets of j. That is a superset zeta
+// transform over a 5-bit index, which is five shift-and-XOR layers on the word
+// itself. Sixteen branchless operations against roughly eighty, verified
+// exhaustively against the recurrence in renderer/sampler_test.rs.
+fn sobol_1(index: u32) -> u32 {
+    var g = index;
+    g ^= (g >> 1u) & 0x55555555u;
+    g ^= (g >> 2u) & 0x33333333u;
+    g ^= (g >> 4u) & 0x0f0f0f0fu;
+    g ^= (g >> 8u) & 0x00ff00ffu;
+    g ^= (g >> 16u) & 0x0000ffffu;
+    // The transform indexes bits from the top, the sequence from the bottom.
+    return reverseBits(g);
+}
+
+// Everything that identifies a sample, and nothing else.
+//
+// There is deliberately no running counter: a draw is a pure function of its
+// dimension, so a branch that skips a draw -- total internal reflection passing
+// over the Fresnel coin, Russian roulette not yet armed -- cannot shift the
+// dimensions of the draws after it.
+//
+// The invariant, which is not visible from the code: the seed is a pure
+// function of (pixel, sample index, restart index), and the sequence of sample
+// indices a pixel traces is the prefix 0..n *regardless of how the CPU groups
+// them into batches*. That is what keeps the stream independent of
+// `samples_per_batch`, therefore of GPU timing, therefore of which arm of a
+// denoise test is running.
+struct Sampler {
+    pixel_seed: u32,
+    index: u32,
+}
+
+fn sampler_new(pixel_index: u32, sample_index: u32) -> Sampler {
+    return Sampler(hash_combine(pixel_index, config.restart_index), sample_index);
+}
+
+// One 2D draw. `pair` indexes dimension *pairs*, not dimensions.
+//
+// Each pair gets its own scramble seed, so the budget is N independent 2D
+// (0,2)-sequences rather than one 2N-dimensional Sobol sequence. That padding
+// is deliberate: a high-dimensional sequence's later dimensions are poorly
+// stratified at any sample count a renderer reaches, and the integrand's smooth
+// low-dimensional structure lives *within* each pair -- a lens disc, a light's
+// surface, a cosine hemisphere -- not across them.
+fn sampler_2d(s: Sampler, pair: u32) -> vec2<f32> {
+    let seed = hash_combine(s.pixel_seed, pair);
+    if (low_discrepancy != 0.0) {
+        // The sample index is shuffled per pair before the sequence is
+        // generated, not merely scrambled after.
+        //
+        // Scrambling the outputs alone does not decorrelate the pairs at all.
+        // The top bit of a scrambled dimension works out to the low bit of the
+        // sample index XOR a per-dimension constant, so every dimension of
+        // every pair crosses into its other half on the same sample: the pads
+        // walk in lockstep, and the error stops falling instead of converging.
+        // Measured on the test scene, linear RMSE against a converged reference
+        // flattened at 0.17 from 64 spp upward rather than halving per 4x --
+        // while still looking like a win at 8 spp.
+        //
+        // The shuffle is safe here for the same reason Owen scrambling is. It
+        // is a nested permutation, so it maps any prefix of 2^m samples onto a
+        // 2^m-aligned *contiguous block* of the sequence -- and every aligned
+        // block of a (0,2)-sequence is a (0,m,2)-net, exactly as a prefix is.
+        // No sample count has to be known up front, which is what adaptive
+        // sampling requires.
+        let i = nested_uniform_scramble(s.index, seed);
+        let seed_x = pcg_hash(seed);
+        let seed_y = pcg_hash(seed_x);
+        return vec2<f32>(
+            unit_float(nested_uniform_scramble(sobol_0(i), seed_x)),
+            unit_float(nested_uniform_scramble(sobol_1(i), seed_y)),
+        );
+    }
+    let x = hash_combine(seed, s.index);
+    return vec2<f32>(unit_float(x), unit_float(pcg_hash(x)));
+}
+
+// The two dimensions of a pair, for the slots that want a single scalar.
+fn dim_x(pair: u32) -> u32 { return pair * 2u; }
+fn dim_y(pair: u32) -> u32 { return pair * 2u + 1u; }
+
+// One 1D draw. `dim` indexes dimensions, so `dim_x(p)` and `dim_y(p)` are the
+// two halves of pair p.
+fn sampler_1d(s: Sampler, dim: u32) -> f32 {
+    let p = sampler_2d(s, dim >> 1u);
+    if ((dim & 1u) == 0u) {
+        return p.x;
+    }
+    return p.y;
+}
+
+// A draw outside the budget, decorrelated from every budgeted dimension and
+// from every other tag. For the draws whose *count* is data-dependent and which
+// therefore cannot be given a fixed slot without reserving their worst case.
+fn sampler_extra(s: Sampler, tag: u32) -> f32 {
+    return unit_float(hash_combine(hash_combine(s.pixel_seed, s.index), tag ^ EXTRA_TAG_SALT));
 }
 
 fn ray_at(r: Ray, t: f32) -> vec3<f32> {
@@ -297,23 +485,22 @@ fn luminance(c: vec3<f32>) -> f32 {
 // wavefront waits for its unluckiest neighbour, so a loop with a ~48% per-
 // iteration rejection rate costs far more than the arithmetic below.
 
-fn random_unit_vector(state: ptr<function, u32>) -> vec3<f32> {
-    let z = 1.0 - 2.0 * rand_float(state);
+fn random_unit_vector(u: vec2<f32>) -> vec3<f32> {
+    let z = 1.0 - 2.0 * u.x;
     let r = sqrt(max(0.0, 1.0 - z * z));
-    let phi = TWO_PI * rand_float(state);
+    let phi = TWO_PI * u.y;
     return vec3<f32>(r * cos(phi), r * sin(phi), z);
 }
 
-fn random_in_unit_sphere(state: ptr<function, u32>) -> vec3<f32> {
+fn random_in_unit_sphere(u: vec2<f32>, radius_u: f32) -> vec3<f32> {
     // cbrt of a uniform variate makes the radius uniform by volume.
-    let dir = random_unit_vector(state);
-    return dir * pow(rand_float(state), 1.0 / 3.0);
+    return random_unit_vector(u) * pow(radius_u, 1.0 / 3.0);
 }
 
-fn random_in_unit_disk(state: ptr<function, u32>) -> vec3<f32> {
+fn random_in_unit_disk(u: vec2<f32>) -> vec3<f32> {
     // sqrt of a uniform variate makes the radius uniform by area.
-    let r = sqrt(rand_float(state));
-    let phi = TWO_PI * rand_float(state);
+    let r = sqrt(u.x);
+    let phi = TWO_PI * u.y;
     return vec3<f32>(r * cos(phi), r * sin(phi), 0.0);
 }
 
@@ -341,9 +528,9 @@ fn onb_local(onb: ONB, a: vec3<f32>) -> vec3<f32> {
     return a.x * onb.u + a.y * onb.v + a.z * onb.w;
 }
 
-fn random_cosine_direction(state: ptr<function, u32>) -> vec3<f32> {
-    let r1 = rand_float(state);
-    let r2 = rand_float(state);
+fn random_cosine_direction(u: vec2<f32>) -> vec3<f32> {
+    let r1 = u.x;
+    let r2 = u.y;
 
     let phi = 2.0 * 3.14159265359 * r1;
     let x = cos(phi) * sqrt(r2);
@@ -353,9 +540,9 @@ fn random_cosine_direction(state: ptr<function, u32>) -> vec3<f32> {
     return vec3<f32>(x, y, z);
 }
 
-fn random_to_sphere(radius: f32, distance_squared: f32, state: ptr<function, u32>) -> vec3<f32> {
-    let r1 = rand_float(state);
-    let r2 = rand_float(state);
+fn random_to_sphere(radius: f32, distance_squared: f32, u: vec2<f32>) -> vec3<f32> {
+    let r1 = u.x;
+    let r2 = u.y;
     let z = 1.0 + r2 * (sqrt(abs(1.0 - radius * radius / distance_squared)) - 1.0);
 
     let phi = 2.0 * 3.14159265359 * r1;
@@ -366,9 +553,9 @@ fn random_to_sphere(radius: f32, distance_squared: f32, state: ptr<function, u32
     return vec3<f32>(x, y, z);
 }
 
-fn triangle_random_direction(t: TrianglePos, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
-    var a = rand_float(state);
-    var b = rand_float(state);
+fn triangle_random_direction(t: TrianglePos, origin: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
+    var a = u.x;
+    var b = u.y;
     if (a + b > 1.0) {
         a = 1.0 - a;
         b = 1.0 - b;
@@ -377,17 +564,17 @@ fn triangle_random_direction(t: TrianglePos, origin: vec3<f32>, state: ptr<funct
     return p - origin;
 }
 
-fn quad_random_direction(q: QuadPos, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
-    let p = q.Q + q.u * rand_float(state) + q.v * rand_float(state);
+fn quad_random_direction(q: QuadPos, origin: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
+    let p = q.Q + q.u * u.x + q.v * u.y;
     return p - origin;
 }
 
-fn sphere_random_direction(s: Sphere, origin: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
+fn sphere_random_direction(s: Sphere, origin: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
     let center = s.center_and_radius.xyz;
     let radius = s.center_and_radius.w;
     let direction = center - origin;
     let uvw = onb_from_w(direction);
-    return onb_local(uvw, random_to_sphere(radius, dot(direction, direction), state));
+    return onb_local(uvw, random_to_sphere(radius, dot(direction, direction), u));
 }
 
 // Evaluates the mixture PDF's light term.
@@ -450,7 +637,9 @@ struct LightSample {
     valid: bool,
 }
 
-fn sample_light(origin: vec3<f32>, state: ptr<function, u32>) -> LightSample {
+// `pick` selects the light, `u` the point on it. Two slots rather than one
+// stream, so a scene with one light draws the same pair as a scene with ten.
+fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     var ls: LightSample;
     ls.direction = vec3<f32>(0.0, 1.0, 0.0);
     ls.distance = 0.0;
@@ -460,16 +649,16 @@ fn sample_light(origin: vec3<f32>, state: ptr<function, u32>) -> LightSample {
 
     if (config.light_count == 0u) { return ls; }
 
-    let idx = min(u32(rand_float(state) * f32(config.light_count)), config.light_count - 1u);
+    let idx = min(u32(pick * f32(config.light_count)), config.light_count - 1u);
     let light = lights[idx];
 
     var to_light = vec3<f32>(0.0);
     if (light.prim_type == 0u) {
-        to_light = sphere_random_direction(spheres[light.prim_index], origin, state);
+        to_light = sphere_random_direction(spheres[light.prim_index], origin, u);
     } else if (light.prim_type == 1u) {
-        to_light = triangle_random_direction(triangle_pos[light.prim_index], origin, state);
+        to_light = triangle_random_direction(triangle_pos[light.prim_index], origin, u);
     } else {
-        to_light = quad_random_direction(quad_pos[light.prim_index], origin, state);
+        to_light = quad_random_direction(quad_pos[light.prim_index], origin, u);
     }
 
     let len_sq = dot(to_light, to_light);
@@ -617,12 +806,17 @@ struct Surface {
     mat_type: u32,
 }
 
-fn resolve_surface(rec: HitRecord, state: ptr<function, u32>) -> Surface {
+// The blend walk nests to a data-dependent depth, so its coin flips go to
+// `sampler_extra` and are deliberately left out of the pair budget: a blend
+// coin is a discrete material choice whose stratification buys nothing
+// measurable, and reserving ten pairs per bounce for it would cost more in
+// decorrelation than it returns.
+fn resolve_surface(rec: HitRecord, smp: Sampler, depth: u32) -> Surface {
     var mat_idx = rec.material_index;
     for (var i = 0u; i < 10u; i++) {
         let material = materials[mat_idx];
         if (material.mat_type == MAT_BLEND) {
-            if (rand_float(state) > material.blend_factor) {
+            if (sampler_extra(smp, depth * 16u + i) > material.blend_factor) {
                 mat_idx = material.blend_indices.x;
             } else {
                 mat_idx = material.blend_indices.y;
@@ -640,8 +834,10 @@ fn resolve_surface(rec: HitRecord, state: ptr<function, u32>) -> Surface {
 // choice would make neighbouring pixels disagree about what surface they are
 // looking at, which is the one thing an edge stop cannot survive.
 //
-// Deliberately not shared with resolve_surface: that walk draws one rand_float
-// per nesting level, and the sample stream has to stay bit-identical.
+// Deliberately not shared with resolve_surface, even though the sampler no
+// longer makes that a matter of keeping a stream bit-identical: trace_guide
+// genuinely wants the dominant branch, because a stochastic one would make
+// neighbouring pixels disagree about the surface they are looking at.
 fn resolve_material_index_dominant(start: u32) -> u32 {
     var mat_idx = start;
     for (var i = 0u; i < 10u; i++) {
@@ -1223,16 +1419,15 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
 // they skip NEE and the emitter they reach is taken at full weight.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * config.width + pixel.x;
-    var rng_state = pcg_hash(
-        index ^ (sample_index * 0x9E3779B9u) ^ (config.restart_index * 0x85EBCA6Bu)
-    );
+    let smp = sampler_new(index, sample_index);
 
-    let u = (f32(pixel.x) + rand_float(&rng_state)) / f32(config.width);
-    let v = 1.0 - (f32(pixel.y) + rand_float(&rng_state)) / f32(config.height);
+    let jitter = sampler_2d(smp, PAIR_PIXEL_JITTER);
+    let u = (f32(pixel.x) + jitter.x) / f32(config.width);
+    let v = 1.0 - (f32(pixel.y) + jitter.y) / f32(config.height);
 
     var offset = vec3<f32>(0.0);
     if (camera.lens_radius > 0.0) {
-        let rd = random_in_unit_disk(&rng_state) * camera.lens_radius;
+        let rd = random_in_unit_disk(sampler_2d(smp, PAIR_LENS)) * camera.lens_radius;
         offset = camera.u * rd.x + camera.v * rd.y;
     }
 
@@ -1251,6 +1446,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     var prev_bsdf_pdf = 0.0;
 
     for (var depth = 0u; depth < config.max_depth; depth++) {
+        // This bounce's three pairs. Fixed slots, so a bounce that skips a draw
+        // leaves a gap rather than shifting everything after it.
+        let bounce_pair = PAIR_BOUNCE_BASE + PAIRS_PER_BOUNCE * depth;
+        let scalars = bounce_pair + PAIR_SCALARS;
+
         var hit_ref: HitRef;
         if (!world_hit(r, RAY_EPS, 10000.0, &hit_ref)) {
             add_contribution(&direct, &indirect, depth, config.background_color * throughput);
@@ -1258,7 +1458,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         }
 
         let rec = resolve_hit(r, hit_ref);
-        let surface = resolve_surface(rec, &rng_state);
+        let surface = resolve_surface(rec, smp, depth);
         path_length += rec.t;
 
         if (surface.mat_type == MAT_DIFFUSE_LIGHT) {
@@ -1283,7 +1483,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
 
         if (surface.mat_type == MAT_LAMBERTIAN) {
             // --- Direct lighting (next-event estimation) ---
-            let ls = sample_light(rec.p, &rng_state);
+            let ls = sample_light(
+                rec.p,
+                sampler_1d(smp, dim_x(scalars)),
+                sampler_2d(smp, bounce_pair + PAIR_LIGHT_POINT),
+            );
             let cos_light = dot(surface.normal, ls.direction);
             // Not redundant with the shading test: an interpolated normal near
             // a silhouette can face a light the facet faces away from, and that
@@ -1312,7 +1516,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
 
             // --- BSDF continuation ---
             let uvw = onb_from_w(surface.normal);
-            let direction = onb_local(uvw, random_cosine_direction(&rng_state));
+            let direction = onb_local(uvw, random_cosine_direction(sampler_2d(smp, bounce_pair + PAIR_BSDF)));
             let cos_theta = dot(surface.normal, direction);
             if (cos_theta <= 0.0) { break; }
             // Cosine sampling about the shading normal can aim below the
@@ -1329,7 +1533,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             r = Ray(rec.p, normalize(direction));
         } else if (surface.mat_type == MAT_METAL) {
             let reflected = reflect(normalize(r.direction), surface.normal);
-            let direction = reflected + surface.fuzz * random_in_unit_sphere(&rng_state);
+            let fuzz_offset = random_in_unit_sphere(
+                sampler_2d(smp, bounce_pair + PAIR_BSDF),
+                sampler_1d(smp, dim_x(scalars)),
+            );
+            let direction = reflected + surface.fuzz * fuzz_offset;
             if (dot(direction, surface.normal) <= 0.0) { break; }
 
             throughput *= surface.albedo;
@@ -1346,8 +1554,10 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 
             var direction: vec3<f32>;
+            // Short-circuit: total internal reflection never makes the draw,
+            // and because the slot is fixed nothing after it moves.
             if (refraction_ratio * sin_theta > 1.0
-                || reflectance(cos_theta, refraction_ratio) > rand_float(&rng_state)) {
+                || reflectance(cos_theta, refraction_ratio) > sampler_1d(smp, dim_x(scalars))) {
                 direction = reflect(unit_direction, surface.normal);
             } else {
                 direction = refract(unit_direction, surface.normal, refraction_ratio);
@@ -1369,7 +1579,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         // the average path length.
         if (depth >= RR_MIN_DEPTH) {
             let survival = clamp(max_throughput, RR_MIN_SURVIVAL, 1.0);
-            if (rand_float(&rng_state) > survival) {
+            if (sampler_1d(smp, dim_y(scalars)) > survival) {
                 break;
             }
             throughput /= survival;
