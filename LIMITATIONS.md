@@ -569,3 +569,88 @@ about 0.2% at 8 spp against 4000 and ignorable. With this sampler it is
 structural — an 8-sample render is literally a sub-net of the 4000-sample
 reference — and it flattered every arm by roughly 10% before the references were
 moved to `seed: 1`.
+
+### GPU timing and occupancy
+
+Done: `util/gpu_timing.rs` brackets every compute pass in a pair of timestamp
+queries, behind `SOLSTRALE_GPU_TIMING` and behind a feature check, so the
+default path allocates nothing and encodes nothing. Three ways to read it: a
+per-dispatch line on stderr, the `gpu_pass_timings` diagnostic for a
+whole-render table, and `./shader-stats.sh` for what the compiler made of the
+shader. Deliberately not on `RenderProgress` -- it is public, the field would be
+an `Option` forever, and filling it obliges a map and a poll every batch for a
+number no library consumer asked for.
+
+**Read a sub-millisecond pass twice.** The long passes are steady to under a
+percent across runs, but the first run after a build reported the denoise chain
+at 6.68 ms and every later one at 2.09 ms, and a bloom arm did the same thing
+once. Everything above 1 ms was unaffected in both cases. All the figures below
+are the median of three runs; a single reading of a 0.06 ms pass is not a
+measurement.
+
+**Wall clock was not lying.** The first thing the instrument was pointed at is
+the assumption behind `DispatchCost`: that the wall clock measured around
+submit-plus-poll carries latency that is not ours. On an unshared queue it
+carries very little. Over a 64 spp render at 800x600, GPU busy time is 97-98% of
+the measured dispatch in steady state, falling to 88-94% only on the first
+dispatch of a run and on the one that carries the post-processing chain. So
+there is nothing here for dispatch pipelining to recover, and the two-term fit
+is not papering over a mismeasurement. On a queue shared with a vsync-throttled
+presenter that gap is the whole reason the model exists, and this says nothing
+about that case.
+
+**Where a render's time goes**, 800x600, from `gpu_pass_timings`:
+
+| chain | trace | chain | trace share |
+|---|---|---|---|
+| none, 64 spp | 180.47 ms | -- | 100% |
+| none, 16 spp | 48.2 ms | -- | 100% |
+| bloom 0.1 | 48.2 ms | 1.55 ms | 96.9% |
+| bloom 0.002 | 48.2 ms | 0.29 ms | 99.4% |
+| saturation | 48.3 ms | 0.06 ms | 99.9% |
+| denoise, 5 iterations | 48.2 ms | 2.09 ms | 95.8% |
+
+The headline render is 5.87 ns per sample path, against 5.88 ns predicted by
+dividing the two criterion points apart -- so the arithmetic behind the backlog
+was right, and it is the roofline read off it that needed checking rather than
+the number. The whole post-processing backlog is competing for the last 0-4%;
+the tracer is the only thing on this list worth optimising. Within bloom, the
+161-tap separable blur is 1.38 ms of the 1.55 and the three-tap case is 0.13 ms,
+so the blur is linear in the kernel as expected and bloom's fixed cost is
+0.16 ms. Within the denoiser, prepare is 0.11 ms, the variance prefilter
+0.39 ms, the five à-trous iterations 1.46 ms and the resolve 0.13 ms.
+
+**The post chain costs three to fifteen times its compute.** Against
+`post/none` at 53.31 ms, criterion puts `post/saturation` at 54.16 ms -- 0.86 ms
+for 0.06 ms of shader. The three configurations differ in exactly three things,
+and two of them are not compute passes: allocating the second full-size working
+buffer, and the accumulator-to-post-buffer copy the render loop does *every*
+batch rather than only on the one that runs the chain. That copy is deliberate
+(`RenderProgress` publishes the post buffer, so a caller watching an unfinished
+render has to find the accumulated image in it), but it is now a measured cost
+rather than an assumed-free one, and it is larger than every post-processing
+shader in the crate put together.
+
+**Two fixed costs, measured directly instead of by subtraction.**
+`render/renderer_setup` -- scene flatten, buffer upload, shader compile -- is
+5.36 ms, where fitting `render` and `denoise/none` apart had put it at 7.98 ms:
+the two-point fit was half as much again as the truth, which is the reason the
+arm exists. `readback/800x600` is 2.02 ms and `readback/4K` is 26.59 ms
+(4.6 GiB/s), confirming the 25 ms that `buffer_to_image`'s own doc comment
+claims for the parallel in-place read and had no bench behind.
+
+**The tracer is occupancy-bound, and the traversal stack is why.** From
+`./shader-stats.sh` on a Radeon RX 5700 XT (RADV, Mesa 26.2.2): 128 VGPRs, 108
+SGPRs, 5 spilled SGPRs, no spilled VGPRs, **scratch size 0**, 8 waves per SIMD
+against the wave32 cap of 20. The 32-entry traversal stack is held entirely in
+registers -- there is no `scratch_` instruction anywhere in the 34 KB of ISA --
+and accounts for 44 of those 128: shrinking it to 8 entries takes the shader to
+84 VGPRs and 12 waves, recovering four of the twelve missing ones. The table is
+in the comment on `MAX_TRAVERSAL_DEPTH` in `ray_trace.wgsl`, next to the
+constant it is about.
+
+Two consequences. Sharing the stacks is already done and spent (`ray_trace.wgsl`
+declares one stack, used by `world_hit` and `occluded` in turn), so the
+remaining lever is a *shorter* stack: short-stack or stackless traversal, which
+trades re-traversal work for occupancy. And moving the stack to LDS or scratch
+buys nothing that is not already true -- it is not in memory now.

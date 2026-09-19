@@ -3,6 +3,7 @@
 use std::f64::consts::PI;
 
 pub mod gaussian;
+pub mod gpu_timing;
 pub mod height_map;
 pub mod interval;
 pub mod rgb_color;

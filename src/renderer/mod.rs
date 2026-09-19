@@ -13,6 +13,7 @@ use crate::hittable::Hittables;
 use crate::post::PostProcessors;
 use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
 use crate::renderer::scene_flattener::flatten_scene;
+use crate::util::gpu_timing::{GpuTimer, report_dispatch};
 use crate::util::wgpu_util::{
     add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
     storage_binding, texture_binding, uniform_binding,
@@ -421,6 +422,15 @@ pub struct Renderer<'a> {
     prim_refs_buffer: wgpu::Buffer,
     post_processors: Vec<PostProcessors>,
     render_config: GpuRenderConfig,
+    /// Per-pass GPU timing. `None` unless `SOLSTRALE_GPU_TIMING` is set and the
+    /// device supports timestamp queries, so the ordinary render allocates
+    /// nothing and encodes nothing for it -- see [`GpuTimer`].
+    ///
+    /// Deliberately not surfaced on [`RenderProgress`]: that type
+    /// is public, the field would be an `Option` forever, and filling it would
+    /// oblige a map and a poll every batch for a number no library consumer
+    /// asked for.
+    timer: Option<GpuTimer>,
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
 }
@@ -755,6 +765,7 @@ impl<'a> Renderer<'a> {
             prim_refs_buffer,
             post_processors,
             render_config,
+            timer: GpuTimer::new(device, queue),
             device,
             queue,
         })
@@ -861,6 +872,8 @@ impl<'a> Renderer<'a> {
                 &self.bind_group,
                 workgroup_count_x,
                 workgroup_count_y,
+                self.timer.as_mut(),
+                "trace",
             );
 
             // Refreshed every batch, not just the one the chain runs on: the
@@ -880,11 +893,18 @@ impl<'a> Renderer<'a> {
                         gbuffer: &self.gbuffer,
                         samples_completed: completed,
                         device: self.device,
+                        timer: self.timer.as_mut(),
                     };
                     for p in &self.post_processors {
                         p.post_process(&mut ctx)?;
                     }
                 }
+            }
+
+            // After the last timed pass and before `finish`, so the resolve
+            // sees every timestamp this command buffer wrote.
+            if let Some(timer) = &self.timer {
+                timer.resolve(&mut encoder);
             }
 
             let command_buffer = encoder.finish();
@@ -901,6 +921,10 @@ impl<'a> Renderer<'a> {
                 return Ok(());
             }
             let dispatch_time = dispatch_start.elapsed();
+
+            if let Some(timer) = &mut self.timer {
+                report_dispatch(batch, dispatch_time, &timer.take(self.device));
+            }
 
             completed += batch;
 

@@ -1,4 +1,5 @@
 //! Utility functions for working with wgpu
+use crate::util::gpu_timing::GpuTimer;
 use crate::util::tone_map::ToneMapper;
 use bytemuck::AnyBitPattern;
 use once_cell::sync::Lazy;
@@ -64,10 +65,19 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
     required_limits.max_storage_buffers_per_shader_stage =
         required_limits.max_storage_buffers_per_shader_stage.min(16);
 
+    // Timestamp queries are a diagnostic, asked for only when the adapter has
+    // them: `GpuTimer` gates itself on the environment variable as well, so a
+    // device without the feature loses nothing but the instrument. The base
+    // feature is all of it -- `ComputePassTimestampWrites` on a pass descriptor
+    // is covered here, and `TIMESTAMP_QUERY_INSIDE_ENCODERS` only buys
+    // `CommandEncoder::write_timestamp`, which nothing calls.
+    let mut required_features = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    required_features |= adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
-        required_features: wgpu::Features::TEXTURE_BINDING_ARRAY
-            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        required_features,
         required_limits,
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -123,16 +133,25 @@ pub(crate) fn add_compute_pass(
 /// single scanline) and for reach: a 1-D dispatch runs into
 /// `max_compute_workgroups_per_dimension` at ~4.2M pixels, so 4K was not
 /// renderable at all.
+///
+/// Bracketed by a pair of GPU timestamps when a [`GpuTimer`] is passed, which
+/// is what makes the per-pass cost of a dispatch measurable at all. `label`
+/// names the pass in that report, and is also handed to wgpu, so the same name
+/// identifies the pass in a graphics debugger.
 pub(crate) fn add_compute_pass_2d(
     encoder: &mut wgpu::CommandEncoder,
     pipeline: &wgpu::ComputePipeline,
     bind_group: &wgpu::BindGroup,
     workgroup_count_x: u32,
     workgroup_count_y: u32,
+    timer: Option<&mut GpuTimer>,
+    label: &'static str,
 ) {
+    let timestamp_writes = timer.and_then(|t| t.pass_writes(label));
+
     let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: None,
-        timestamp_writes: None,
+        label: Some(label),
+        timestamp_writes,
     });
     compute_pass.set_pipeline(pipeline);
     compute_pass.set_bind_group(0, bind_group, &[]);

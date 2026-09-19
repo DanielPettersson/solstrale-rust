@@ -80,6 +80,23 @@ const PRIM_INDEX_MASK = 0x3FFFFFFFu;
 // depth against the matching MAX_TRAVERSAL_DEPTH, because overflowing this
 // array is not an error the GPU can report: the bounds-checking policy clamps
 // the store, the deferred subtree is lost, and geometry quietly vanishes.
+//
+// It is also the largest single lever on occupancy, and not through scratch.
+// Measured with `./shader-stats.sh` on a Radeon RX 5700 XT (RADV, Mesa 26.2.2),
+// varying only this constant:
+//
+//   depth   VGPRs   scratch   waves/SIMD   code size
+//       8      84         0           12       30548
+//      16     100         0           10       31912
+//      24     100         0           10       33268
+//      32     128         0            8       34772
+//
+// So ACO keeps the whole stack in registers -- `Scratch size` is 0 at every
+// depth and the ISA contains no `scratch_` instruction -- and 44 of the 128
+// registers at depth 32 go on it. That is 8 waves per SIMD against the wave32
+// cap of 20. Shrinking the stack is therefore worth real occupancy,
+// which is what makes a short-stack or stackless traversal worth attempting;
+// moving it to scratch or LDS would not be, since it is not there now.
 const MAX_TRAVERSAL_DEPTH = 32u;
 
 // One stack, shared by world_hit and occluded. They are never live at the same
