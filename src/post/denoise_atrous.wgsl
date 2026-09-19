@@ -95,7 +95,9 @@ var<storage, read_write> dst: array<vec4<f32>>;
 // Packed guide describing the first non-specular surface the pixel looks at.
 // The oct_decode below is the inverse of oct_encode in
 // renderer/ray_trace.wgsl and must stay in step with it; WGSL has no include
-// mechanism, so the pair is deliberately duplicated rather than shared.
+// mechanism, so the pair is deliberately duplicated rather than shared. Three
+// copies now: this one, ray_trace.wgsl's, and `pack_oct` in
+// renderer/scene_flattener.rs.
 @group(0) @binding(2)
 var<storage, read> gbuffer: array<vec4<u32>>;
 

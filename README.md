@@ -13,13 +13,18 @@ A WGPU-based GPU Monte Carlo path tracing library, with features like:
 * Refraction
 * Soft shadows
 * Bump mapping
+* Smooth shading: per-vertex normals are interpolated across a triangle, so an
+  imported mesh looks like the surface it approximates rather than like its
+  facets. Taken from the model's own `vn` records, or generated at a default
+  crease angle when it has none, so hard edges stay hard. `with_flat_shading`
+  turns generation off
 * Light attenuation
 * Next-event estimation with multiple importance sampling, for much lower noise
   per sample on scenes lit by discrete lights
 * Russian roulette path termination
 
 ### Performance & Loading
-* Loading of obj models with included materials
+* Loading of obj models with included materials and per-vertex normals
 * Multithreaded BVH construction using Rayon, with a binned SAH split heuristic
   and front-to-back ordered GPU traversal
 

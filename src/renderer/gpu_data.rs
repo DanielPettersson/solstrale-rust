@@ -57,8 +57,12 @@ pub struct TrianglePos {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Triangle shading attributes, fetched once per ray after traversal settles.
+///
+/// The three shading normals ride in what used to be padding -- one word at
+/// offset 44 and two at 72 -- so smooth shading costs no extra buffer, binding
+/// or traversal bandwidth. `tests/gpu_data_test.rs` pins the offsets.
 pub struct TriangleAttr {
-    /// Geometric normal
+    /// Geometric normal, derived from the winding
     pub normal: [f32; 3],
     /// Index of the material in the materials buffer
     pub material_index: u32,
@@ -68,16 +72,18 @@ pub struct TriangleAttr {
     pub area: f32,
     /// Bi-tangent for normal mapping
     pub bi_tangent: [f32; 3],
-    /// Padding to keep vec3 alignment
-    pub _pad0: f32,
+    /// Shading normal at v0, octahedral, two snorm16 (see `pack_oct`)
+    pub n0_oct: u32,
     /// Texture coordinate at v0
     pub uv0: [f32; 2],
     /// Texture coordinate at v1
     pub uv1: [f32; 2],
     /// Texture coordinate at v2
     pub uv2: [f32; 2],
-    /// Padding to 80 bytes
-    pub _pad1: [f32; 2],
+    /// Shading normal at v1, octahedral, two snorm16
+    pub n1_oct: u32,
+    /// Shading normal at v2, octahedral, two snorm16
+    pub n2_oct: u32,
 }
 
 #[repr(C)]
