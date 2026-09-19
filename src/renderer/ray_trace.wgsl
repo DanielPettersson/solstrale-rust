@@ -20,17 +20,20 @@ struct TrianglePos {
 }
 
 // Shading attributes, read once per ray after traversal has settled on a hit.
+// The three shading normals occupy what used to be padding: one word where
+// `_pad0` sat and two where `_pad1` did. Still 80 bytes.
 struct TriangleAttr {
     normal: vec3<f32>,
     material_index: u32,
     tangent: vec3<f32>,
     area: f32,
     bi_tangent: vec3<f32>,
-    _pad0: f32,
+    n0_oct: u32,
     uv0: vec2<f32>,
     uv1: vec2<f32>,
     uv2: vec2<f32>,
-    _pad1: vec2<f32>,
+    n1_oct: u32,
+    n2_oct: u32,
 }
 
 struct QuadPos {
@@ -194,7 +197,13 @@ struct HitRef {
 struct HitRecord {
     t: f32,
     p: vec3<f32>,
+    // Interpolated across a smooth triangle; what the BSDF and the normal map
+    // are evaluated against.
     normal: vec3<f32>,
+    // What the surface actually is. Near a silhouette it can disagree with
+    // `normal` by most of a facet, so facing and the scattering gates in
+    // trace_sample key off this one.
+    geometric_normal: vec3<f32>,
     tangent: vec3<f32>,
     bi_tangent: vec3<f32>,
     material_index: u32,
@@ -255,6 +264,8 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 // fetches it 125 times per pixel -- which is why it is packed rather than
 // stored as two plain vec4<f32>. See pack_guide below; the denoise shaders
 // carry a matching oct_decode that must stay in step with oct_encode here.
+// Three copies of that pair exist now: this shader's, denoise_atrous.wgsl's,
+// and `pack_oct` in scene_flattener.rs.
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
 
@@ -552,6 +563,10 @@ struct GuideSample {
 
 // Octahedral normal encoding. Two floats instead of three, with ~0.01 degrees of
 // error at 16-bit -- far below anything an edge-stop with exponent 128 resolves.
+//
+// oct_decode is below. Three copies of the pair exist -- this one,
+// post/denoise_atrous.wgsl's, and `pack_oct` in renderer/scene_flattener.rs --
+// and all must agree, including the `n.z <= 0.0` polarity of the fold.
 fn oct_encode(n: vec3<f32>) -> vec2<f32> {
     let p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
     if (n.z <= 0.0) {
@@ -559,6 +574,15 @@ fn oct_encode(n: vec3<f32>) -> vec2<f32> {
         return (1.0 - abs(vec2<f32>(p.y, p.x))) * s;
     }
     return p;
+}
+
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+    var v = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) {
+        let s = vec2<f32>(select(-1.0, 1.0, v.x >= 0.0), select(-1.0, 1.0, v.y >= 0.0));
+        v = vec3<f32>((1.0 - abs(vec2<f32>(v.y, v.x))) * s, v.z);
+    }
+    return normalize(v);
 }
 
 // 16 bytes per pixel. The depth goes through bitcast rather than into an f32
@@ -581,7 +605,11 @@ fn pack_guide(g: GuideSample) -> vec4<u32> {
 // shading normal sampled from textures.
 struct Surface {
     albedo: vec3<f32>,
+    // After interpolation and the normal map.
     normal: vec3<f32>,
+    // Carried from the hit unchanged: neither interpolation nor a normal map
+    // may move what the scattering gates check against.
+    geometric_normal: vec3<f32>,
     emission: vec3<f32>,
     attenuation_factor: f32,
     fuzz: f32,
@@ -637,6 +665,7 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     let material = materials[mat_idx];
 
     var surface: Surface;
+    surface.geometric_normal = rec.geometric_normal;
     surface.mat_type = material.mat_type;
     surface.emission = material.emission;
     surface.attenuation_factor = material.attenuation_factor;
@@ -995,13 +1024,24 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
 
         rec.front_face = dot(r.direction, outward_normal) < 0.0;
         rec.normal = select(-outward_normal, outward_normal, rec.front_face);
+        // A sphere has no facets, so shading and geometry agree everywhere.
+        rec.geometric_normal = rec.normal;
         rec.material_index = s.material_index;
 
         let theta = acos(-outward_normal.y);
         let phi = atan2(-outward_normal.z, outward_normal.x) + 3.14159265359;
         rec.uv = vec2<f32>(phi / (2.0 * 3.14159265359), theta / 3.14159265359);
 
-        rec.tangent = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), outward_normal));
+        // onb_from_w's guard, adapted: the default axis here is (0,1,0), so
+        // the test is on .y. Crossing against a fixed (0,1,0) was normalize(0)
+        // at the poles and ill-conditioned near them -- which is exactly where
+        // the spherical UV mapping puts its singularity. Away from the poles
+        // the frame is unchanged.
+        var a = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(outward_normal.y) > 0.9) {
+            a = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        rec.tangent = normalize(cross(a, outward_normal));
         rec.bi_tangent = cross(outward_normal, rec.tangent);
     } else if (hit_ref.prim_type == 1u) {
         let attr = triangle_attr[hit_ref.prim_idx];
@@ -1009,8 +1049,21 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
         let v = hit_ref.bary.y;
         let w = 1.0 - u - v;
 
+        // The barycentrics traversal already produced, spent on the shading
+        // normal as well as the UVs. A flat triangle stores the same normal at
+        // all three corners, so this returns it unchanged.
+        let shading_normal = normalize(
+            w * oct_decode(unpack2x16snorm(attr.n0_oct))
+            + u * oct_decode(unpack2x16snorm(attr.n1_oct))
+            + v * oct_decode(unpack2x16snorm(attr.n2_oct))
+        );
+
+        // Facing keyed off the geometric normal: letting the interpolated one
+        // decide makes a closed mesh report both faces along a silhouette
+        // edge, where the interpolated normal and the facet disagree.
         rec.front_face = dot(r.direction, attr.normal) < 0.0;
-        rec.normal = select(-attr.normal, attr.normal, rec.front_face);
+        rec.geometric_normal = select(-attr.normal, attr.normal, rec.front_face);
+        rec.normal = select(-shading_normal, shading_normal, rec.front_face);
         rec.material_index = attr.material_index;
         rec.uv = w * attr.uv0 + u * attr.uv1 + v * attr.uv2;
         rec.tangent = attr.tangent;
@@ -1021,6 +1074,8 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
 
         rec.front_face = dot(r.direction, normal) < 0.0;
         rec.normal = select(-normal, normal, rec.front_face);
+        // A quad is planar, so shading and geometry agree everywhere.
+        rec.geometric_normal = rec.normal;
         rec.material_index = attr.material_index;
         rec.uv = hit_ref.bary;
         rec.tangent = attr.tangent;
@@ -1230,7 +1285,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             // --- Direct lighting (next-event estimation) ---
             let ls = sample_light(rec.p, &rng_state);
             let cos_light = dot(surface.normal, ls.direction);
-            if (ls.valid && cos_light > 0.0) {
+            // Not redundant with the shading test: an interpolated normal near
+            // a silhouette can face a light the facet faces away from, and that
+            // sample carries light through the surface. Covers a steep normal
+            // map for the same reason.
+            if (ls.valid && cos_light > 0.0 && dot(surface.geometric_normal, ls.direction) > 0.0) {
                 let pdf_light = light_pdf_value(rec.p, ls.direction);
                 if (pdf_light > 0.0) {
                     let pdf_bsdf = cos_light / PI;
@@ -1256,6 +1315,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             let direction = onb_local(uvw, random_cosine_direction(&rng_state));
             let cos_theta = dot(surface.normal, direction);
             if (cos_theta <= 0.0) { break; }
+            // Cosine sampling about the shading normal can aim below the
+            // geometry. Terminating rather than resampling keeps the sample
+            // stream deterministic; the lost energy is the shadow terminator,
+            // recorded in LIMITATIONS.md.
+            if (dot(surface.geometric_normal, direction) <= 0.0) { break; }
 
             // Cosine sampling cancels the BRDF and the cosine exactly, leaving
             // the albedo: (albedo/PI) * cos / (cos/PI).

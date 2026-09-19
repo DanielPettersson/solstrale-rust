@@ -360,11 +360,12 @@ fn add_primitive(
                 tangent: to_array(t.tangent),
                 area: t.area as f32,
                 bi_tangent: to_array(t.bi_tangent),
-                _pad0: 0.0,
+                n0_oct: pack_oct(t.n0),
                 uv0: [t.uv0.u, t.uv0.v],
                 uv1: [t.uv1.u, t.uv1.v],
                 uv2: [t.uv2.u, t.uv2.v],
-                _pad1: [0.0; 2],
+                n1_oct: pack_oct(t.n1),
+                n2_oct: pack_oct(t.n2),
             });
             if t.mat.is_light() {
                 data.lights.push(LightRef {
@@ -582,6 +583,36 @@ fn to_array(v: Vec3) -> [f32; 3] {
     [v.x as f32, v.y as f32, v.z as f32]
 }
 
+/// Octahedral-encodes a unit vector into two snorm16, the layout WGSL
+/// `unpack2x16snorm` reads back.
+///
+/// Reproduces `oct_encode` then `pack2x16snorm` in `renderer/ray_trace.wgsl`
+/// bit for bit, including the `n.z <= 0.0` polarity of the fold. The shader
+/// only decodes, so a disagreement would mirror normals on the hemisphere
+/// straddling the branch with nothing on the GPU side to catch it.
+///
+/// `snorm` rather than the G-buffer's `pack2x16float`: the parameters live in
+/// exactly `[-1, 1]`, where a half-float's exponent range is wasted. Worth
+/// 0.0036 degrees at worst, pinned by `pack_oct_round_trip`.
+pub(crate) fn pack_oct(n: Vec3) -> u32 {
+    // f32 throughout: the precision the shader decodes in.
+    let (x, y, z) = (n.x as f32, n.y as f32, n.z as f32);
+    let l = x.abs() + y.abs() + z.abs();
+    let (mut px, mut py) = (x / l, y / l);
+    if z <= 0.0 {
+        let sx = if px >= 0.0 { 1.0 } else { -1.0 };
+        let sy = if py >= 0.0 { 1.0 } else { -1.0 };
+        let (ax, ay) = (px.abs(), py.abs());
+        px = (1.0 - ay) * sx;
+        py = (1.0 - ax) * sy;
+    }
+
+    // WGSL pack2x16snorm: floor(0.5 + 32767 * clamp(e, -1, 1)), as a two's
+    // complement 16-bit value.
+    let q = |e: f32| ((0.5 + 32767.0 * e.clamp(-1.0, 1.0)).floor() as i32 as i16) as u16 as u32;
+    q(px) | (q(py) << 16)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::geo::vec3::Vec3;
@@ -589,8 +620,71 @@ mod tests {
     use crate::hittable::{Bvh, Hittables, Sphere};
     use crate::material::texture::SolidColor;
     use crate::material::{Lambertian, Materials};
-    use crate::renderer::scene_flattener::flatten_scene;
+    use crate::renderer::scene_flattener::{flatten_scene, pack_oct};
     use crate::renderer::{RenderConfig, Scene};
+
+    /// WGSL `unpack2x16snorm` then `oct_decode`, in Rust. Only the encoder
+    /// ships; this exists to measure the round-trip.
+    ///
+    /// That leaves a gap: it pins `pack_oct` against a *transcription* of the
+    /// shader's decoder, not the shader's own. The GPU half is covered only by
+    /// the `smooth_vs_flat` golden.
+    fn unpack_oct(packed: u32) -> Vec3 {
+        let d = |bits: u16| (bits as i16 as f32 / 32767.0).max(-1.0);
+        let (ex, ey) = (d(packed as u16), d((packed >> 16) as u16));
+
+        let (mut x, mut y) = (ex, ey);
+        let z = 1.0 - ex.abs() - ey.abs();
+        if z < 0.0 {
+            let sx = if x >= 0.0 { 1.0 } else { -1.0 };
+            let sy = if y >= 0.0 { 1.0 } else { -1.0 };
+            let (ax, ay) = (x.abs(), y.abs());
+            x = (1.0 - ay) * sx;
+            y = (1.0 - ax) * sy;
+        }
+        Vec3::new(x as f64, y as f64, z as f64).unit()
+    }
+
+    #[test]
+    fn pack_oct_round_trip() {
+        // A deterministic spiral rather than a random sample: roughly uniform
+        // in area, and it lands on both sides of the `n.z <= 0.0` fold and
+        // close to it, where a polarity disagreement shows.
+        let n = 128;
+        let mut worst_degrees: f64 = 0.;
+        for i in 0..n {
+            let z = 1. - 2. * (i as f64 + 0.5) / n as f64;
+            let r = (1. - z * z).max(0.).sqrt();
+            // The golden angle, so successive points do not line up.
+            let phi = i as f64 * std::f64::consts::PI * (3. - 5f64.sqrt());
+            let dir = Vec3::new(r * phi.cos(), r * phi.sin(), z).unit();
+
+            let round_tripped = unpack_oct(pack_oct(dir));
+            let degrees = dir.dot(round_tripped).clamp(-1., 1.).acos().to_degrees();
+            worst_degrees = worst_degrees.max(degrees);
+        }
+
+        assert!(
+            worst_degrees < 0.01,
+            "worst octahedral round-trip error was {} degrees",
+            worst_degrees
+        );
+    }
+
+    #[test]
+    fn pack_oct_handles_the_poles() {
+        // +Z is the one direction the fold does not touch, -Z the one it maps
+        // to all four corners at once.
+        for dir in [Vec3::new(0., 0., 1.), Vec3::new(0., 0., -1.)] {
+            let round_tripped = unpack_oct(pack_oct(dir));
+            assert!(
+                dir.dot(round_tripped) > 0.9999999,
+                "{:?} round-tripped to {:?}",
+                dir,
+                round_tripped
+            );
+        }
+    }
 
     #[test]
     fn test_flatten_scene_simple() {

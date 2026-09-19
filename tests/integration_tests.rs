@@ -22,8 +22,8 @@ use crate::scenes::{
     create_blend_material_scene, create_cornell_scene, create_light_attenuation_scene,
     create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
     create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
-    create_simple_test_scene, create_specular_scene, create_test_scene,
-    create_texture_mapping_scene, create_uv_scene,
+    create_simple_test_scene, create_smooth_vs_flat_scene, create_specular_scene,
+    create_test_scene, create_texture_mapping_scene, create_uv_scene,
 };
 
 mod scenes;
@@ -105,6 +105,33 @@ fn test_render_obj_with_textures() {
     let scene = create_obj_scene(render_config);
 
     render_and_compare_output(scene, "obj", 0.95);
+}
+
+/// The only test that exercises the GPU half of the octahedral normal path:
+/// `pack_oct_round_trip` pins the Rust encoder against a transcription of the
+/// shader's decoder, and only this render puts the shader's own `oct_decode`
+/// and the interpolation in `resolve_hit` in front of anything that can tell.
+///
+/// The threshold is 0.99 rather than the suite's usual 0.95, chosen by
+/// measuring what it has to separate:
+///
+///     smooth, as written                  0.9964
+///     smooth sphere regressed to flat     0.9703
+///     pack_oct's fold polarity flipped    0.7691
+///
+/// At 0.95 the first two are indistinguishable and the test is decorative.
+/// 0.99 leaves 0.0064 of headroom above and 0.0197 of margin below.
+#[test]
+fn test_render_smooth_vs_flat() {
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 200,
+        ..Default::default()
+    };
+    let scene = create_smooth_vs_flat_scene(render_config);
+
+    render_and_compare_output(scene, "smooth_vs_flat", 0.99);
 }
 
 #[test]

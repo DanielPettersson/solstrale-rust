@@ -15,6 +15,13 @@ pub struct Triangle {
     pub(crate) uv1: Uv,
     pub(crate) uv2: Uv,
     pub(crate) normal: Vec3,
+    /// Shading normal at `v0`. Equal to `normal` unless the triangle was built
+    /// with per-vertex normals, which is what makes the mesh smooth-shaded.
+    pub(crate) n0: Vec3,
+    /// Shading normal at `v1`
+    pub(crate) n1: Vec3,
+    /// Shading normal at `v2`
+    pub(crate) n2: Vec3,
     pub(crate) tangent: Vec3,
     pub(crate) bi_tangent: Vec3,
     pub(crate) mat: Materials,
@@ -55,9 +62,43 @@ impl Triangle {
         mat: Materials,
         transformation: &dyn Transformer,
     ) -> Triangle {
-        let v0 = transformation.transform(v0, false);
-        let v1 = transformation.transform(v1, false);
-        let v2 = transformation.transform(v2, false);
+        Triangle::build([v0, v1, v2], None, [uv0, uv1, uv2], mat, transformation)
+    }
+
+    /// Creates a smooth-shaded triangle: the shading normal is interpolated
+    /// across the face from the three supplied per-vertex normals. The winding
+    /// still decides the geometric normal that facing and light transport key
+    /// off.
+    ///
+    /// Normals are transformed with translation skipped and re-normalised,
+    /// which is correct only without shear or non-uniform scale. Every
+    /// [`Transformer`] here is rigid or uniform, and the trait maps a `Vec3` to
+    /// a `Vec3` with no way to express the matrix an inverse transpose would
+    /// need, so nothing reachable through this API can violate it.
+    pub fn new_with_normals(
+        v: [Vec3; 3],
+        n: [Vec3; 3],
+        uv: [Uv; 3],
+        mat: Materials,
+        transformation: &dyn Transformer,
+    ) -> Triangle {
+        Triangle::build(v, Some(n), uv, mat, transformation)
+    }
+
+    /// The one constructor. `normals` of `None` is flat shading, expressed by
+    /// giving all three corners the geometric normal rather than by a flag, so
+    /// the shader interpolates unconditionally and needs no branch.
+    fn build(
+        v: [Vec3; 3],
+        normals: Option<[Vec3; 3]>,
+        uv: [Uv; 3],
+        mat: Materials,
+        transformation: &dyn Transformer,
+    ) -> Triangle {
+        let [uv0, uv1, uv2] = uv;
+        let v0 = transformation.transform(v[0], false);
+        let v1 = transformation.transform(v[1], false);
+        let v2 = transformation.transform(v[2], false);
 
         let b_box = Aabb::new_from_3_points(v0, v1, v2).pad_if_needed();
         let v0v1 = v1 - v0;
@@ -65,6 +106,17 @@ impl Triangle {
         let n = v0v1.cross(v0v2);
         let normal = n.unit();
         let area = n.length() / 2.;
+
+        let [n0, n1, n2] = match normals {
+            None => [normal, normal, normal],
+            Some(n) => n.map(|n| {
+                let n = transformation.transform(n, true);
+                // spider.obj carries a zero-length `vn`, and `unit()` of it is
+                // NaN in all three components. Fall back to the geometric
+                // normal, which is what that corner had before.
+                if n.near_zero() { normal } else { n.unit() }
+            }),
+        };
 
         let delta_pos_1 = v1 - v0;
         let delta_pos_2 = v2 - v0;
@@ -104,6 +156,9 @@ impl Triangle {
             uv1,
             uv2,
             normal,
+            n0,
+            n1,
+            n2,
             tangent,
             bi_tangent,
             mat,

@@ -63,6 +63,76 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   passing through, and bright reds and oranges drift toward yellow. Both are
   inherent to the cheap fit and were accepted for the filmic look;
   `ToneMapper::PbrNeutral` is in the enum for when neither is wanted.
+- **The shadow terminator.** Interpolating a shading normal across a triangle
+  makes the mesh look smooth, but the mesh is still faceted, and the two
+  disagree most where they are most visible: near the light boundary. A
+  direction that passes the shading-normal cosine test can be blocked by the
+  mesh's own geometry, and `trace_sample` gates both next-event estimation and
+  the BSDF continuation on `dot(geometric_normal, wi) > 0` as well -- without
+  that gate an interpolated normal facing a light the facet faces away from
+  admits light straight through a closed surface, which is by far the worse
+  artefact. What the gate costs is a band of missing light along the
+  terminator of a coarsely tessellated mesh: `create_smooth_vs_flat_scene`'s
+  right-hand sphere, at 10 by 6, shows it plainly, and it fades as the
+  tessellation gets finer.
+
+  The gate is on the primitive's real normal rather than on "is this a smooth
+  triangle", so it covers normal mapping as well, where a map steep enough to
+  tilt the shading normal past the true surface was admitting light through it.
+  That is a change to an existing image and it was measured:
+  `normal_mapping_sphere_1` moves by 2.9 code values RMS, concentrated on the
+  steepest bump-mapped terrain and on the pole band the tangent fix below
+  touches, and still scores 0.995 against its golden.
+
+  Shipped rather than fixed, because the fix is self-contained and is far
+  easier to justify now that a scene demonstrates the artefact. Chiang et al.
+  2019 (*Taming the Shadow Terminator*) softens the NEE term with a bounding
+  ratio derived from the corner normals; the Estevez shading-point shift Cycles
+  uses moves the shading point onto the interpolated surface instead. Either
+  is a follow-up, and neither changes anything recorded above.
+
+- **A flat triangle's shading normal takes a 16-bit round trip.** Flat shading
+  is expressed by giving all three corners the geometric normal rather than by
+  a flag, so a flat triangle's normal goes out through `pack_oct` and comes
+  back through `oct_decode` like any other -- about 0.0036 degrees of angular
+  error at worst, measured over 100k directions. Keeping the exact normal would
+  need the shader to compare the three packed words and branch, which is the
+  branch the no-flag design exists to avoid. What it costs on
+  `test_adaptive_sampling_convergence`, whose scene is spheres, quads and flat
+  triangles: the mean linear radiance moves from 0.7577084 to 0.7577159 at 200
+  spp and from 0.7580927 to 0.7580732 at 2000, a relative 1e-5 -- two orders of
+  magnitude below what that test can resolve.
+
+- **Generated normals are a guess, and it is on by default.** A mesh with no
+  `vn` records gets normals generated at `DEFAULT_CREASE_ANGLE_DEGREES` (40),
+  because most such meshes want them and the alternative was every caller
+  remembering to ask. The threshold is what keeps that honest, and it is
+  measured rather than chosen: `box.obj`'s corners read 48.2 to 70.5 degrees
+  against it and stay sharp, `sphere.obj`'s read 13.5 to 23.8 and smooth. The
+  gap between those two is wide, but a mesh that lands inside it will be
+  guessed at wrongly, and `Obj::with_flat_shading` is the way out.
+
+  The angle is measured corner-normal against face-normal rather than between
+  two faces across an edge, which is what the one-pass, no-adjacency generator
+  can see. For a two-face fold that is half the angle a modelling tool would
+  report; where several faces disagree it is more, so a corner creases sooner
+  than the pairwise reading suggests. That is the conservative direction.
+
+  Generation is serial, being a scatter into shared vertex slots, while the
+  triangle construction around it is a `par_extend`. It has not mattered --
+  every large mesh to hand ships `vn` and skips it entirely -- but a
+  multi-million-face model without normals would pay for it at load.
+
+- **Per-vertex normals assume a rigid or uniformly scaled transform.** Normals
+  go through `Transformer::transform` with translation skipped and are then
+  re-normalised, which is only the correct rule when the transform has no
+  shear and no non-uniform scale. Every `Transformer` in the crate is rigid or
+  uniform, and `Transformer` maps a `Vec3` to a `Vec3` with no way to express
+  the matrix an inverse transpose would be taken from, so nothing reachable
+  through the public API can violate it. Recorded because the rule is wrong in
+  general and would have to change alongside any `Transformer` that could
+  shear.
+
 - **Light seen through glass is still clamped.** A dielectric bounce puts the
   emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
   vertex so far was specular" instead of `depth == 0` would exempt it, but it

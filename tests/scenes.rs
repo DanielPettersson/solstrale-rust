@@ -404,6 +404,113 @@ pub fn create_normal_mapping_sphere_scene(render_config: RenderConfig, light_pos
     }
 }
 
+/// A coarse UV sphere built twice, side by side: the left one flat-shaded with
+/// [`Triangle::new`], the right one smooth-shaded with
+/// [`Triangle::new_with_normals`] from the analytic normals the sphere has by
+/// construction.
+///
+/// Both in one frame rather than two goldens: a single smooth sphere at 100x50
+/// is just a sphere, while faceted next to smooth is a difference no downscale
+/// hides. If `oct_decode` ever stops agreeing with `pack_oct`, the two halves
+/// stop differing and the test notices.
+///
+/// Under-tessellated on purpose -- 10 by 6, 100 triangles. Both silhouettes
+/// stay polygonal, which is correct, and it is coarse enough to show the shadow
+/// terminator recorded in LIMITATIONS.md.
+#[allow(dead_code)]
+pub fn create_smooth_vs_flat_scene(render_config: RenderConfig) -> Scene {
+    const SEGMENTS: usize = 10;
+    const RINGS: usize = 6;
+    const RADIUS: f64 = 1.35;
+
+    let camera = CameraConfig {
+        vertical_fov_degrees: 30.,
+        aperture_size: 0.,
+        look_from: Vec3::new(0., 0., 7.),
+        look_at: Vec3::new(0., 0., 0.),
+        up: Vec3::new(0., 1., 0.),
+    };
+
+    // Polar angle from +Y, azimuth around it. The outward normal of a unit
+    // sphere at the origin is the point itself, so the per-vertex normals are
+    // analytic -- no generation, nothing that could be wrong the same way the
+    // shader is.
+    let unit_at = |theta: f64, phi: f64| {
+        Vec3::new(
+            theta.sin() * phi.cos(),
+            theta.cos(),
+            theta.sin() * phi.sin(),
+        )
+    };
+
+    let mat = Lambertian::new(SolidColor::new(0.8, 0.75, 0.7).into(), None);
+
+    let mut faceted: Vec<Hittables> = Vec::new();
+    let mut smooth: Vec<Hittables> = Vec::new();
+    for ring in 0..RINGS {
+        let theta0 = std::f64::consts::PI * ring as f64 / RINGS as f64;
+        let theta1 = std::f64::consts::PI * (ring + 1) as f64 / RINGS as f64;
+        for segment in 0..SEGMENTS {
+            let phi0 = 2. * std::f64::consts::PI * segment as f64 / SEGMENTS as f64;
+            let phi1 = 2. * std::f64::consts::PI * (segment + 1) as f64 / SEGMENTS as f64;
+
+            let a = unit_at(theta0, phi0);
+            let b = unit_at(theta1, phi0);
+            let c = unit_at(theta1, phi1);
+            let d = unit_at(theta0, phi1);
+
+            // The pole rings are fans: at ring 0 `a` and `d` are both the
+            // north pole, at the last `b` and `c` are both the south, so one
+            // triangle has zero area and is dropped.
+            let mut corners: Vec<[Vec3; 3]> = Vec::with_capacity(2);
+            if ring != RINGS - 1 {
+                corners.push([a, c, b]);
+            }
+            if ring != 0 {
+                corners.push([a, d, c]);
+            }
+
+            for n in corners {
+                let v = n.map(|n| n * RADIUS);
+                let left = Translation::new(Vec3::new(-1.5, 0., 0.));
+                let right = Translation::new(Vec3::new(1.5, 0., 0.));
+
+                faceted.push(Triangle::new(v[0], v[1], v[2], mat.clone().into(), &left).into());
+                smooth.push(
+                    Triangle::new_with_normals(
+                        v,
+                        n,
+                        [Uv::default(); 3],
+                        mat.clone().into(),
+                        &right,
+                    )
+                    .into(),
+                );
+            }
+        }
+    }
+
+    let mut world: Vec<Hittables> = vec![
+        // Off to one side and above, so both spheres get a terminator running
+        // across the visible face rather than a flat front-lit disc.
+        Sphere::new(
+            Vec3::new(-5., 3., 3.),
+            1.,
+            DiffuseLight::new(28., 28., 28., None).into(),
+        )
+        .into(),
+    ];
+    world.push(Bvh::new(faceted).into());
+    world.push(Bvh::new(smooth).into());
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        background_color: Vec3::new(0.05, 0.06, 0.08),
+        render_config,
+    }
+}
+
 #[allow(dead_code)]
 pub fn create_obj_scene(render_config: RenderConfig) -> Scene {
     let camera = CameraConfig {
