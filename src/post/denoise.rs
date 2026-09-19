@@ -34,7 +34,7 @@ pub enum DenoiseGuide {
 /// `1/n`, and the result is then blended back over the original in proportion to
 /// how much of the remaining noise would be **visible on screen** -- through the
 /// same tone curve and gamma the readback applies, reaching full strength at
-/// [`FULL_STRENGTH_GRAIN`] code values. Measured against a converged reference
+/// `FULL_STRENGTH_GRAIN` code values. Measured against a converged reference
 /// on the test scene, it cuts linear RMSE by half at 8 samples per pixel and by
 /// about a quarter at 64.
 ///

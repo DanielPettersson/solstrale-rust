@@ -42,7 +42,7 @@ pub struct RenderConfig {
     /// read-modify-write of the accumulation buffer, at the cost of coarser
     /// progress reporting and slower response to camera changes. The renderer
     /// tunes the actual size down from here to keep a single dispatch within
-    /// [`TARGET_DISPATCH`].
+    /// `TARGET_DISPATCH`.
     pub samples_per_batch: u32,
     /// Minimum samples a pixel must accumulate before adaptive sampling can
     /// consider it converged and stop sampling it further.

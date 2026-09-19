@@ -135,7 +135,7 @@ pub struct QuadAttr {
 /// front, descend into the nearer one without touching the stack, and push the
 /// farther one only when it can still contain a closer hit.
 ///
-/// Each `*_meta` word is either a node index, or -- when [`LEAF_FLAG`] is set --
+/// Each `*_meta` word is either a node index, or -- when `LEAF_FLAG` is set --
 /// an inline leaf: primitive count in bits 30..24, offset into `prim_refs` in
 /// bits 23..0. A leaf with count 0 is the empty child of a single-leaf root and
 /// intersects nothing.
