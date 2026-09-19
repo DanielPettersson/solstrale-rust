@@ -267,13 +267,20 @@ impl PostProcessor for BloomPostProcessor {
             &filter_bright_bind_group,
             groups_x,
             groups_y,
+            ctx.timer.as_deref_mut(),
+            "bloom_filter_bright",
         );
+        // The two blur directions are timed apart: they run the same shader
+        // over the same pixels, so a difference between them is a memory access
+        // pattern rather than arithmetic.
         add_compute_pass_2d(
             ctx.encoder,
             apply_pipeline_x,
             apply_bind_group_x,
             groups_x,
             groups_y,
+            ctx.timer.as_deref_mut(),
+            "bloom_blur_x",
         );
         add_compute_pass_2d(
             ctx.encoder,
@@ -281,6 +288,8 @@ impl PostProcessor for BloomPostProcessor {
             apply_bind_group_y,
             groups_x,
             groups_y,
+            ctx.timer.as_deref_mut(),
+            "bloom_blur_y",
         );
         add_compute_pass_2d(
             ctx.encoder,
@@ -288,6 +297,8 @@ impl PostProcessor for BloomPostProcessor {
             &add_bind_group,
             groups_x,
             groups_y,
+            ctx.timer.as_deref_mut(),
+            "bloom_add",
         );
 
         Ok(())

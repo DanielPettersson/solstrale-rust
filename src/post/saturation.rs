@@ -89,6 +89,8 @@ impl PostProcessor for SaturationPostProcessor {
             &bind_group,
             self.width.div_ceil(8),
             self.height.div_ceil(8),
+            ctx.timer.as_deref_mut(),
+            "saturation",
         );
 
         Ok(())

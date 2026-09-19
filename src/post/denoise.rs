@@ -540,14 +540,35 @@ impl PostProcessor for DenoisePostProcessor {
             &prepare_bind_group,
             groups_x,
             groups_y,
+            ctx.timer.as_deref_mut(),
+            "denoise_prepare",
         );
-        add_compute_pass_2d(ctx.encoder, prefilter_pipeline, &a_to_b, groups_x, groups_y);
+        add_compute_pass_2d(
+            ctx.encoder,
+            prefilter_pipeline,
+            &a_to_b,
+            groups_x,
+            groups_y,
+            ctx.timer.as_deref_mut(),
+            "denoise_prefilter",
+        );
 
         // Iteration 0 reads B, and they alternate from there, so the result ends
         // up in A for an odd iteration count and in B for an even one.
         for (i, pipeline) in self.atrous_pipelines.iter().enumerate() {
             let group = if i % 2 == 0 { &b_to_a } else { &a_to_b };
-            add_compute_pass_2d(ctx.encoder, pipeline, group, groups_x, groups_y);
+            // One label for every iteration: they are the same shader at a
+            // different step width, and the report folds them into a single
+            // line with a count.
+            add_compute_pass_2d(
+                ctx.encoder,
+                pipeline,
+                group,
+                groups_x,
+                groups_y,
+                ctx.timer.as_deref_mut(),
+                "denoise_atrous",
+            );
         }
         let result = if self.iterations % 2 == 1 {
             buffer_a
@@ -576,6 +597,8 @@ impl PostProcessor for DenoisePostProcessor {
             &resolve_bind_group,
             groups_x,
             groups_y,
+            ctx.timer.as_deref_mut(),
+            "denoise_resolve",
         );
 
         Ok(())

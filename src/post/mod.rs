@@ -8,6 +8,8 @@ use std::error::Error;
 
 use enum_dispatch::enum_dispatch;
 
+use crate::util::gpu_timing::GpuTimer;
+
 pub use crate::post::bloom::BloomPostProcessor;
 pub use crate::post::denoise::{DenoiseGuide, DenoisePostProcessor};
 pub use crate::post::saturation::SaturationPostProcessor;
@@ -52,6 +54,17 @@ pub struct PostProcessContext<'a> {
     pub samples_completed: u32,
     /// The device the passes run on.
     pub device: &'a wgpu::Device,
+    /// Per-pass GPU timing. `None` unless `SOLSTRALE_GPU_TIMING` is set and
+    /// the device supports timestamp queries, which is the usual case -- see
+    /// [`GpuTimer`].
+    ///
+    /// A post-processor passes this down to each of its compute passes, which
+    /// is what names them separately in the report. One that ignores it is
+    /// simply invisible in the numbers, and that is the reason the field is
+    /// here rather than the chain being timed as a single block: the denoiser's
+    /// cost is not one number, it is a prepare, a prefilter, five iterations
+    /// and a resolve.
+    pub timer: Option<&'a mut GpuTimer>,
 }
 
 /// Responsible for taking the rendered image and transforming it

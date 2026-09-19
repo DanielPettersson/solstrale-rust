@@ -16,7 +16,9 @@ use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::{ImageMap, SolidColor, Textures};
 use solstrale::material::{DiffuseLight, Lambertian};
-use solstrale::post::{BloomPostProcessor, DenoisePostProcessor, SaturationPostProcessor};
+use solstrale::post::{
+    BloomPostProcessor, DenoisePostProcessor, PostProcessors, SaturationPostProcessor,
+};
 use solstrale::ray_trace;
 use solstrale::renderer::{RenderConfig, Scene};
 use solstrale::util::rgb_color::linear_to_srgb;
@@ -671,6 +673,7 @@ fn test_gpu_scene_nested_bvh() {
     render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
 }
 
+use solstrale::util::gpu_timing::{PassTiming, TIMING_ENV, drain_totals};
 use solstrale::util::tone_map::ToneMapper;
 use solstrale::util::wgpu_util::{
     buffer_to_image, get_result_from_buffer, get_wgpu_device_and_queue,
@@ -2192,6 +2195,110 @@ fn cornell_firefly_sweep() {
             println!();
         }
     }
+}
+
+/// Diagnostic, not a gate: what each GPU pass of the bench scenes actually
+/// costs, measured with timestamp queries rather than with a CPU clock around
+/// submit-plus-poll. This is the table to paste into a commit message that
+/// claims a pass got faster.
+///
+/// `SOLSTRALE_GPU_TIMING` has to come from the environment rather than from the
+/// test: setting a variable from inside a test process is unsound while the
+/// other test threads are running, and `cargo test -- --ignored` runs the
+/// sweeps in parallel.
+/// `SOLSTRALE_GPU_TIMING=1 cargo test gpu_pass_timings -- --ignored --nocapture`
+///
+/// Two blocks, matching the two bench points the cost model was fitted against:
+/// `render/test_scene_800x600_64spp` and the 16 spp `denoise` / `post` arms.
+/// The per-dispatch lines the environment variable also switches on are
+/// interleaved with these tables, and are the finer-grained view of the same
+/// numbers -- read them for the wall-clock-versus-GPU column, which says how
+/// much of a dispatch is submission latency rather than work.
+#[test]
+#[ignore]
+fn gpu_pass_timings() {
+    assert!(
+        std::env::var_os(TIMING_ENV).is_some(),
+        "run as: {}=1 cargo test gpu_pass_timings -- --ignored --nocapture",
+        TIMING_ENV
+    );
+
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let arms: Vec<(u32, &str, Vec<PostProcessors>)> = vec![
+        (64, "none", vec![]),
+        (16, "none", vec![]),
+        (
+            16,
+            "bloom_0.1",
+            vec![
+                BloomPostProcessor::new(0.1, None, Some(3.0), device)
+                    .unwrap()
+                    .into(),
+            ],
+        ),
+        (
+            16,
+            "bloom_0.002",
+            vec![
+                BloomPostProcessor::new(0.002, None, Some(3.0), device)
+                    .unwrap()
+                    .into(),
+            ],
+        ),
+        (
+            16,
+            "saturation",
+            vec![SaturationPostProcessor::new(-0.7, device).unwrap().into()],
+        ),
+        (
+            16,
+            "denoise_iterations_5",
+            vec![
+                DenoisePostProcessor::new(1., Some(5), None, device)
+                    .unwrap()
+                    .into(),
+            ],
+        ),
+    ];
+
+    for (spp, name, post_processors) in arms {
+        let scene = create_test_scene(RenderConfig {
+            width: 800,
+            height: 600,
+            samples_per_pixel: spp,
+            post_processors,
+            ..Default::default()
+        });
+
+        // Whatever the arm before this one left behind.
+        drain_totals();
+        render_linear(scene, device, queue);
+        print_pass_table(&format!("800x600 {} spp, chain: {}", spp, name));
+    }
+}
+
+/// Prints the accumulated per-pass totals as a table and clears them.
+fn print_pass_table(title: &str) {
+    let passes: Vec<PassTiming> = drain_totals();
+    let total: f64 = passes.iter().map(|p| p.ms).sum();
+
+    println!("\n--- {} ---", title);
+    println!(
+        "{:<22}{:>8}{:>12}{:>12}{:>9}",
+        "pass", "passes", "ms", "ms/pass", "share"
+    );
+    for p in &passes {
+        println!(
+            "{:<22}{:>8}{:>12.3}{:>12.4}{:>8.1}%",
+            p.label,
+            p.count,
+            p.ms,
+            p.ms / p.count as f64,
+            100. * p.ms / total
+        );
+    }
+    println!("{:<22}{:>8}{:>12.3}", "total", "", total);
 }
 
 /// A strength of 0 is the bottom of the documented range, where `sigma_colour`

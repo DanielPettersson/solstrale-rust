@@ -10,18 +10,22 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use derive_more::{Constructor, Display};
 
 use crate::scenes::{create_test_scene, new_bvh_test_scene};
+use solstrale::camera::CameraConfig;
 use solstrale::geo::transformation::NopTransformer;
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Triangle};
 use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
-use solstrale::material::Lambertian;
 use solstrale::material::texture::SolidColor;
-use solstrale::post::{DenoisePostProcessor, PostProcessors};
+use solstrale::material::{DiffuseLight, Lambertian};
+use solstrale::post::{
+    BloomPostProcessor, DenoisePostProcessor, PostProcessors, SaturationPostProcessor,
+};
 use solstrale::ray_trace;
 use solstrale::renderer::scene_flattener::flatten_scene;
-use solstrale::renderer::{RenderConfig, Scene};
-use solstrale::util::wgpu_util::get_wgpu_device_and_queue;
+use solstrale::renderer::{RenderConfig, Renderer, Scene};
+use solstrale::util::tone_map::ToneMapper;
+use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
 
 #[path = "../tests/scenes.rs"]
 mod scenes;
@@ -58,6 +62,44 @@ fn triangle_cloud(n: u32) -> Vec<Hittables> {
             .into()
         })
         .collect()
+}
+
+/// Wraps [`triangle_cloud`] in a renderable scene lit by a *triangle* light.
+///
+/// The light is the point. Every other `bvh_traversal` arm carries a sphere
+/// light, so a scene with no spheres in it at all is the only one on which a
+/// future `has_spheres` / `has_quads` pipeline specialisation could show
+/// anything -- and, since the cloud is spatially spread rather than colinear,
+/// the only one where a change to BVH quality is visible against a realistic
+/// distribution.
+fn triangle_cloud_scene(render_config: RenderConfig, n: u32) -> Scene {
+    let extent = (n as f64).cbrt() * 2.0;
+    let centre = extent / 2.;
+
+    let mut world = triangle_cloud(n);
+    world.push(
+        Triangle::new(
+            Vec3::new(centre - extent, extent * 1.5, centre - extent),
+            Vec3::new(centre + extent, extent * 1.5, centre - extent),
+            Vec3::new(centre, extent * 1.5, centre + extent),
+            DiffuseLight::new(10., 10., 10., None).into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 40.,
+            aperture_size: 0.,
+            look_from: Vec3::new(centre, centre, centre + extent * 1.5),
+            look_at: Vec3::new(centre, centre, centre),
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: Vec3::new(0.2, 0.3, 0.5),
+        render_config,
+    }
 }
 
 /// Times BVH construction in isolation.
@@ -269,6 +311,40 @@ fn render_and_sync(scene: Scene) {
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 }
 
+/// As [`render_and_sync`], but keeps the finished image buffer.
+///
+/// `readback_benchmark` needs a rendered buffer to read back, and needs it
+/// built outside the timed closure.
+fn render_to_buffer(scene: Scene) -> wgpu::Buffer {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let (output_sender, output_receiver) = channel();
+    let (_abort_sender, abort_receiver) = channel();
+    let (_camera_sender, camera_config_receiver) = channel();
+
+    let handle = thread::spawn(move || {
+        ray_trace(
+            scene,
+            &output_sender,
+            &camera_config_receiver,
+            &abort_receiver,
+            device,
+            queue,
+            false,
+        )
+        .unwrap();
+    });
+
+    let mut buffer = None;
+    for progress in output_receiver {
+        buffer = Some(progress.output_buffer);
+    }
+    handle.join().unwrap();
+
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    buffer.expect("render reported no progress")
+}
+
 /// End-to-end trace throughput at a realistic resolution and sample count.
 ///
 /// This includes pipeline creation and buffer upload, which `ray_trace` does
@@ -289,6 +365,27 @@ pub fn render_benchmark(c: &mut Criterion) {
                 })
             },
             render_and_sync,
+        )
+    });
+
+    // The fixed per-render cost the arm above pays before it traces anything,
+    // on its own: scene flatten, buffer upload and shader compilation. Fitting
+    // the two bench points apart puts that cost at around 8 ms, which is worth
+    // knowing exactly rather than by subtraction -- pipeline specialisation
+    // would move the compile into it, and there is no measuring that against a
+    // number derived from two other numbers.
+    let (device, queue) = get_wgpu_device_and_queue();
+    group.bench_function("renderer_setup", |b| {
+        b.iter_with_setup(
+            || {
+                create_test_scene(RenderConfig {
+                    samples_per_pixel: 64,
+                    width: 800,
+                    height: 600,
+                    ..RenderConfig::default()
+                })
+            },
+            |scene| black_box(Renderer::new(scene, device, queue).unwrap()),
         )
     });
 
@@ -394,11 +491,22 @@ pub fn denoise_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-/// Trace throughput against triangle count, with and without a BVH.
+/// Trace throughput against triangle count and BVH shape.
+///
+/// The arms are `nested` and `flat`, not "BVH" and "no BVH": the world is
+/// always wrapped in a top-level [`Bvh`], so the flag only decides whether the
+/// triangles get a sub-BVH of their own. See [`new_bvh_test_scene`].
 pub fn bvh_traversal_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("bvh_traversal");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(20));
+
+    let render_config = || RenderConfig {
+        samples_per_pixel: 16,
+        width: 400,
+        height: 200,
+        ..RenderConfig::default()
+    };
 
     for input_param in [
         BvhInput::new(10, true),
@@ -414,15 +522,9 @@ pub fn bvh_traversal_benchmark(c: &mut Criterion) {
             |b, bvh_input| {
                 b.iter_with_setup(
                     || {
-                        let render_config = RenderConfig {
-                            samples_per_pixel: 16,
-                            width: 400,
-                            height: 200,
-                            ..RenderConfig::default()
-                        };
                         new_bvh_test_scene(
-                            render_config,
-                            bvh_input.use_bvh,
+                            render_config(),
+                            bvh_input.nested,
                             bvh_input.num_triangles,
                         )
                     },
@@ -431,14 +533,133 @@ pub fn bvh_traversal_benchmark(c: &mut Criterion) {
             },
         );
     }
+
+    // The arms above all trace a colinear strip against a sphere light, which
+    // makes them a poor control for anything but the nesting. This one is a
+    // spread cloud of triangles and nothing else -- see `triangle_cloud_scene`.
+    let n = 10000u32;
+    group.throughput(Throughput::Elements(n as u64));
+    group.bench_function("triangles_only", |b| {
+        b.iter_with_setup(|| triangle_cloud_scene(render_config(), n), render_and_sync);
+    });
+
     group.finish();
 }
 
 #[derive(Constructor, Display)]
-#[display("{} {}", num_triangles, use_bvh)]
+#[display("{} {}", num_triangles, if *nested { "nested" } else { "flat" })]
 struct BvhInput {
     num_triangles: u32,
-    use_bvh: bool,
+    /// Whether the triangles get a sub-BVH inside the world's own BVH.
+    nested: bool,
+}
+
+/// What bloom and saturation cost on top of a render.
+///
+/// Built like `denoise_benchmark`, down to the `none` control arm and the
+/// processors being constructed outside the setup closure -- `PostProcessors`
+/// is `Clone` and wgpu handles are refcounted, so cloning reuses the pipelines
+/// rather than recompiling them inside the measurement.
+///
+/// Both bloom radii are here because the blur is separable and its cost is
+/// linear in the kernel, so the default the goldens use and the degenerate
+/// three-tap case are different measurements: 0.1 of an 800-pixel width is a
+/// 161-tap kernel, 0.002 is three taps. Without the pair, a change that only
+/// helps long kernels looks like a change that helps bloom.
+pub fn post_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("post");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+
+    let (device, _) = get_wgpu_device_and_queue();
+    let processors: Vec<(&str, Option<PostProcessors>)> = vec![
+        ("none", None),
+        (
+            "bloom_0.1",
+            Some(
+                BloomPostProcessor::new(0.1, None, Some(3.0), device)
+                    .unwrap()
+                    .into(),
+            ),
+        ),
+        (
+            "bloom_0.002",
+            Some(
+                BloomPostProcessor::new(0.002, None, Some(3.0), device)
+                    .unwrap()
+                    .into(),
+            ),
+        ),
+        (
+            "saturation",
+            Some(SaturationPostProcessor::new(-0.7, device).unwrap().into()),
+        ),
+    ];
+
+    for (name, processor) in &processors {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            processor,
+            |b, processor| {
+                b.iter_with_setup(
+                    || {
+                        // Same size and sample count as `denoise_benchmark`, so
+                        // the two groups' `none` arms are the same measurement.
+                        create_test_scene(RenderConfig {
+                            samples_per_pixel: 16,
+                            width: 800,
+                            height: 600,
+                            post_processors: processor.clone().into_iter().collect(),
+                            ..RenderConfig::default()
+                        })
+                    },
+                    render_and_sync,
+                )
+            },
+        );
+    }
+    group.finish();
+}
+
+/// What it costs to get the finished image off the GPU.
+///
+/// On no other bench path at all: `render_and_sync` consumes progress and polls
+/// but never reads back, so the copy, the map and the tone-mapped encode in
+/// `buffer_to_image` were unmeasured -- including the 198 ms -> 25 ms at 4K that
+/// its own doc comment claims. Two sizes an order of magnitude apart, because
+/// the staging allocation is a fixed cost and the 133 MB read at 4K is not.
+///
+/// The scene is rendered once per size, outside the timed closure: what is
+/// being measured is the readback, not the trace.
+pub fn readback_benchmark(c: &mut Criterion) {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let mut group = c.benchmark_group("readback");
+    group.sample_size(10);
+
+    for (name, width, height) in [("800x600", 800u32, 600u32), ("4K", 3840, 2160)] {
+        let buffer = render_to_buffer(create_test_scene(RenderConfig {
+            samples_per_pixel: 1,
+            width: width as usize,
+            height: height as usize,
+            ..RenderConfig::default()
+        }));
+
+        group.throughput(Throughput::Bytes(width as u64 * height as u64 * 16));
+        group.bench_function(name, |b| {
+            b.iter_with_large_drop(|| {
+                black_box(buffer_to_image(
+                    device,
+                    queue,
+                    &buffer,
+                    width,
+                    height,
+                    ToneMapper::default(),
+                ))
+            })
+        });
+    }
+    group.finish();
 }
 
 criterion_group!(
@@ -449,6 +670,8 @@ criterion_group!(
     bvh_traversal_benchmark,
     render_benchmark,
     adaptive_sampling_benchmark,
-    denoise_benchmark
+    denoise_benchmark,
+    post_benchmark,
+    readback_benchmark
 );
 criterion_main!(benches);

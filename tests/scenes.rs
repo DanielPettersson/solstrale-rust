@@ -204,8 +204,15 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
     }
 }
 
+/// A strip of `num_triangles` colinear triangles lit by a sphere light.
+///
+/// `nested` decides whether the triangles get their own [`Bvh`] *inside* the
+/// world, not whether there is a BVH at all: the world itself is always wrapped
+/// in one, because the flattener and the GPU traversal have no other shape to
+/// take. So the `false` arm is a flat one-level tree over every triangle, not
+/// a linear scan, and a measurement against it is a measurement of nesting.
 #[allow(dead_code)]
-pub fn new_bvh_test_scene(render_config: RenderConfig, use_bvh: bool, num_triangles: u32) -> Scene {
+pub fn new_bvh_test_scene(render_config: RenderConfig, nested: bool, num_triangles: u32) -> Scene {
     let camera = CameraConfig {
         vertical_fov_degrees: 20.,
         aperture_size: 0.1,
@@ -230,14 +237,14 @@ pub fn new_bvh_test_scene(render_config: RenderConfig, use_bvh: bool, num_triang
             yellow.clone().into(),
             &nop_transformer,
         );
-        if use_bvh {
+        if nested {
             triangles.push(t.into());
         } else {
             world.push(t.into());
         }
     }
 
-    if use_bvh {
+    if nested {
         world.push(Bvh::new(triangles).into())
     }
 
