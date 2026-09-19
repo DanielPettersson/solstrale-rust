@@ -712,7 +712,7 @@ fn compare_output(name: &str, actual_image: &RgbImage, comparison_threshold: f64
 }
 
 // Adaptive sampling changes how many samples a pixel gets once it has
-// converged, not what it converges to. This is the check TODO.md asks for:
+// converged, not what it converges to. This is the check LIMITATIONS.md asks for:
 // unlike the gamma-mapped RMS golden tests above (which tolerate a biased but
 // structurally similar image), comparing the linear-radiance mean across spp
 // levels would catch an energy bias introduced by the convergence heuristic.

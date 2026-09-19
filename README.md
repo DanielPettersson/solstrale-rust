@@ -124,6 +124,18 @@ amortise dispatch overhead and collapse the per-sample read-modify-write of the
 accumulation buffer, but render progress is reported less often and camera
 changes take longer to take effect.
 
+## Known limitations
+
+[`LIMITATIONS.md`](LIMITATIONS.md) records what is true of the renderer on
+purpose, what was tried and measured and rejected, and the numbers those
+decisions rest on. It is worth reading before changing anything in the
+integrator or the denoiser -- several of the obvious metrics for this kind of
+work are recorded there as having been measured and found to lie.
+
+Outstanding work is tracked in
+[GitHub issues](https://github.com/DanielPettersson/solstrale-rust/issues),
+prioritised `P1`/`P2`/`P3`.
+
 ## Upgrading to 0.4
 `PostProcessor::post_process` now takes a single `PostProcessContext` instead of
 an encoder, buffer and device. The context also carries the accumulation buffer,

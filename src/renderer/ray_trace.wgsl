@@ -541,7 +541,7 @@ struct GuideSample {
     normal: vec3<f32>,
     // Path length from the camera in world units, summed over the whole guide
     // chain. The guide ray is normalised from the start, unlike the primary
-    // ray in trace_sample (see TODO.md), so every segment is in the same units.
+    // ray in trace_sample (see issue #57), so every segment is in the same units.
     depth: f32,
     mat_type: u32,
     // How many specular bounces the guide ray took to get here. Lets the filter
