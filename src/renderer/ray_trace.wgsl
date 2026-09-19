@@ -745,11 +745,6 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     return ls;
 }
 
-fn cosine_pdf_value(normal: vec3<f32>, direction: vec3<f32>) -> f32 {
-    let cos_theta = dot(normalize(direction), normal);
-    return max(0.0, cos_theta / PI);
-}
-
 fn reflect(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return v - 2.0 * dot(v, n) * n;
 }
@@ -930,6 +925,181 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     }
 
     return surface;
+}
+
+// ---------------------------------------------------------------------------
+// BSDF
+//
+// One layer between the transport loop and the material arms, so that next-
+// event estimation and MIS are written once and are not a property of which
+// material happened to be hit. The loop asks three things of a surface -- is
+// this lobe sampleable by a light, what does it evaluate to in a given
+// direction, and where does the path go next -- and nothing below the
+// interface leaks above it.
+//
+// `wo` points *away* from the surface, `-normalize(r.direction)`, in all three
+// functions. It is the single most common source of sign bugs here.
+// ---------------------------------------------------------------------------
+
+const BSDF_DIFFUSE = 0u;
+const BSDF_CONDUCTOR = 1u;
+const BSDF_DIELECTRIC = 2u;
+// A surface that scatters nothing: today only a blend chain deeper than
+// `resolve_surface` walks, which leaves a material the loop cannot shade.
+const BSDF_NONE = 3u;
+
+// Everything the BSDF layer needs about one vertex, built once per bounce and
+// dead by the end of it. Nothing here survives into the next loop iteration.
+struct Bsdf {
+    // Shading frame. `w` is the shading normal, and is what every cosine below
+    // is taken against.
+    frame: ONB,
+    // The geometric normal, which the shading frame may disagree with wherever
+    // an interpolated normal or a normal map has moved it.
+    ng: vec3<f32>,
+    base_color: vec3<f32>,
+    // Lobe width. Carries metal's fuzz radius while the conductor is a blurred
+    // mirror; #43 makes it a GGX roughness.
+    alpha: f32,
+    // Relative index of refraction, already resolved against which side of the
+    // surface the ray is on.
+    ior: f32,
+    kind: u32,
+}
+
+struct BsdfSample {
+    wi: vec3<f32>,
+    // f * |cos| / pdf, already divided. Keeping the division inside is what
+    // lets a Dirac lobe return a weight with pdf = 0 and no special case
+    // above.
+    weight: vec3<f32>,
+    // Solid-angle pdf; 0 for a Dirac lobe.
+    pdf: f32,
+    specular: bool,
+    // False terminates the path: the sampled direction went below the surface,
+    // or there is no lobe to sample.
+    valid: bool,
+}
+
+struct BsdfEval {
+    // f(wo, wi) * |dot(ns, wi)| -- every caller wants the product, and the
+    // cosine convention is easy to get wrong twice.
+    f_cos: vec3<f32>,
+    pdf: f32,
+}
+
+fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
+    var b: Bsdf;
+    b.frame = onb_from_w(surface.normal);
+    b.ng = surface.geometric_normal;
+    b.base_color = surface.albedo;
+    b.alpha = surface.fuzz;
+    b.ior = select(surface.refraction_index, 1.0 / surface.refraction_index, front_face);
+
+    if (surface.mat_type == MAT_LAMBERTIAN) {
+        b.kind = BSDF_DIFFUSE;
+    } else if (surface.mat_type == MAT_METAL) {
+        b.kind = BSDF_CONDUCTOR;
+    } else if (surface.mat_type == MAT_DIELECTRIC) {
+        b.kind = BSDF_DIELECTRIC;
+    } else {
+        b.kind = BSDF_NONE;
+    }
+    return b;
+}
+
+// Whether the lobe is a Dirac delta, and so has no density for a light sample
+// to land on. This is what gates next-event estimation -- not the material
+// type, which is the point of the whole layer.
+fn bsdf_is_specular(b: Bsdf) -> bool {
+    return b.kind != BSDF_DIFFUSE;
+}
+
+// f and pdf for a direction chosen by something other than the BSDF. Returns
+// zero for a Dirac lobe, and for any direction on the wrong side of either
+// normal.
+fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
+    var e: BsdfEval;
+    e.f_cos = vec3<f32>(0.0);
+    e.pdf = 0.0;
+
+    if (b.kind == BSDF_DIFFUSE) {
+        let cos_i = dot(b.frame.w, wi);
+        // The geometric test is not redundant with the shading one: an
+        // interpolated normal near a silhouette can face a light the facet
+        // faces away from, and that sample carries light through the surface.
+        // Covers a steep normal map for the same reason.
+        if (cos_i <= 0.0 || dot(b.ng, wi) <= 0.0) { return e; }
+        e.f_cos = (b.base_color / PI) * cos_i;
+        e.pdf = cos_i / PI;
+    }
+
+    return e;
+}
+
+// Samples a continuation direction. The bounce's dimension pairs are passed in
+// rather than a stream state, so each lobe draws from its own fixed slots and
+// a lobe that skips a draw leaves a gap rather than shifting everything after
+// it.
+fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSample {
+    var s: BsdfSample;
+    s.wi = vec3<f32>(0.0);
+    s.weight = vec3<f32>(0.0);
+    s.pdf = 0.0;
+    s.specular = true;
+    s.valid = false;
+
+    let scalars = bounce_pair + PAIR_SCALARS;
+
+    if (b.kind == BSDF_DIFFUSE) {
+        let direction = onb_local(b.frame, random_cosine_direction(sampler_2d(smp, bounce_pair + PAIR_BSDF)));
+        let cos_theta = dot(b.frame.w, direction);
+        // Cosine sampling about the shading normal can aim below the geometry.
+        // Terminating rather than resampling keeps the sample stream
+        // deterministic; the lost energy is the shadow terminator, recorded in
+        // LIMITATIONS.md.
+        if (cos_theta <= 0.0 || dot(b.ng, direction) <= 0.0) { return s; }
+
+        s.wi = normalize(direction);
+        // Cosine sampling cancels the BRDF and the cosine exactly, leaving the
+        // albedo: (albedo/PI) * cos / (cos/PI).
+        s.weight = b.base_color;
+        s.pdf = cos_theta / PI;
+        s.specular = false;
+        s.valid = true;
+    } else if (b.kind == BSDF_CONDUCTOR) {
+        let reflected = reflect(-wo, b.frame.w);
+        let fuzz_offset = random_in_unit_sphere(
+            sampler_2d(smp, bounce_pair + PAIR_BSDF),
+            sampler_1d(smp, dim_x(scalars)),
+        );
+        let direction = reflected + b.alpha * fuzz_offset;
+        if (dot(direction, b.frame.w) <= 0.0) { return s; }
+
+        s.wi = normalize(direction);
+        s.weight = b.base_color;
+        s.valid = true;
+    } else if (b.kind == BSDF_DIELECTRIC) {
+        let cos_theta = min(dot(wo, b.frame.w), 1.0);
+        let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+        var direction: vec3<f32>;
+        // Short-circuit: total internal reflection never makes the draw, and
+        // because the slot is fixed nothing after it moves.
+        if (b.ior * sin_theta > 1.0
+            || reflectance(cos_theta, b.ior) > sampler_1d(smp, dim_x(scalars))) {
+            direction = reflect(-wo, b.frame.w);
+        } else {
+            direction = refract(-wo, b.frame.w, b.ior);
+        }
+
+        s.wi = normalize(direction);
+        // Clear glass: the surface tints nothing on the way through.
+        s.weight = vec3<f32>(1.0);
+        s.valid = true;
+    }
+
+    return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -1449,14 +1619,17 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
 
 // Traces one path for the given pixel and sample index.
 //
-// Next-event estimation with multiple importance sampling: at every diffuse
-// vertex the direct lighting is estimated with an explicit shadow ray, and the
-// BSDF-sampled continuation is weighted so that a path which happens to land on
-// a light is not counted twice. Both strategies use the balance heuristic, for
-// which `w / pdf` collapses to `1 / (pdf_light + pdf_bsdf)`.
+// Next-event estimation with multiple importance sampling: at every
+// non-specular vertex the direct lighting is estimated with an explicit shadow
+// ray, and the BSDF-sampled continuation is weighted so that a path which
+// happens to land on a light is not counted twice. Both strategies use the
+// balance heuristic, for which `w / pdf` collapses to
+// `1 / (pdf_light + pdf_bsdf)`.
 //
-// Specular bounces (metal, dielectric) have no light-sampling counterpart, so
-// they skip NEE and the emitter they reach is taken at full weight.
+// A Dirac lobe has no light-sampling counterpart, so it skips NEE and the
+// emitter it reaches is taken at full weight. Which lobes those are is the
+// BSDF layer's business, not this loop's: everything below dispatches on
+// `Bsdf`, never on `mat_type`, except the emitter test.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * config.width + pixel.x;
     let smp = sampler_new(index, sample_index);
@@ -1521,93 +1694,52 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             break;
         }
 
-        if (surface.mat_type == MAT_LAMBERTIAN) {
-            // --- Direct lighting (next-event estimation) ---
+        let b = bsdf_from_surface(surface, rec.front_face);
+        if (b.kind == BSDF_NONE) { break; }
+        let wo = -normalize(r.direction);
+
+        // --- Direct lighting (next-event estimation) ---
+        //
+        // Gated on the lobe, not on the material: anything with a density a
+        // light sample can land on gets a shadow ray.
+        if (!bsdf_is_specular(b)) {
             let ls = sample_light(
                 rec.p,
                 sampler_1d(smp, dim_x(scalars)),
                 sampler_2d(smp, bounce_pair + PAIR_LIGHT_POINT),
             );
-            let cos_light = dot(surface.normal, ls.direction);
-            // Not redundant with the shading test: an interpolated normal near
-            // a silhouette can face a light the facet faces away from, and that
-            // sample carries light through the surface. Covers a steep normal
-            // map for the same reason.
-            if (ls.valid && cos_light > 0.0 && dot(surface.geometric_normal, ls.direction) > 0.0) {
-                let pdf_light = light_pdf_value(rec.p, ls.direction);
-                if (pdf_light > 0.0) {
-                    let pdf_bsdf = cos_light / PI;
+            if (ls.valid) {
+                let e = bsdf_eval(b, wo, ls.direction);
+                if (e.pdf > 0.0) {
+                    let pdf_light = light_pdf_value(rec.p, ls.direction);
                     // Shadow ray last: everything above is cheaper to reject on.
-                    if (!occluded(rec.p, ls.direction, ls.distance - RAY_EPS)) {
+                    if (pdf_light > 0.0 && !occluded(rec.p, ls.direction, ls.distance - RAY_EPS)) {
                         var emitted = ls.emission;
                         if (ls.attenuation_factor > 0.0) {
                             emitted *= 1.0 / (1.0 + ls.attenuation_factor * (path_length + ls.distance));
                         }
-                        let brdf = surface.albedo / PI;
+                        // The balance heuristic's w / pdf, collapsed. It holds
+                        // for any BSDF, because `e.pdf` is the pdf this lobe
+                        // would have had for the light's direction.
                         add_contribution(
                             &direct,
                             &indirect,
                             depth,
-                            throughput * brdf * cos_light * emitted / (pdf_light + pdf_bsdf),
+                            throughput * e.f_cos * emitted / (pdf_light + e.pdf),
                         );
                     }
                 }
             }
-
-            // --- BSDF continuation ---
-            let uvw = onb_from_w(surface.normal);
-            let direction = onb_local(uvw, random_cosine_direction(sampler_2d(smp, bounce_pair + PAIR_BSDF)));
-            let cos_theta = dot(surface.normal, direction);
-            if (cos_theta <= 0.0) { break; }
-            // Cosine sampling about the shading normal can aim below the
-            // geometry. Terminating rather than resampling keeps the sample
-            // stream deterministic; the lost energy is the shadow terminator,
-            // recorded in LIMITATIONS.md.
-            if (dot(surface.geometric_normal, direction) <= 0.0) { break; }
-
-            // Cosine sampling cancels the BRDF and the cosine exactly, leaving
-            // the albedo: (albedo/PI) * cos / (cos/PI).
-            throughput *= surface.albedo;
-            prev_bsdf_pdf = cos_theta / PI;
-            prev_specular = false;
-            r = Ray(rec.p, normalize(direction));
-        } else if (surface.mat_type == MAT_METAL) {
-            let reflected = reflect(normalize(r.direction), surface.normal);
-            let fuzz_offset = random_in_unit_sphere(
-                sampler_2d(smp, bounce_pair + PAIR_BSDF),
-                sampler_1d(smp, dim_x(scalars)),
-            );
-            let direction = reflected + surface.fuzz * fuzz_offset;
-            if (dot(direction, surface.normal) <= 0.0) { break; }
-
-            throughput *= surface.albedo;
-            prev_specular = true;
-            r = Ray(rec.p, normalize(direction));
-        } else if (surface.mat_type == MAT_DIELECTRIC) {
-            var refraction_ratio = surface.refraction_index;
-            if (rec.front_face) {
-                refraction_ratio = 1.0 / surface.refraction_index;
-            }
-
-            let unit_direction = normalize(r.direction);
-            let cos_theta = min(dot(-unit_direction, surface.normal), 1.0);
-            let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-
-            var direction: vec3<f32>;
-            // Short-circuit: total internal reflection never makes the draw,
-            // and because the slot is fixed nothing after it moves.
-            if (refraction_ratio * sin_theta > 1.0
-                || reflectance(cos_theta, refraction_ratio) > sampler_1d(smp, dim_x(scalars))) {
-                direction = reflect(unit_direction, surface.normal);
-            } else {
-                direction = refract(unit_direction, surface.normal, refraction_ratio);
-            }
-
-            prev_specular = true;
-            r = Ray(rec.p, normalize(direction));
-        } else {
-            break;
         }
+
+        // --- BSDF continuation ---
+        let s = bsdf_sample(b, wo, smp, bounce_pair);
+        if (!s.valid) { break; }
+
+        throughput *= s.weight;
+        prev_bsdf_pdf = s.pdf;
+        prev_specular = s.specular;
+        r = Ray(rec.p, s.wi);
 
         let max_throughput = max(throughput.x, max(throughput.y, throughput.z));
         if (max_throughput < 0.0001) {
