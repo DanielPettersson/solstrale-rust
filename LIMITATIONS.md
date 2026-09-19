@@ -203,6 +203,29 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   primary-hit guide. Both are deliberate: a jittered guide ray would make
   neighbouring pixels disagree about what they are looking at, which is the one
   thing an edge stop cannot survive.
+- **Metal is single-scatter GGX, so it loses energy with roughness.** A
+  microfacet that reflects light onto another microfacet instead of out of the
+  surface is light the model drops, and the deficit grows with roughness. It is
+  measured rather than guessed:
+  `test_ggx_metal_is_energy_conserving_in_a_furnace` puts a white metal in a
+  uniform unit environment, where an energy-conserving BRDF must read exactly
+  1, and reads 1.0000 / 0.9942 / 0.8976 / 0.6318 / 0.3503 at fuzz 0 / 0.25 /
+  0.5 / 0.75 / 1. A CPU quadrature of the BRDF's definition agrees with every
+  one of those to 0.0015, so what the test pins is the model rather than this
+  implementation of it. The same test is what a compensation term would have to
+  move.
+
+- **`Metal`'s parameters changed meaning with GGX.** `fuzz` was a sphere radius
+  around the mirror direction, calibrated against nothing; it is now a
+  perceptual roughness with `alpha = fuzz * fuzz`, the squared-roughness
+  convention every other renderer's slider means. The same number reads
+  noticeably sharper than it used to, and a scene sitting at `fuzz ~ 0.3`
+  changes appearance. `alpha = fuzz` would have been closer to the old spread;
+  the square won because the old parameter matched no other renderer and this
+  one matches all of them. `albedo` likewise became f0, the reflectance at
+  normal incidence, rather than a flat multiplier -- so every metal now has a
+  Fresnel rim going white at a grazing angle.
+
 - **16.7M primitive cap.** The BVH leaf encoding uses a 24-bit offset
   (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time.
 - **Golden images are lenient.** They downscale to 100x50 and compare RMS

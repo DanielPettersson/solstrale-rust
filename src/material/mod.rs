@@ -71,7 +71,7 @@ impl Lambertian {
 
 impl Material for Lambertian {}
 
-/// Metal is a material that is reflective
+/// Metal is a reflective conductor with a GGX microfacet lobe
 #[derive(Clone, Debug)]
 pub struct Metal {
     pub(crate) albedo: Textures,
@@ -80,7 +80,18 @@ pub struct Metal {
 }
 
 impl Metal {
-    /// Creates a metal material
+    /// Creates a metal material.
+    ///
+    /// `albedo` is f0, the reflectance at normal incidence, not a flat
+    /// multiplier: Schlick's Fresnel takes every colour toward white at a
+    /// grazing angle, so a metal shows a bright rim whatever its colour.
+    ///
+    /// `fuzz` is a perceptual roughness in `[0, 1]`, used as the GGX roughness
+    /// `alpha = fuzz * fuzz` -- the squared-roughness convention every other
+    /// renderer's roughness slider means. `0` is an exact mirror. Values are
+    /// not comparable with the pre-GGX fuzz parameter, which was a sphere
+    /// radius around the mirror direction and calibrated against nothing: the
+    /// same number now reads noticeably sharper.
     pub fn new(albedo: Textures, normal: Option<Textures>, fuzz: f64) -> Metal {
         Metal {
             albedo,

@@ -15,7 +15,7 @@ use solstrale::geo::transformation::{
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::{ImageMap, SolidColor, Textures};
-use solstrale::material::{DiffuseLight, Lambertian};
+use solstrale::material::{DiffuseLight, Lambertian, Metal};
 use solstrale::post::{
     BloomPostProcessor, DenoisePostProcessor, PostProcessors, SaturationPostProcessor,
 };
@@ -24,11 +24,14 @@ use solstrale::renderer::{RenderConfig, Scene};
 use solstrale::util::rgb_color::linear_to_srgb;
 
 use crate::scenes::{
-    create_blend_material_scene, create_cornell_scene, create_light_attenuation_scene,
-    create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
-    create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
+    FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, ROUGH_METAL_FUZZ, ROUGH_METAL_RADIUS,
+    create_blend_material_scene, create_cornell_scene, create_furnace_scene,
+    create_light_attenuation_scene, create_normal_mapping_scene,
+    create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
+    create_obj_with_triangle, create_quad_rotation_scene, create_rough_metal_scene,
     create_simple_test_scene, create_smooth_vs_flat_scene, create_specular_scene,
     create_srgb_decode_scene, create_test_scene, create_texture_mapping_scene, create_uv_scene,
+    rough_metal_sphere_center,
 };
 
 mod scenes;
@@ -233,6 +236,26 @@ fn test_render_normal_mapping_sphere_2() {
     render_and_compare_output(scene, "normal_mapping_sphere_2", 0.97);
 }
 
+/// The roughness range as an image: five metals from mirror to nearly diffuse,
+/// over a textured floor, lit by one small light. A regression net for the
+/// gross appearance of the lobe -- what it cannot see is noise, which
+/// `test_rough_metal_converges_with_nee` measures instead.
+#[test]
+fn test_scene_rough_metal() {
+    let render_config = RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 200,
+        ..Default::default()
+    };
+    render_and_compare_output(create_rough_metal_scene(render_config), "rough_metal", 0.95);
+}
+
+/// A scene with nothing to light it at all -- no emitter and a black
+/// background -- can only render black, and is rejected. A scene with no
+/// emitter but a lit background is not: that is the furnace test's
+/// configuration, and it renders fine with next-event estimation simply having
+/// nothing to sample.
 #[test]
 fn test_render_scene_without_light() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -241,7 +264,8 @@ fn test_render_scene_without_light() {
         height: 10,
         ..Default::default()
     };
-    let scene = create_simple_test_scene(render_config, false);
+    let mut scene = create_simple_test_scene(render_config, false);
+    scene.background_color = Vec3::new(0., 0., 0.);
 
     let (output_sender, _) = channel();
     let (_, camera_config_receiver) = channel();
@@ -259,7 +283,10 @@ fn test_render_scene_without_light() {
 
     match res {
         Ok(_) => panic!("There should be an error"),
-        Err(e) => assert_eq!("Scene should have at least one light", e.to_string()),
+        Err(e) => assert_eq!(
+            "Scene should have at least one light or a non-black background",
+            e.to_string()
+        ),
     }
 }
 
@@ -2473,110 +2500,262 @@ fn test_srgb_decode_is_not_applied_to_normal_maps() {
 }
 
 // ---------------------------------------------------------------------------
-// #42: the BSDF layer is a pure refactor
-//
-// Temporary, and deliberately so. The criterion is not that the goldens still
-// pass -- they would pass through a much larger change -- but that the sample
-// stream is untouched and a 1 spp render differs from the pre-refactor one
-// only by float reassociation. #43 changes metal's draws on purpose, so this
-// check and its reference buffers go out with it.
-//
-// The references are f32 radiance, so they are pinned to the device that
-// recorded them -- a different driver reassociates differently and the bounds
-// below are far too tight for that. Nothing in CI runs this; re-record with
-// `record_bsdf_reference` when moving machines.
+// #43: the conductor is a GGX microfacet lobe
 // ---------------------------------------------------------------------------
 
-/// One sample per pixel, adaptive sampling off: an average over many samples
-/// would hide a changed draw, which is the whole thing being checked.
-fn bsdf_refactor_scenes() -> Vec<(&'static str, Scene)> {
+/// Per-pixel centre-ray directions, reproducing `Camera::new` exactly.
+///
+/// This is what lets a measurement below be restricted to the pixels that look
+/// at a particular sphere, rather than to a rectangle guessed from the image.
+fn center_rays(camera: &CameraConfig, width: usize, height: usize) -> Vec<Vec3> {
+    let aspect_ratio = width as f64 / height as f64;
+    let h = (camera.vertical_fov_degrees.to_radians() / 2.).tan();
+    let view_port_height = 2. * h;
+    let view_port_width = aspect_ratio * view_port_height;
+
+    let look_v = camera.look_from - camera.look_at;
+    let focus_distance = look_v.length();
+    let w = look_v.unit();
+    let u = camera.up.unit().cross(w).unit();
+    let v = w.cross(u);
+
+    let horizontal = u * view_port_width * focus_distance;
+    let vertical = v * view_port_height * focus_distance;
+    let lower_left_corner = camera.look_from - horizontal / 2. - vertical / 2. - w * focus_distance;
+
+    (0..height)
+        .flat_map(|y| {
+            (0..width).map(move |x| {
+                let s = (x as f64 + 0.5) / width as f64;
+                let t = 1. - (y as f64 + 0.5) / height as f64;
+                lower_left_corner + horizontal * s + vertical * t - camera.look_from
+            })
+        })
+        .collect()
+}
+
+/// The pixels whose centre ray passes within `shrink` of the way from the
+/// sphere's centre to its silhouette.
+///
+/// `shrink` is load-bearing rather than cosmetic: a pixel on the silhouette is
+/// part sphere and part background, and the background in these scenes is
+/// exactly the quantity being compared against.
+fn sphere_disc_mask(
+    camera: &CameraConfig,
+    width: usize,
+    height: usize,
+    center: Vec3,
+    radius: f64,
+    shrink: f64,
+) -> Vec<bool> {
+    let to_center = center - camera.look_from;
+    center_rays(camera, width, height)
+        .iter()
+        // Perpendicular distance from the sphere's centre to the ray's line.
+        .map(|d| to_center.cross(*d).length() / d.length() < radius * shrink)
+        .collect()
+}
+
+fn mask_union(masks: &[Vec<bool>]) -> Vec<bool> {
+    let mut out = vec![false; masks[0].len()];
+    for mask in masks {
+        for (o, m) in out.iter_mut().zip(mask) {
+            *o |= m;
+        }
+    }
+    out
+}
+
+/// Mean linear radiance over the masked pixels, averaged over the three
+/// channels.
+fn masked_mean(pixels: &[[f32; 4]], mask: &[bool]) -> f64 {
+    let (sum, count) = pixels
+        .iter()
+        .zip(mask)
+        .filter(|(_, m)| **m)
+        .fold((0., 0), |(sum, count), (p, _)| {
+            (sum + (p[0] + p[1] + p[2]) as f64 / 3., count + 1)
+        });
+    assert!(count > 0, "the mask selected no pixels");
+    sum / count as f64
+}
+
+/// `linear_rmse` over the masked pixels only.
+fn masked_linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]], mask: &[bool]) -> f64 {
+    let (sum_sq, count) = a.iter().zip(b).zip(mask).filter(|(_, m)| **m).fold(
+        (0., 0),
+        |(sum_sq, count), ((p, q), _)| {
+            let d: f64 = (0..3).map(|c| ((p[c] - q[c]) as f64).powi(2)).sum();
+            (sum_sq + d, count + 3)
+        },
+    );
+    assert!(count > 0, "the mask selected no pixels");
+    (sum_sq / count as f64).sqrt()
+}
+
+/// A white metal in a white furnace, which is the only way to see what a
+/// microfacet BRDF does with the energy it is given.
+///
+/// Under a uniform environment of radiance 1 an energy-conserving BRDF reflects
+/// exactly 1 at every angle and every roughness, so whatever the sphere reads
+/// below 1 is energy the BRDF lost. With `albedo = 1` the Fresnel term is 1
+/// everywhere too, so what is left is the masking-shadowing term and the
+/// samples GGX reflects below the horizon -- the multiple scattering a
+/// single-scatter model does not carry.
+///
+/// Three ways the obvious version of this measurement lies:
+///
+/// - the whole-image mean is dominated by background pixels, which equal 1.0
+///   whatever the BRDF does, so the disc mask is doing the work;
+/// - the saved JPEG has been through ACES and a transfer function, so the
+///   measurement has to be of the linear buffer;
+/// - `CLAMPING_THRESHOLD` and Russian roulette both touch the estimator. RR is
+///   unbiased so it would be fine either way, and it never runs here: a sphere
+///   is convex, so every path is one bounce and the background, and RR starts
+///   at depth 3. The clamp is inert because a unit environment never comes near
+///   10. Neither is disabled for the test -- they are arranged to be inert, so
+///   what is measured is the shipping estimator.
+///
+/// The Lambertian control costs one more render and catches a wrong mask, a
+/// wrong stride, or a tone mapper leaking into the readback -- all of which
+/// would otherwise be read as a GGX defect.
+#[test]
+fn test_ggx_metal_is_energy_conserving_in_a_furnace() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    const SIZE: usize = 160;
     let config = || RenderConfig {
-        width: 200,
-        height: 100,
-        samples_per_pixel: 1,
+        width: SIZE,
+        height: SIZE,
+        samples_per_pixel: 512,
+        // Off: a retired pixel holds whatever mean it had when it retired, and
+        // this test is a measurement of the mean.
         min_samples_per_pixel: u32::MAX,
         ..Default::default()
     };
-    vec![
-        ("test_scene", create_test_scene(config())),
-        ("specular_scene", create_specular_scene(config())),
-    ]
+
+    let white = || SolidColor::new(1., 1., 1.).into();
+    let scene = create_furnace_scene(config(), Lambertian::new(white(), None).into());
+    let mask = sphere_disc_mask(
+        &scene.camera,
+        SIZE,
+        SIZE,
+        FURNACE_SPHERE_CENTER,
+        FURNACE_SPHERE_RADIUS,
+        0.8,
+    );
+
+    let lambertian = masked_mean(&render_linear(scene, device, queue), &mask);
+    println!("furnace, albedo-1 Lambertian: {lambertian:.4}");
+    assert!(
+        (lambertian - 1.).abs() < 0.005,
+        "an albedo-1 Lambertian sphere in a unit furnace must read 1, not {lambertian}; \
+         the BRDF is not what is wrong here, the harness is"
+    );
+
+    for (fuzz, expected) in FURNACE_EXPECTED {
+        let scene = create_furnace_scene(config(), Metal::new(white(), None, fuzz).into());
+        let measured = masked_mean(&render_linear(scene, device, queue), &mask);
+        println!(
+            "furnace, metal fuzz {fuzz} (alpha {:.3}): {measured:.4}",
+            fuzz * fuzz
+        );
+
+        assert!(
+            (measured - expected).abs() < 0.01,
+            "furnace reading for fuzz {fuzz} moved: {measured:.4} against the pinned {expected:.4}"
+        );
+    }
 }
 
-fn bsdf_reference_path(name: &str) -> String {
-    format!("tests/reference/bsdf_{name}.f32")
-}
+/// What the furnace reads per roughness. Pinned rather than bounded, so that
+/// anything which moves them shows up in a diff.
+///
+/// These are the single-scatter energy of GGX, and nothing else: a mirror keeps
+/// all of it, and a fully rough metal keeps a third. The same quantity computed
+/// on the CPU from the BRDF's definition, by quadrature rather than by this
+/// renderer, agrees with every one of them to 0.0015 -- so what they pin is the
+/// model, not this implementation of it.
+///
+/// The deficit is the multiple scattering a single-scatter model does not
+/// carry: light that a microfacet reflects onto another microfacet instead of
+/// out of the surface. The commit that compensates for it is the commit that
+/// moves this table to 1.
+const FURNACE_EXPECTED: [(f64, f64); 5] = [
+    (0., 1.0000),
+    (0.25, 0.9942),
+    (0.5, 0.8976),
+    (0.75, 0.6318),
+    (1., 0.3503),
+];
 
-/// Rewrites the reference buffers from whatever the shader currently does. Run
-/// on the commit *before* the refactor:
-/// `cargo test --test integration_tests -- --ignored record_bsdf_reference`
+/// Next-event estimation now reaches a rough metal, and this is the measurement
+/// that says so: the same scene at 64 and 1024 spp, compared over the spheres
+/// alone.
+///
+/// Relative to the reference's own mean, not absolute. The pre-GGX metal lost
+/// most of its energy to the below-horizon `break`, so its image was six times
+/// darker and an absolute error would have scored it *better* for being dark.
+/// Measured on this scene, at 64 spp against each model's own 1024 spp
+/// reference: the fuzz-sphere metal with no next-event estimation ran 0.886 of
+/// its own mean, and the GGX metal with it runs 0.346.
+///
+/// The golden harness provably cannot capture this. It resizes to 100x50 before
+/// comparing, which averages the noise away -- the noisy before and the clean
+/// after score almost identically through it. **The golden harness averages away
+/// exactly the defect being fixed**, which is why this test measures per-pixel
+/// error at full resolution instead.
 #[test]
-#[ignore]
-fn record_bsdf_reference() {
+fn test_rough_metal_converges_with_nee() {
     let (device, queue) = get_wgpu_device_and_queue();
-    std::fs::create_dir_all("tests/reference").unwrap();
 
-    for (name, scene) in bsdf_refactor_scenes() {
-        let bytes: Vec<u8> = render_linear(scene, device, queue)
-            .iter()
-            .flat_map(|p| {
-                p[..3]
-                    .iter()
-                    .flat_map(|c| c.to_le_bytes())
-                    .collect::<Vec<_>>()
+    const WIDTH: usize = 200;
+    const HEIGHT: usize = 100;
+    let config = |samples_per_pixel| RenderConfig {
+        width: WIDTH,
+        height: HEIGHT,
+        samples_per_pixel,
+        // Off in both arms: adaptive sampling would stop sampling the very
+        // pixels whose noise is being measured.
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    };
+
+    let scene = create_rough_metal_scene(config(64));
+    let mask = mask_union(
+        &(0..ROUGH_METAL_FUZZ.len())
+            .map(|i| {
+                sphere_disc_mask(
+                    &scene.camera,
+                    WIDTH,
+                    HEIGHT,
+                    rough_metal_sphere_center(i),
+                    ROUGH_METAL_RADIUS,
+                    0.9,
+                )
             })
-            .collect();
-        std::fs::write(bsdf_reference_path(name), bytes).unwrap();
-    }
+            .collect::<Vec<_>>(),
+    );
+
+    let noisy = render_linear(scene, device, queue);
+    let reference = render_linear(
+        as_reference(create_rough_metal_scene(config(1024))),
+        device,
+        queue,
+    );
+
+    let relative = masked_linear_rmse(&noisy, &reference, &mask) / masked_mean(&reference, &mask);
+    println!("rough metal, 64 spp against 1024 spp, over the spheres: {relative:.4} of the mean");
+
+    assert!(
+        relative < ROUGH_METAL_RMSE_BOUND,
+        "64 spp of the rough metal scene is at {relative:.4} relative RMSE against its own \
+         1024 spp reference, past the pinned {ROUGH_METAL_RMSE_BOUND}"
+    );
 }
 
-#[test]
-fn test_bsdf_refactor_is_image_preserving() {
-    let (device, queue) = get_wgpu_device_and_queue();
-
-    for (name, scene) in bsdf_refactor_scenes() {
-        let path = bsdf_reference_path(name);
-        let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("Could not load {path}"));
-        let reference: Vec<f32> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|b| f32::from_le_bytes(*b))
-            .collect();
-
-        let actual: Vec<f32> = render_linear(scene, device, queue)
-            .iter()
-            .flat_map(|p| p[..3].to_vec())
-            .collect();
-        assert_eq!(actual.len(), reference.len(), "{name} buffer size");
-
-        let mut diffs: Vec<f64> = actual
-            .iter()
-            .zip(&reference)
-            .map(|(a, r)| (a - r).abs() as f64)
-            .collect();
-        let mean_diff = diffs.iter().sum::<f64>() / diffs.len() as f64;
-        let mean_reference =
-            reference.iter().map(|r| *r as f64).sum::<f64>() / reference.len() as f64;
-        let relative = mean_diff / mean_reference;
-
-        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p9999 = diffs[(diffs.len() as f64 * 0.9999) as usize];
-
-        println!("{name}: relative mean |diff| {relative:e}, 99.99th pct |diff| {p9999:e}");
-
-        assert!(
-            relative < 1e-7,
-            "{name}: relative mean absolute difference {relative:e} is more than \
-             reassociation can account for"
-        );
-        // Not bit-equality. A last-bit difference can flip a `cos_theta <= 0.0`
-        // or `pdf_light > 0.0` test, and those few channels then diverge
-        // completely; a percentile bound is the honest metric.
-        assert!(
-            p9999 < 1e-5,
-            "{name}: 99.99th-percentile absolute difference {p9999:e} says more than \
-             a handful of channels took a different branch"
-        );
-    }
-}
+/// Pinned above the 0.346 measured, with room for a different driver's
+/// arithmetic. Well below the 0.886 the same scene scored before metal could
+/// take a shadow ray, which is the point of the bound rather than its exact
+/// value.
+const ROUGH_METAL_RMSE_BOUND: f64 = 0.45;

@@ -9,7 +9,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use derive_more::{Constructor, Display};
 
-use crate::scenes::{create_test_scene, new_bvh_test_scene};
+use crate::scenes::{create_rough_metal_scene, create_test_scene, new_bvh_test_scene};
 use solstrale::camera::CameraConfig;
 use solstrale::geo::transformation::NopTransformer;
 use solstrale::geo::vec3::Vec3;
@@ -386,6 +386,24 @@ pub fn render_benchmark(c: &mut Criterion) {
                 })
             },
             |scene| black_box(Renderer::new(scene, device, queue).unwrap()),
+        )
+    });
+
+    // `create_test_scene` contains no metal at all, so the first arm would show
+    // nothing if the conductor lobe changed in cost. This one is five metal
+    // spheres over the whole roughness range, each taking a shadow ray the
+    // fuzz-sphere metal never took.
+    group.bench_function("rough_metal_800x600_64spp", |b| {
+        b.iter_with_setup(
+            || {
+                create_rough_metal_scene(RenderConfig {
+                    samples_per_pixel: 64,
+                    width: 800,
+                    height: 600,
+                    ..RenderConfig::default()
+                })
+            },
+            render_and_sync,
         )
     });
 

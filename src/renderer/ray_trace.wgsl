@@ -524,18 +524,6 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 // wavefront waits for its unluckiest neighbour, so a loop with a ~48% per-
 // iteration rejection rate costs far more than the arithmetic below.
 
-fn random_unit_vector(u: vec2<f32>) -> vec3<f32> {
-    let z = 1.0 - 2.0 * u.x;
-    let r = sqrt(max(0.0, 1.0 - z * z));
-    let phi = TWO_PI * u.y;
-    return vec3<f32>(r * cos(phi), r * sin(phi), z);
-}
-
-fn random_in_unit_sphere(u: vec2<f32>, radius_u: f32) -> vec3<f32> {
-    // cbrt of a uniform variate makes the radius uniform by volume.
-    return random_unit_vector(u) * pow(radius_u, 1.0 / 3.0);
-}
-
 fn random_in_unit_disk(u: vec2<f32>) -> vec3<f32> {
     // sqrt of a uniform variate makes the radius uniform by area.
     let r = sqrt(u.x);
@@ -565,6 +553,12 @@ fn onb_from_w(n: vec3<f32>) -> ONB {
 
 fn onb_local(onb: ONB, a: vec3<f32>) -> vec3<f32> {
     return a.x * onb.u + a.y * onb.v + a.z * onb.w;
+}
+
+// The inverse of onb_local: a world direction in the frame's coordinates, where
+// the shading normal is +z and every cosine is just a component.
+fn onb_from_world(onb: ONB, a: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(a, onb.u), dot(a, onb.v), dot(a, onb.w));
 }
 
 fn random_cosine_direction(u: vec2<f32>) -> vec3<f32> {
@@ -762,6 +756,67 @@ fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
     return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
 }
 
+// ---------------------------------------------------------------------------
+// GGX microfacet conductor
+//
+// Isotropic GGX with the height-correlated Smith masking-shadowing term and
+// Schlick's Fresnel. `alpha` is the roughness-squared parameter; the vectors
+// below live in the shading frame, where the shading normal is +z, so every
+// cosine is a `.z`.
+// ---------------------------------------------------------------------------
+
+// Below this alpha the lobe is narrower than the sampler can resolve and the
+// conductor is a mirror instead: a Dirac lobe with no pdf, which is what keeps
+// `Metal::new(.., 0.)` an exact mirror.
+const GGX_ALPHA_MIN = 1e-3;
+// The same cutoff in the user's units, since alpha = fuzz * fuzz.
+const FUZZ_SPECULAR_THRESHOLD = 0.0316227766;
+
+fn ggx_d(cos_h: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let t = 1.0 + cos_h * cos_h * (a2 - 1.0);
+    return a2 / (PI * t * t);
+}
+
+// Smith's Lambda for GGX, from which G1 = 1 / (1 + Lambda) and the height-
+// correlated G2 = 1 / (1 + Lambda(wo) + Lambda(wi)). Kept in Lambda form
+// because what the sampled weight wants is G2 / G1(wo), and in this form that
+// cancels to (1 + Lambda_o) / (1 + Lambda_o + Lambda_i) with no divisions.
+fn smith_lambda(cos_w: f32, alpha: f32) -> f32 {
+    let c2 = cos_w * cos_w;
+    let tan2 = max(0.0, 1.0 - c2) / max(c2, 1e-8);
+    return 0.5 * (sqrt(1.0 + alpha * alpha * tan2) - 1.0);
+}
+
+// Schlick's approximation, with the conductor's normal-incidence reflectance as
+// f0. This is what makes a metal go white at a grazing angle instead of staying
+// its own colour, and it is why `Metal::albedo` means f0 rather than a flat
+// multiplier.
+fn fresnel_schlick(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
+    let m = clamp(1.0 - cos_theta, 0.0, 1.0);
+    let m2 = m * m;
+    return f0 + (vec3<f32>(1.0) - f0) * (m2 * m2 * m);
+}
+
+// Samples a visible normal of the GGX distribution: Dupuy & Benyoub 2023,
+// "Sampling Visible GGX Normals with Spherical Caps". The same distribution as
+// Heitz 2018, with no stretched frame to build and no special case for a `wo`
+// that the shading normal disagrees with.
+fn sample_ggx_vndf(wo: vec3<f32>, alpha: f32, u: vec2<f32>) -> vec3<f32> {
+    // Warp to the hemisphere configuration, where the normals visible from wo
+    // are exactly a spherical cap.
+    let wo_std = normalize(vec3<f32>(wo.xy * alpha, wo.z));
+    // Sample that cap: z uniform in (-wo_std.z, 1].
+    let phi = TWO_PI * u.x;
+    let z = fma(1.0 - u.y, 1.0 + wo_std.z, -wo_std.z);
+    let sin_theta = sqrt(clamp(1.0 - z * z, 0.0, 1.0));
+    let c = vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), z);
+    // The cap sample plus wo_std is the half vector in the hemisphere
+    // configuration; unwarping it lands back on the ellipsoid.
+    let h_std = c + wo_std;
+    return normalize(vec3<f32>(h_std.xy * alpha, h_std.z));
+}
+
 // What the pixel is looking at, before any light transport: the first surface
 // along the view ray that is not a mirror or a lens. Filled by trace_guide and
 // used only to guide the denoiser's edge-stopping functions -- it is a guide,
@@ -957,9 +1012,10 @@ struct Bsdf {
     // The geometric normal, which the shading frame may disagree with wherever
     // an interpolated normal or a normal map has moved it.
     ng: vec3<f32>,
+    // The conductor's normal-incidence reflectance, f0, and the diffuse
+    // reflectance. Same field, different meaning per lobe.
     base_color: vec3<f32>,
-    // Lobe width. Carries metal's fuzz radius while the conductor is a blurred
-    // mirror; #43 makes it a GGX roughness.
+    // GGX roughness, the squared-roughness convention: alpha = fuzz * fuzz.
     alpha: f32,
     // Relative index of refraction, already resolved against which side of the
     // surface the ray is on.
@@ -993,7 +1049,10 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
     b.frame = onb_from_w(surface.normal);
     b.ng = surface.geometric_normal;
     b.base_color = surface.albedo;
-    b.alpha = surface.fuzz;
+    // Roughness squared, which is what every other renderer means by a
+    // roughness slider, and clamped because nothing stops a caller passing a
+    // fuzz above 1 where GGX stops being meaningful.
+    b.alpha = clamp(surface.fuzz * surface.fuzz, 0.0, 1.0);
     b.ior = select(surface.refraction_index, 1.0 / surface.refraction_index, front_face);
 
     if (surface.mat_type == MAT_LAMBERTIAN) {
@@ -1012,6 +1071,12 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
 // to land on. This is what gates next-event estimation -- not the material
 // type, which is the point of the whole layer.
 fn bsdf_is_specular(b: Bsdf) -> bool {
+    if (b.kind == BSDF_CONDUCTOR) {
+        // A rough conductor has a density for a light sample to land on, so it
+        // gets next-event estimation like any other spread lobe. Only the
+        // mirror end of the range is a delta.
+        return b.alpha < GGX_ALPHA_MIN;
+    }
     return b.kind != BSDF_DIFFUSE;
 }
 
@@ -1032,6 +1097,28 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         if (cos_i <= 0.0 || dot(b.ng, wi) <= 0.0) { return e; }
         e.f_cos = (b.base_color / PI) * cos_i;
         e.pdf = cos_i / PI;
+    } else if (b.kind == BSDF_CONDUCTOR) {
+        // A mirror has no density a light sample can land on.
+        if (b.alpha < GGX_ALPHA_MIN) { return e; }
+
+        let wo_l = onb_from_world(b.frame, wo);
+        let wi_l = onb_from_world(b.frame, wi);
+        // Same two-normal gate as the diffuse arm, and for the same reason.
+        if (wo_l.z <= 0.0 || wi_l.z <= 0.0 || dot(b.ng, wi) <= 0.0) { return e; }
+
+        let h = normalize(wo_l + wi_l);
+        let d = ggx_d(h.z, b.alpha);
+        let lambda_o = smith_lambda(wo_l.z, b.alpha);
+        let lambda_i = smith_lambda(wi_l.z, b.alpha);
+        let g2 = 1.0 / (1.0 + lambda_o + lambda_i);
+        let f = fresnel_schlick(b.base_color, dot(wo_l, h));
+
+        // f * cos_i, with the BRDF's own 1 / cos_i already cancelled against it.
+        e.f_cos = f * (d * g2 / (4.0 * wo_l.z));
+        // The VNDF sampling density, G1(wo) * D(h) / (4 cos_o), which is what
+        // the MIS denominator needs: the pdf this lobe *would* have had for the
+        // light's direction.
+        e.pdf = d / ((1.0 + lambda_o) * 4.0 * wo_l.z);
     }
 
     return e;
@@ -1068,17 +1155,44 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
         s.specular = false;
         s.valid = true;
     } else if (b.kind == BSDF_CONDUCTOR) {
-        let reflected = reflect(-wo, b.frame.w);
-        let fuzz_offset = random_in_unit_sphere(
-            sampler_2d(smp, bounce_pair + PAIR_BSDF),
-            sampler_1d(smp, dim_x(scalars)),
-        );
-        let direction = reflected + b.alpha * fuzz_offset;
-        if (dot(direction, b.frame.w) <= 0.0) { return s; }
+        let wo_l = onb_from_world(b.frame, wo);
+        // A shading normal the view ray is already behind has no lobe above
+        // the surface to sample.
+        if (wo_l.z <= 0.0) { return s; }
 
-        s.wi = normalize(direction);
-        s.weight = b.base_color;
-        s.valid = true;
+        if (b.alpha < GGX_ALPHA_MIN) {
+            // Mirror: a Dirac lobe, so pdf 0 and the weight is the Fresnel
+            // term alone -- the division by the pdf has nothing left to do.
+            let direction = reflect(-wo, b.frame.w);
+            if (dot(b.ng, direction) <= 0.0) { return s; }
+
+            s.wi = normalize(direction);
+            s.weight = fresnel_schlick(b.base_color, wo_l.z);
+            s.valid = true;
+        } else {
+            let h = sample_ggx_vndf(wo_l, b.alpha, sampler_2d(smp, bounce_pair + PAIR_BSDF));
+            let wi_l = reflect(-wo_l, h);
+            // A visible normal can still reflect below the horizon. Dropping
+            // that sample is not the old uncompensated `break`: it is the
+            // single-scatter shadowing term, and what it costs is the
+            // multiple-scattering energy the furnace test measures.
+            if (wi_l.z <= 0.0) { return s; }
+
+            let direction = onb_local(b.frame, wi_l);
+            if (dot(b.ng, direction) <= 0.0) { return s; }
+
+            let lambda_o = smith_lambda(wo_l.z, b.alpha);
+            let lambda_i = smith_lambda(wi_l.z, b.alpha);
+
+            s.wi = normalize(direction);
+            // The VNDF cancellation: f * cos / pdf collapses to F * G2 / G1(wo),
+            // with D, the 4 cos_o cos_i and G1 all gone.
+            s.weight = fresnel_schlick(b.base_color, dot(wo_l, h))
+                * ((1.0 + lambda_o) / (1.0 + lambda_o + lambda_i));
+            s.pdf = ggx_d(h.z, b.alpha) / ((1.0 + lambda_o) * 4.0 * wo_l.z);
+            s.specular = false;
+            s.valid = true;
+        }
     } else if (b.kind == BSDF_DIELECTRIC) {
         let cos_theta = min(dot(wo, b.frame.w), 1.0);
         let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
@@ -1568,7 +1682,13 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
         let surface = surface_at(resolve_material_index_dominant(rec.material_index), rec);
         distance += rec.t;
 
-        let specular = surface.mat_type == MAT_METAL || surface.mat_type == MAT_DIELECTRIC;
+        // A *rough* metal ends the chain rather than continuing it. What it
+        // reflects is not a sharp image, so following it would make
+        // neighbouring pixels record unrelated guides -- the one thing an edge
+        // stop cannot survive, and the same reason the Fresnel coin flip below
+        // is resolved deterministically.
+        let specular = (surface.mat_type == MAT_METAL && surface.fuzz < FUZZ_SPECULAR_THRESHOLD)
+            || surface.mat_type == MAT_DIELECTRIC;
         if (!specular || bounce == GUIDE_MAX_SPECULAR) {
             // The first surface that scatters -- or, once the budget is spent,
             // whatever specular surface the chain stalled on, which is the old
@@ -1585,9 +1705,8 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
         let unit_direction = normalize(r.direction);
         var direction: vec3<f32>;
         if (surface.mat_type == MAT_METAL) {
-            // Fuzz ignored: it is what makes a sampled chain diverge between
-            // neighbours, and the mirror direction is the mean it scatters
-            // around anyway.
+            // Only a near-mirror metal gets here, so the mirror direction is
+            // the whole lobe rather than the mean of one.
             direction = reflect(unit_direction, surface.normal);
             tint *= surface.albedo;
         } else {
