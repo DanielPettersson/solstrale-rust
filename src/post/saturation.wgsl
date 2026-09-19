@@ -16,7 +16,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let curr_index = gid.y * width + gid.x;
     let pixel = pixels[curr_index].xyz;
 
-    let gray = 0.2989 * pixel.x + 0.587 * pixel.y + 0.114 * pixel.z;
+    let gray = dot(pixel, vec3<f32>(0.2126, 0.7152, 0.0722));
     let g = -gray * saturation_factor;
     let gg = 1.0 + saturation_factor;
     pixels[curr_index] = vec4<f32>(
