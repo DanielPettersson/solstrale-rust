@@ -67,8 +67,8 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   makes the mesh look smooth, but the mesh is still faceted, and the two
   disagree most where they are most visible: near the light boundary. A
   direction that passes the shading-normal cosine test can be blocked by the
-  mesh's own geometry, and `trace_sample` gates both next-event estimation and
-  the BSDF continuation on `dot(geometric_normal, wi) > 0` as well -- without
+  mesh's own geometry, and the BSDF layer gates both `bsdf_eval` (so next-event
+  estimation) and `bsdf_sample` on `dot(geometric_normal, wi) > 0` as well -- without
   that gate an interpolated normal facing a light the facet faces away from
   admits light straight through a closed surface, which is by far the worse
   artefact. What the gate costs is a band of missing light along the

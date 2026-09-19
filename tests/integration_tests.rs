@@ -2471,3 +2471,112 @@ fn test_srgb_decode_is_not_applied_to_normal_maps() {
          channel difference was {difference}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #42: the BSDF layer is a pure refactor
+//
+// Temporary, and deliberately so. The criterion is not that the goldens still
+// pass -- they would pass through a much larger change -- but that the sample
+// stream is untouched and a 1 spp render differs from the pre-refactor one
+// only by float reassociation. #43 changes metal's draws on purpose, so this
+// check and its reference buffers go out with it.
+//
+// The references are f32 radiance, so they are pinned to the device that
+// recorded them -- a different driver reassociates differently and the bounds
+// below are far too tight for that. Nothing in CI runs this; re-record with
+// `record_bsdf_reference` when moving machines.
+// ---------------------------------------------------------------------------
+
+/// One sample per pixel, adaptive sampling off: an average over many samples
+/// would hide a changed draw, which is the whole thing being checked.
+fn bsdf_refactor_scenes() -> Vec<(&'static str, Scene)> {
+    let config = || RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel: 1,
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    };
+    vec![
+        ("test_scene", create_test_scene(config())),
+        ("specular_scene", create_specular_scene(config())),
+    ]
+}
+
+fn bsdf_reference_path(name: &str) -> String {
+    format!("tests/reference/bsdf_{name}.f32")
+}
+
+/// Rewrites the reference buffers from whatever the shader currently does. Run
+/// on the commit *before* the refactor:
+/// `cargo test --test integration_tests -- --ignored record_bsdf_reference`
+#[test]
+#[ignore]
+fn record_bsdf_reference() {
+    let (device, queue) = get_wgpu_device_and_queue();
+    std::fs::create_dir_all("tests/reference").unwrap();
+
+    for (name, scene) in bsdf_refactor_scenes() {
+        let bytes: Vec<u8> = render_linear(scene, device, queue)
+            .iter()
+            .flat_map(|p| {
+                p[..3]
+                    .iter()
+                    .flat_map(|c| c.to_le_bytes())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        std::fs::write(bsdf_reference_path(name), bytes).unwrap();
+    }
+}
+
+#[test]
+fn test_bsdf_refactor_is_image_preserving() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    for (name, scene) in bsdf_refactor_scenes() {
+        let path = bsdf_reference_path(name);
+        let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("Could not load {path}"));
+        let reference: Vec<f32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+
+        let actual: Vec<f32> = render_linear(scene, device, queue)
+            .iter()
+            .flat_map(|p| p[..3].to_vec())
+            .collect();
+        assert_eq!(actual.len(), reference.len(), "{name} buffer size");
+
+        let mut diffs: Vec<f64> = actual
+            .iter()
+            .zip(&reference)
+            .map(|(a, r)| (a - r).abs() as f64)
+            .collect();
+        let mean_diff = diffs.iter().sum::<f64>() / diffs.len() as f64;
+        let mean_reference =
+            reference.iter().map(|r| *r as f64).sum::<f64>() / reference.len() as f64;
+        let relative = mean_diff / mean_reference;
+
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p9999 = diffs[(diffs.len() as f64 * 0.9999) as usize];
+
+        println!("{name}: relative mean |diff| {relative:e}, 99.99th pct |diff| {p9999:e}");
+
+        assert!(
+            relative < 1e-7,
+            "{name}: relative mean absolute difference {relative:e} is more than \
+             reassociation can account for"
+        );
+        // Not bit-equality. A last-bit difference can flip a `cos_theta <= 0.0`
+        // or `pdf_light > 0.0` test, and those few channels then diverge
+        // completely; a percentile bound is the honest metric.
+        assert!(
+            p9999 < 1e-5,
+            "{name}: 99.99th-percentile absolute difference {p9999:e} says more than \
+             a handful of channels took a different branch"
+        );
+    }
+}
