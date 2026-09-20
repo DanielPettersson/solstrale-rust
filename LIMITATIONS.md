@@ -201,6 +201,17 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   case that is not adversarial. Note that the *shading* still reads the flat
   `GpuMaterial.emission` — one texel at UV (0, 0) — which is the separate gap
   recorded as issue #59.
+- **A sheared quad light is sampled by area, and so is a small one.**
+  `quad_spherical` (`renderer/ray_trace.wgsl`) parametrises a spherical
+  *rectangle*, and `Quad::new` takes any two edge vectors, so a quad whose edges
+  are not perpendicular falls back to area sampling — as does one subtending
+  less than `MIN_SOLID_ANGLE`, where the four interior angles no longer carry
+  enough f32 precision to divide by. Both predicates live in the shader, in the
+  one function the sampler and the PDF both call, because a CPU-side flag would
+  be a second place the two could come to different conclusions about which arm
+  a quad is on. Neither costs anything in practice: `Quad::new_box` produces
+  right angles, every quad in the suite has them, and below the threshold area
+  sampling is already within a few percent of optimal.
 - **The BVH leaf permutation trades build time for peak memory above ~400k
   primitives.** `permute_in_place` (`hittable/bvh.rs`) allocates nothing, where
   the staging-vector gather it replaced allocated a second full-size primitive
@@ -282,6 +293,24 @@ Recorded so they aren't reconsidered without new information.
   never the problem; the variance feeding the tolerance was. A second step-1 pass
   would also cost a dispatch and muddy the documented "each doubling the tap
   spacing" contract.
+
+- **Arvo's spherical triangle sampling.** The triangle counterpart of the quad
+  sampler recorded below, asked for in issue #49 as "measure, expect to
+  decline". The measurement is that there is nothing in the suite to measure it
+  on. The only triangle emitter is `create_test_scene`'s, and
+  power-proportional selection gives it **0.079%** of that scene's shadow rays —
+  its three lights carry 99.6%, 0.32% and 0.079% of the power. The empirical
+  form of the same fact: giving the *quad* light in that scene, which takes four
+  times as many picks, a strictly better sampler moved the triangle crop in
+  `light_sampling_sweep` from 0.24606 to 0.24607 at 8 spp and left every other
+  row unchanged to five digits. Against the issue's 10% bar that is 0.00%.
+
+  The case that would motivate it is an emissive OBJ mesh, and that is made of
+  *small* triangles each subtending a tiny solid angle, where area sampling is
+  already within a few percent of optimal. Arvo costs three `acos` against the
+  quad's four, plus — on the evidence below — a fight with register pressure to
+  keep it from costing a quarter of the occupancy. Reopen it with a scene whose
+  triangle emitter is both large and near.
 
 - **Wavefront path tracing.** The original reason recorded here -- "the benefit
   is smaller on a small-wavefront iGPU" -- was simply wrong about the hardware:
@@ -665,6 +694,62 @@ specular scene reproduce their old means in
 rest: its NEE mean sat 0.13% from the BSDF-only oracle at 2000 spp and now sits
 0.01% from it. Both arms were always converging to the same number — what
 shrank is how much noise the NEE arm still had left at 2000 spp.
+
+### Quad light sampling
+
+Done: a quad light subtending more than `MIN_SOLID_ANGLE` is sampled uniformly
+in solid angle (Ureña, Fajardo & King 2013), so its PDF is the constant
+`1 / Omega` instead of `d^2 / (cos * A)`. `quad_spherical` computes the
+parametrisation and the solid angle together and `quad_use_solid_angle` reads
+the arm off it, and both `sample_light` and `light_prim_pdf` go through the
+pair — drift between the sampler and the MIS weight then requires editing the
+shared helper.
+
+Linear RMSE against a 4000 spp reference, adaptive sampling off, from
+`light_sampling_sweep`. The crop column is the second one, and it exists because
+the win is concentrated; `grain` would have under-reported all of this, being a
+whole-image RMS over a whole-image mean.
+
+| scene | spp | by area | by solid angle | crop, by area | crop, by solid angle |
+| --- | --- | --- | --- | --- | --- |
+| cornell | 8 | 0.06261 | 0.06214 | 0.10216 | 0.10158 |
+| cornell | 512 | 0.00389 | 0.00378 | 0.00525 | 0.00509 |
+| test_scene | 8 | 0.19839 | 0.19840 | 0.24606 | 0.24607 |
+| wide_light | 8 | 0.04963 | 0.03070 | 0.06067 | 0.03470 |
+| wide_light | 512 | 0.00536 | 0.00355 | 0.00653 | 0.00407 |
+
+**The issue predicted 20-40% on Cornell and got 0.6% to 3%.** The prediction was
+about the right size for the technique and about the wrong scene. Cornell's
+emitter is 130x105 seen from 224 to 554 units, across which `d^2 / cos` varies
+by 21% at worst — there is very little variance there to remove, and MIS removes
+much of what there is, because a cosine-sampled BSDF direction is already a good
+guess for a light that far away. `create_wide_light_scene` is the configuration
+the technique is actually for: a 100x100 emitter 20 units up, where the same
+factor varies by 49 across the floor and without bound on the walls. It is 34-43%
+better at every sample count, and it is what
+`test_wide_quad_light_is_solid_angle_sampled` pins.
+
+`test_scene` is unchanged to five digits, which is not a null result: its quad
+light takes 0.32% of the picks, so there was never anything there to move.
+
+**Cost: 3%, and it was 27% until the sampler stopped returning a direction.**
+`render/test_scene_800x600_64spp` 170.7 ms → 176.7 ms (+2.7%),
+`render/many_lights_400x300_256spp` 312.0 ms → 324.8 ms (+3.6%), with the tracer
+at 128 VGPRs and 8 subgroups per SIMD, unchanged, and 5855 → 6204 instructions.
+
+The first version built the world-space direction inside the sampler, which kept
+three frame vectors live across `sample_light` and took the tracer to **168
+VGPRs and 6 subgroups per SIMD** — a quarter of the occupancy, and +27% on
+`test_scene`. Making `quad_solid_angle_uv` return the point in the quad's own
+(u, v) parameters, for the area arm's `quad_random_direction` to turn into a
+direction, gave all of it back at the same instruction count. Two things that
+did *not* help, both tried and measured: collapsing the paper's cross products
+and `normalize`s into four scalar reciprocal square roots (kept anyway, it is
+strictly less work), and taking the frame vectors out of the struct while still
+building the direction in the sampler (no change at all — the allocator was
+never bothered by the struct, only by what was live). **The lesson is that a new
+block of arithmetic inside `sample_light` is priced in live vec3s, not in
+instructions.**
 
 ### GPU timing and occupancy
 
