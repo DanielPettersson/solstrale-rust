@@ -29,15 +29,31 @@ pub mod scene_flattener;
 #[cfg(test)]
 mod specialisation_test;
 
-/// Whether the tracer estimates direct lighting with an explicit shadow ray and
-/// weights it against the BSDF sample, or lets the BSDF sample find the lights
-/// on its own.
+/// How the tracer is compiled when it is not compiled as a reference.
 ///
-/// A constant rather than a [`RenderConfig`] field: it does not change what the
-/// image converges to, only how fast, so it is not a knob a caller should be
-/// reaching for. It is here so that next-event estimation can be measured
-/// against plain BSDF sampling without editing the shader -- see issue #47.
-const NEE_ENABLED: bool = true;
+/// Neither is a [`RenderConfig`] field. Next-event estimation does not change
+/// what the image converges to, only how fast; the firefly clamp is a bias the
+/// renderer takes deliberately and documents in LIMITATIONS.md. Neither is a
+/// knob a caller should be reaching for, and the one thing that does reach for
+/// them is [`Renderer::bsdf_only_reference`]. See issue #47 for the depth
+/// cutoff that will eventually replace the first of them.
+const SHIPPED_ESTIMATOR: Estimator = Estimator {
+    nee_enabled: true,
+    clamping_threshold: 10.,
+};
+
+/// The two things that decide what a sample carries, as opposed to how fast it
+/// is computed. Everything in [`Specialisation`] leaves the samples alone; both
+/// of these change them, which is why they are apart from it.
+#[derive(Clone, Copy)]
+struct Estimator {
+    /// Whether direct lighting is estimated with an explicit shadow ray and
+    /// weighed against the BSDF sample, or left for the BSDF sample to find.
+    nee_enabled: bool,
+    /// Ceiling on the indirect radiance one sample may carry.
+    /// `ray_trace.wgsl` documents what the shipped value buys.
+    clamping_threshold: f32,
+}
 
 /// What the tracer is compiled against for one scene.
 ///
@@ -110,6 +126,7 @@ impl Specialisation {
         width: u32,
         height: u32,
         low_discrepancy: bool,
+        estimator: Estimator,
     ) -> Vec<(&'static str, f64)> {
         let flag = |b: bool| if b { 1. } else { 0. };
         vec![
@@ -124,7 +141,8 @@ impl Specialisation {
             ("has_dielectrics", flag(self.has_dielectrics)),
             ("has_textures", flag(self.has_textures)),
             ("has_normal_maps", flag(self.has_normal_maps)),
-            ("nee_enabled", flag(NEE_ENABLED)),
+            ("nee_enabled", flag(estimator.nee_enabled)),
+            ("clamping_threshold", estimator.clamping_threshold as f64),
             ("low_discrepancy", flag(low_discrepancy)),
         ]
     }
@@ -545,18 +563,60 @@ impl<'a> Renderer<'a> {
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::with_specialisation(scene, device, queue, None)
+        Self::build(scene, device, queue, None, SHIPPED_ESTIMATOR)
+    }
+
+    /// As [`Renderer::new`], but compiled as a reference estimator: next-event
+    /// estimation off, so no light is ever sampled or weighed and every emitter
+    /// a BSDF path lands on is taken at full weight, and the firefly clamp
+    /// lifted, so nothing is thrown away on the way.
+    ///
+    /// The same integral as [`Renderer::new`] by a route that shares none of
+    /// its light PDFs, none of its MIS weights and none of its bias. Converged,
+    /// the two have to agree -- and that is the only check the suite has on
+    /// those PDFs that does not go through the very PDFs it is checking, which
+    /// is why this is reachable from outside the crate at all.
+    ///
+    /// Far noisier per sample on a scene lit by discrete lights, which is the
+    /// whole reason `SHIPPED_ESTIMATOR` is what it is. For converged
+    /// comparisons, not for rendering.
+    pub fn bsdf_only_reference(
+        scene: Scene,
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+    ) -> Result<Self, Box<dyn Error>> {
+        let estimator = Estimator {
+            nee_enabled: false,
+            // Finite rather than infinite: an override reaches the shader as a
+            // literal, and `min(x, inf)` is a NaN waiting for a backend that
+            // folds it differently. Nothing a path can carry comes near this.
+            clamping_threshold: f32::MAX,
+        };
+        Self::build(scene, device, queue, None, estimator)
     }
 
     /// As [`Renderer::new`], but able to compile the tracer against something
     /// other than what the scene says. `None` -- what every caller but
     /// `specialisation_test` passes -- derives it from the scene; see
     /// [`Specialisation`].
+    #[cfg(test)]
     fn with_specialisation(
         scene: Scene,
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
         specialisation: Option<Specialisation>,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::build(scene, device, queue, specialisation, SHIPPED_ESTIMATOR)
+    }
+
+    /// The one constructor. Everything above it differs only in what the
+    /// tracer is compiled as.
+    fn build(
+        scene: Scene,
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        specialisation: Option<Specialisation>,
+        estimator: Estimator,
     ) -> Result<Self, Box<dyn Error>> {
         // A scene lit only by its background is a scene -- a uniform
         // environment is what a furnace test is made of, and next-event
@@ -777,7 +837,12 @@ impl<'a> Renderer<'a> {
             device,
             &bind_group_layout,
             &module,
-            &specialisation.constants(width, height, scene.render_config.low_discrepancy),
+            &specialisation.constants(
+                width,
+                height,
+                scene.render_config.low_discrepancy,
+                estimator,
+            ),
         );
 
         let size = (width * height * 16) as u64; // vec3 is 16 bytes aligned (as vec4 effectively)

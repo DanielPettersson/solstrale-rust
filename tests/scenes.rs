@@ -787,14 +787,12 @@ pub fn create_texture_mapping_scene(render_config: RenderConfig) -> Scene {
 /// regime the renderer's absolute clamp is documented as not covering.
 #[allow(dead_code)]
 pub fn create_cornell_scene(render_config: RenderConfig) -> Scene {
-    let camera = CameraConfig {
-        vertical_fov_degrees: 40.,
-        aperture_size: 0.,
-        look_from: Vec3::new(278., 278., -800.),
-        look_at: Vec3::new(278., 278., 0.),
-        up: Vec3::new(0., 1., 0.),
-    };
+    cornell_scene(render_config, cornell_world())
+}
 
+/// The walls, the boxes and the ceiling emitter, so the stacked-lights variant
+/// below can add to them rather than restate them.
+fn cornell_world() -> Vec<Hittables> {
     let red = Lambertian::new(SolidColor::new(0.65, 0.05, 0.05).into(), None);
     let green = Lambertian::new(SolidColor::new(0.12, 0.45, 0.15).into(), None);
     let white = Lambertian::new(SolidColor::new(0.73, 0.73, 0.73).into(), None);
@@ -891,14 +889,57 @@ pub fn create_cornell_scene(render_config: RenderConfig) -> Scene {
         ]),
     ));
 
+    world
+}
+
+fn cornell_scene(render_config: RenderConfig, world: Vec<Hittables>) -> Scene {
     Scene {
         world: Bvh::new(world).into(),
-        camera,
+        camera: CameraConfig {
+            vertical_fov_degrees: 40.,
+            aperture_size: 0.,
+            look_from: Vec3::new(278., 278., -800.),
+            look_at: Vec3::new(278., 278., 0.),
+            up: Vec3::new(0., 1., 0.),
+        },
         // No ambient light whatsoever. An ambient background is what stops the
         // other scenes here producing fireflies at all.
         background_color: Vec3::new(0., 0., 0.),
         render_config,
     }
+}
+
+/// The Cornell box with two emitters stacked one behind the other: the ceiling
+/// light it already has, and a dimmer, wider one hung 54 units below it.
+///
+/// From most of the floor a direction that reaches the lower emitter carries on
+/// into the upper one, which is the one configuration where "which light is
+/// this direction's light?" has more than one answer. A light PDF that sums
+/// over every emitter the ray crosses at any distance counts both and
+/// under-weights the BSDF-sampled hit; one that asks only about the emitter the
+/// ray actually reaches does not. It was worth 4.3% of this scene's mean
+/// radiance, which is what `test_bsdf_only_sampling_converges_to_the_same_image`
+/// measures.
+#[allow(dead_code)]
+pub fn create_cornell_stacked_lights_scene(render_config: RenderConfig) -> Scene {
+    let mut world = cornell_world();
+
+    // Same winding as the ceiling emitter, so it too faces down. Dimmer, so it
+    // does not simply become the scene's light; wider, so the ceiling emitter
+    // is still visible past it from part of the floor rather than shadowed
+    // everywhere.
+    world.push(
+        Quad::new(
+            Vec3::new(193., 500., 207.),
+            Vec3::new(170., 0., 0.),
+            Vec3::new(0., 0., 145.),
+            DiffuseLight::new(8., 8., 8., None).into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    cornell_scene(render_config, world)
 }
 
 /// A five-walled box, every wall carrying the material under test, lit by a

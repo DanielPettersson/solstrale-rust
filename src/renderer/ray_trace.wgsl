@@ -162,7 +162,12 @@ const GUIDE_FAR = 1e7;
 //   the energy to buy that same 0.862 -> 0.672. What survives is a backstop
 //   for scenes that do produce outliers -- a small intense light, an emissive
 //   mesh -- priced so it does not tax the scenes that do not.
-const CLAMPING_THRESHOLD = 10.0;
+//
+// An override rather than a const, and the one override here that does change
+// what a sample carries: it is what lets a test render the same scene with the
+// bias lifted, so the clamp cannot be mistaken for an error in the estimator.
+// See `Renderer::bsdf_only_reference`.
+override clamping_threshold: f32 = 10.0;
 
 const PI = 3.14159265359;
 
@@ -342,12 +347,12 @@ var<storage, read_write> gbuffer: array<vec4<u32>>;
 override width: u32 = 1u;
 override height: u32 = 1u;
 
-// Emitters in the scene, so light_pdf_value's loop has a constant trip count
-// and the 1/light_count average is a constant multiply.
+// Emitters in the scene, so the uniform 1/light_count pick probability is a
+// constant multiply and prim_is_light's binary search has a constant bound.
 override light_count: u32 = 0u;
 
 // Which primitive types the scene contains. Each `false` strips one arm from
-// hit_leaf, leaf_occluded, resolve_hit, sample_light and light_pdf_value. There
+// hit_leaf, leaf_occluded, resolve_hit, sample_light and light_prim_pdf. There
 // is no flag for triangles: they are the arm the others fall through to, so on
 // an all-triangle scene those chains become straight-line code.
 override has_spheres: bool = true;
@@ -670,55 +675,103 @@ fn sphere_random_direction(s: Sphere, origin: vec3<f32>, u: vec2<f32>) -> vec3<f
     return onb_local(uvw, random_to_sphere(radius, dot(direction, direction), u));
 }
 
-// Evaluates the mixture PDF's light term.
+// The one definition of a light's solid-angle density. sample_light and the
+// BSDF-side MIS weight both call it, each from the `t` and the normal it
+// already has, which is what stops the two strategies drifting apart.
 //
-// Uses the distance-only intersection variants: this runs for every light on
-// every diffuse bounce, and the full UV/tangent work the shared hit routines
-// used to do was discarded here every single time.
-fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
-    if (light_count == 0u) { return 0.0; }
+// Returns the density of this primitive alone; the caller multiplies by the
+// probability of having picked it.
+//
+// `direction` must be unit and `distance` in world units. The primary ray is
+// not normalised (issue #57) and never reaches either caller: the camera ray
+// counts as specular, so an emitter it lands on is taken at weight 1 without
+// consulting a light PDF, and trace_guide has no MIS at all. The next person
+// to touch trace_guide will not know that, hence this note.
+//
+// `normal` is the primitive's geometric normal, not the shading normal: the
+// area-to-solid-angle Jacobian belongs to the facet the point was sampled on.
+// Unused for spheres, which are sampled as a cone of directions rather than by
+// area, and so have no area term to convert.
+fn light_prim_pdf(
+    prim_type: u32,
+    prim_index: u32,
+    origin: vec3<f32>,
+    direction: vec3<f32>,
+    distance: f32,
+    normal: vec3<f32>,
+) -> f32 {
+    // Triangles are the fallback arm here and everywhere else a primitive type
+    // is dispatched on, so a scene without spheres or quads leaves nothing of
+    // this chain behind.
+    if (has_spheres && prim_type == PRIM_TYPE_SPHERE) {
+        let s = spheres[prim_index];
+        let center = s.center_and_radius.xyz;
+        let radius = s.center_and_radius.w;
+        let dist_sq = dot(center - origin, center - origin);
+        let cos_theta_max = sqrt(abs(1.0 - radius * radius / dist_sq));
+        let solid_angle = 2.0 * 3.14159265359 * (1.0 - cos_theta_max);
+        return 1.0 / solid_angle;
+    }
 
-    let r = Ray(origin, direction);
-    let dir_len = length(direction);
-    let dir_len_sq = dot(direction, direction);
-    var sum = 0.0;
+    var area = 0.0;
+    if (has_quads && prim_type == PRIM_TYPE_QUAD) {
+        area = quad_attr[prim_index].area;
+    } else {
+        area = triangle_attr[prim_index].area;
+    }
+    return (distance * distance) / (abs(dot(direction, normal)) * area);
+}
 
-    for (var i = 0u; i < light_count; i++) {
-        let light = lights[i];
-        var t_hit = 0.0;
-        var bary = vec2<f32>(0.0);
-
-        // Triangles are the fallback arm here and everywhere else a primitive
-        // type is dispatched on, so a scene without spheres or quads leaves
-        // nothing of this chain behind.
-        if (has_spheres && light.prim_type == PRIM_TYPE_SPHERE) {
-            if (hit_sphere_t(r, spheres[light.prim_index], 0.001, 1e20, &t_hit)) {
-                let s = spheres[light.prim_index];
-                let center = s.center_and_radius.xyz;
-                let radius = s.center_and_radius.w;
-                let dist_sq = dot(center - origin, center - origin);
-                let cos_theta_max = sqrt(abs(1.0 - radius * radius / dist_sq));
-                let solid_angle = 2.0 * 3.14159265359 * (1.0 - cos_theta_max);
-                sum += 1.0 / solid_angle;
-            }
-        } else if (has_quads && light.prim_type == PRIM_TYPE_QUAD) {
-            if (hit_quad_t(r, quad_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
-                let attr = quad_attr[light.prim_index];
-                let normal = quad_pos[light.prim_index].normal;
-                let dist_sq = t_hit * t_hit * dir_len_sq;
-                let cosine = abs(dot(direction, normal) / dir_len);
-                sum += dist_sq / (cosine * attr.area);
-            }
+// Whether a primitive is one of the emitters sample_light draws from.
+//
+// `lights` is sorted by the packed `(prim_type, prim_index)` key that
+// `prim_refs` already uses, so this is a binary search: three iterations at
+// eight lights, ten at a thousand. The alternative -- a light index stored on
+// the primitive -- founders on QuadAttr being exactly 32 bytes with no slack,
+// and growing it by half to save three iterations is not worth it. It is the
+// escape hatch if a profile ever shows this search.
+fn prim_is_light(prim_type: u32, prim_index: u32) -> bool {
+    let key = (prim_type << PRIM_TYPE_SHIFT) | prim_index;
+    var lo = 0u;
+    var hi = light_count;
+    while (lo < hi) {
+        let mid = (lo + hi) >> 1u;
+        let light = lights[mid];
+        if (((light.prim_type << PRIM_TYPE_SHIFT) | light.prim_index) < key) {
+            lo = mid + 1u;
         } else {
-            if (hit_triangle_t(r, triangle_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
-                let attr = triangle_attr[light.prim_index];
-                let dist_sq = t_hit * t_hit * dir_len_sq;
-                let cosine = abs(dot(direction, attr.normal) / dir_len);
-                sum += dist_sq / (cosine * attr.area);
-            }
+            hi = mid;
         }
     }
-    return sum / f32(light_count);
+    if (lo >= light_count) { return false; }
+    let light = lights[lo];
+    return ((light.prim_type << PRIM_TYPE_SHIFT) | light.prim_index) == key;
+}
+
+// The light strategy's density for a direction a BSDF path followed to an
+// emitter, which is the other half of the MIS weight at that vertex.
+//
+// Only the emitter the path actually reached can have produced a light sample
+// along this direction: sample_light picks one emitter and the caller's
+// occluded() discards the sample unless that one is unblocked -- and any
+// emitter further along is blocked by this one. So the density is exactly
+// `P(pick this one) * p_this(w)`, with no sum over the rest of the scene and
+// no intersection test beyond the one the path already did.
+//
+// A `Blend` holding a DiffuseLight is not in `lights`, so it lands here as 0
+// and the hit is taken at weight 1 -- which is what it got before, now for a
+// structural reason rather than as a coincidence of the sum.
+fn light_hit_pdf(
+    prim_type: u32,
+    prim_index: u32,
+    origin: vec3<f32>,
+    direction: vec3<f32>,
+    distance: f32,
+    normal: vec3<f32>,
+) -> f32 {
+    if (light_count == 0u || !prim_is_light(prim_type, prim_index)) { return 0.0; }
+    return light_prim_pdf(prim_type, prim_index, origin, direction, distance, normal)
+        / f32(light_count);
 }
 
 // One sample of the direct-lighting strategy: pick a light uniformly, sample a
@@ -728,6 +781,11 @@ struct LightSample {
     direction: vec3<f32>,
     // Distance to the sampled point, so the shadow ray can stop short of it.
     distance: f32,
+    // Solid-angle density of this whole strategy at `direction`: the chance of
+    // having picked this light times the density of the point on it. Computed
+    // from the `t` and normal the probe below produces anyway, so it costs no
+    // intersection of its own.
+    pdf: f32,
     emission: vec3<f32>,
     attenuation_factor: f32,
     valid: bool,
@@ -739,6 +797,7 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     var ls: LightSample;
     ls.direction = vec3<f32>(0.0, 1.0, 0.0);
     ls.distance = 0.0;
+    ls.pdf = 0.0;
     ls.emission = vec3<f32>(0.0);
     ls.attenuation_factor = 0.0;
     ls.valid = false;
@@ -796,6 +855,8 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
 
     ls.direction = dir;
     ls.distance = t_hit;
+    ls.pdf = light_prim_pdf(light.prim_type, light.prim_index, origin, dir, t_hit, normal)
+        / f32(light_count);
     ls.emission = emission;
     ls.attenuation_factor = material.attenuation_factor;
     ls.valid = true;
@@ -1742,7 +1803,7 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
 // Depth 0 is what the camera can see without an intervening bounce: the
 // visible surface's own emission, the shadow ray cast from it, and the
 // background behind it. None of those is a firefly, so none of them is
-// clamped. Everything deeper goes through CLAMPING_THRESHOLD.
+// clamped. Everything deeper goes through `clamping_threshold`.
 fn add_contribution(
     direct: ptr<function, vec3<f32>>,
     indirect: ptr<function, vec3<f32>>,
@@ -1938,7 +1999,16 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                 // estimation is off.
                 var weight = 1.0;
                 if (nee_enabled && !prev_specular) {
-                    let pdf_light = light_pdf_value(r.origin, r.direction);
+                    // The geometric normal, not the shading one: the density
+                    // being weighed against is an area measure on the facet.
+                    let pdf_light = light_hit_pdf(
+                        hit_ref.prim_type,
+                        hit_ref.prim_idx,
+                        r.origin,
+                        r.direction,
+                        rec.t,
+                        rec.geometric_normal,
+                    );
                     weight = prev_bsdf_pdf / (prev_bsdf_pdf + pdf_light);
                 }
                 add_contribution(&direct, &indirect, depth, throughput * emitted * weight);
@@ -1963,9 +2033,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             if (ls.valid) {
                 let e = bsdf_eval(b, wo, ls.direction);
                 if (e.pdf > 0.0) {
-                    let pdf_light = light_pdf_value(rec.p, ls.direction);
                     // Shadow ray last: everything above is cheaper to reject on.
-                    if (pdf_light > 0.0 && !occluded(rec.p, ls.direction, ls.distance - RAY_EPS)) {
+                    if (ls.pdf > 0.0 && !occluded(rec.p, ls.direction, ls.distance - RAY_EPS)) {
                         var emitted = ls.emission;
                         if (ls.attenuation_factor > 0.0) {
                             emitted *= 1.0 / (1.0 + ls.attenuation_factor * (path_length + ls.distance));
@@ -1977,7 +2046,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                             &direct,
                             &indirect,
                             depth,
-                            throughput * e.f_cos * emitted / (pdf_light + e.pdf),
+                            throughput * e.f_cos * emitted / (ls.pdf + e.pdf),
                         );
                     }
                 }
@@ -2011,7 +2080,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     }
 
     // Firefly clamp, per sample, on the indirect term only.
-    return direct + min(indirect, vec3<f32>(CLAMPING_THRESHOLD));
+    return direct + min(indirect, vec3<f32>(clamping_threshold));
 }
 
 // Floor on the luminance used as the denominator of the relative variance
