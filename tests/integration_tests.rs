@@ -20,13 +20,13 @@ use solstrale::post::{
     BloomPostProcessor, DenoisePostProcessor, PostProcessors, SaturationPostProcessor,
 };
 use solstrale::ray_trace;
-use solstrale::renderer::{RenderConfig, Scene};
+use solstrale::renderer::{RenderConfig, Renderer, Scene};
 use solstrale::util::rgb_color::linear_to_srgb;
 
 use crate::scenes::{
     FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, ROUGH_METAL_FUZZ, ROUGH_METAL_RADIUS,
-    create_blend_material_scene, create_cornell_scene, create_furnace_scene,
-    create_light_attenuation_scene, create_normal_mapping_scene,
+    create_blend_material_scene, create_cornell_scene, create_cornell_stacked_lights_scene,
+    create_furnace_scene, create_light_attenuation_scene, create_normal_mapping_scene,
     create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
     create_obj_with_triangle, create_quad_rotation_scene, create_rough_metal_scene,
     create_simple_test_scene, create_smooth_vs_flat_scene, create_specular_scene,
@@ -816,6 +816,127 @@ fn test_adaptive_sampling_convergence() {
     }
 }
 
+/// The MIS weights and the light PDFs, checked against the one estimator in
+/// the crate that uses neither.
+///
+/// [`Renderer::bsdf_only_reference`] is a plain BSDF path tracer with the
+/// firefly clamp lifted: no light is ever sampled or weighed, and every
+/// emitter it lands on is taken at weight 1. It estimates the same integral as
+/// the shipped renderer, so converged, the two have to agree. Nothing else in
+/// the suite can say that -- the gamma-mapped RMS goldens are scored at 0.9 on
+/// a 100x50 downsample, which a uniform brightness shift walks straight
+/// through.
+///
+/// The four scenes are four ways a light PDF can be wrong. Cornell has no
+/// background at all, so a total loss of direct lighting has nowhere to hide;
+/// the stacked-lights Cornell is the one configuration where a direction
+/// reaches two emitters at once; the specular scene drives the weight-1 path
+/// through metal and glass; and the test scene's radius-10 sphere light is
+/// crossed by most of the rays in the frame.
+///
+/// The reference lifts the clamp because the shipped renderer's clamp is the
+/// one thing here that is deliberately biased, and on a BSDF-only path it bites
+/// far harder -- every emitter hit arrives as an unweighted indirect sample.
+/// Clamped both ways, Cornell's two arms sit 15% apart and the gate would have
+/// to be loose enough to be worthless. Unclamped on the reference side, the
+/// four scenes come in at 0.07%, 0.11%, 0.00% and 0.13%. So a failure here that
+/// *shrinks* when `clamping_threshold` in `ray_trace.wgsl` is raised is the
+/// clamp costing the shipped renderer energy, not the MIS weights being wrong.
+#[test]
+fn test_bsdf_only_sampling_converges_to_the_same_image() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let config = || RenderConfig {
+        width: 100,
+        height: 60,
+        samples_per_pixel: 2000,
+        samples_per_batch: 100,
+        // Off. A retired pixel holds whatever mean it had when it retired, and
+        // the two arms retire different pixels at different times, which would
+        // put a difference into the comparison that is not the estimator's.
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    };
+
+    // At 2000 spp the sampling error in a whole-image mean is far below a tenth
+    // of a percent, so this is roughly four times the widest measured gap and
+    // still tight enough to catch a PDF that is wrong by a constant factor.
+    const TOLERANCE: f64 = 0.005;
+
+    let scenes: [OracleScene; 4] = [
+        ("cornell", create_cornell_scene),
+        (
+            "cornell_stacked_lights",
+            create_cornell_stacked_lights_scene,
+        ),
+        ("specular", create_specular_scene),
+        ("test_scene", create_test_scene),
+    ];
+
+    for (name, build) in scenes {
+        let shipped = converged_mean(build(config()), true, device, queue);
+        let reference = converged_mean(build(config()), false, device, queue);
+        let relative = (shipped - reference).abs() / reference;
+
+        println!(
+            "{}: mean linear radiance {} with NEE against {} without, {:.2}% apart",
+            name,
+            shipped,
+            reference,
+            relative * 100.
+        );
+
+        assert!(
+            relative < TOLERANCE,
+            "{}: next-event estimation converges to {} where BSDF sampling alone converges to {}, \
+             {:.2}% apart against a {:.1}% tolerance",
+            name,
+            shipped,
+            reference,
+            relative * 100.,
+            TOLERANCE * 100.
+        );
+    }
+}
+
+/// One scene for the comparison above: a name for the report, and the builder
+/// that makes it at a given config.
+type OracleScene = (&'static str, fn(RenderConfig) -> Scene);
+
+/// As [`mean_linear_radiance`], but choosing which estimator traces the scene.
+fn converged_mean(
+    scene: Scene,
+    shipped_estimator: bool,
+    device: &'static wgpu::Device,
+    queue: &'static wgpu::Queue,
+) -> f64 {
+    let (progress_sender, progress_receiver) = channel();
+    let (_camera_sender, camera_receiver) = channel();
+    let (_abort_sender, abort_receiver) = channel();
+
+    let pixels = (scene.render_config.width * scene.render_config.height) as u32;
+    let mut renderer = if shipped_estimator {
+        Renderer::new(scene, device, queue)
+    } else {
+        Renderer::bsdf_only_reference(scene, device, queue)
+    }
+    .unwrap();
+    renderer
+        .render(&progress_sender, &camera_receiver, &abort_receiver, false)
+        .unwrap();
+    // The channel is unbounded, so the render above ran to completion without
+    // anyone draining it; dropping the sender is what ends the iteration below.
+    drop(progress_sender);
+
+    let output_buffer = progress_receiver
+        .into_iter()
+        .last()
+        .expect("render reported no progress")
+        .output_buffer;
+
+    mean_of_buffer(&output_buffer, pixels, device, queue)
+}
+
 fn mean_linear_radiance(
     scene: Scene,
     device: &'static wgpu::Device,
@@ -845,9 +966,19 @@ fn mean_linear_radiance(
     for render_output in output_receiver {
         output_buffer = Some(render_output.output_buffer);
     }
-    let output_buffer = output_buffer.unwrap();
 
-    let size = (width * height * 16) as u64;
+    mean_of_buffer(&output_buffer.unwrap(), width * height, device, queue)
+}
+
+/// Mean of the three colour channels over every pixel of a linear output
+/// buffer, which is the whole image's radiance in one number.
+fn mean_of_buffer(
+    output_buffer: &wgpu::Buffer,
+    pixels: u32,
+    device: &'static wgpu::Device,
+    queue: &'static wgpu::Queue,
+) -> f64 {
+    let size = (pixels * 16) as u64;
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size,
@@ -856,7 +987,7 @@ fn mean_linear_radiance(
     });
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, size);
+    encoder.copy_buffer_to_buffer(output_buffer, 0, &staging_buffer, 0, size);
     queue.submit(Some(encoder.finish()));
 
     let result: Vec<[f32; 4]> = get_result_from_buffer(device, &staging_buffer);

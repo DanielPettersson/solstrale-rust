@@ -111,7 +111,8 @@ pub struct SceneData {
     pub textures: Vec<Arc<RgbImage>>,
     /// Atlas placement for `textures`, computed once here and reused by the renderer.
     pub atlas_layout: Option<AtlasLayout>,
-    /// Light sources
+    /// Light sources, sorted by `light_key` so the tracer can binary-search
+    /// a primitive back to the lights array.
     pub lights: Vec<LightRef>,
     /// Whether `prim_refs[k]` is `(PRIM_TYPE_TRIANGLE << 30) | k` at every `k`.
     ///
@@ -200,6 +201,12 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     // it used to deep-copy every decoded image and re-run the identical packing.
     data.textures = atlas_textures;
     data.atlas_layout = atlas_layout;
+
+    // Emitters are appended as their primitives are, which interleaves the
+    // types. Sorting them by the same packed key `prim_refs` uses is what lets
+    // the tracer binary-search a hit primitive back to "is this an emitter?"
+    // instead of asking every light.
+    data.lights.sort_unstable_by_key(light_key);
 
     data.prim_refs_are_identity = data.triangle_pos.len() == data.prim_refs.len();
     debug_assert!(
@@ -330,6 +337,12 @@ fn aabb_min(a: &Aabb) -> [f32; 3] {
 
 fn aabb_max(a: &Aabb) -> [f32; 3] {
     [a.x.max as f32, a.y.max as f32, a.z.max as f32]
+}
+
+/// The packed `(prim_type, prim_index)` key a [`LightRef`] sorts by, which is
+/// the same packing `prim_refs` uses.
+fn light_key(light: &LightRef) -> u32 {
+    (light.prim_type << PRIM_TYPE_SHIFT) | light.prim_index
 }
 
 /// Packs an inline leaf the same way the builder does.

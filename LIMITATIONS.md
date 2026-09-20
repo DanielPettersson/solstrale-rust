@@ -178,13 +178,9 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   the standard trade-off of naive NEE.
 - **`Blend` is never `is_light()`.** A blend containing a `DiffuseLight` is not in
   the lights array, so it gets no NEE and is found by BSDF paths with weight 1.
-  Consistent and unbiased, because the MIS PDF covers exactly the same set.
-- **Rare MIS edge case.** A blend-emitter hit with a real light collinear behind
-  it can be slightly under-weighted, since the PDF sum counts lights at any
-  distance along the ray. Pre-existing structure, vanishingly rare -- and the
-  direct consequence of summing over every light rather than over the one the
-  ray actually reaches, so it goes away on its own if the closest-emitter PDF
-  lands.
+  Consistent and unbiased, because the MIS PDF covers exactly the same set:
+  `light_hit_pdf` looks the primitive up in `lights`, does not find it, and
+  returns 0.
 - **The BVH leaf permutation trades build time for peak memory above ~400k
   primitives.** `permute_in_place` (`hittable/bvh.rs`) allocates nothing, where
   the staging-vector gather it replaced allocated a second full-size primitive
@@ -267,15 +263,6 @@ Recorded so they aren't reconsidered without new information.
   would also cost a dispatch and muddy the documented "each doubling the tap
   spacing" contract.
 
-- **Single-light fast path for `light_pdf_value`.** `sample_light` already
-  intersects the chosen light, so its PDF could be computed without the extra
-  traversal when `light_count == 1`. Worth ~2%, but it duplicates the PDF formula
-  in two places where drift would silently bias the estimator. Not worth it.
-
-  Superseded rather than reversed: the closest-emitter PDF formulation removes
-  the loop entirely and leaves exactly one copy of the formula, so the ~2% comes
-  for free without the duplication this objection was about. The objection was
-  right; it was an objection to the duplication, not to the saving.
 - **Wavefront path tracing.** The original reason recorded here -- "the benefit
   is smaller on a small-wavefront iGPU" -- was simply wrong about the hardware:
   the development machine is a 40-CU RDNA1 dGPU. The conclusion survives anyway,
