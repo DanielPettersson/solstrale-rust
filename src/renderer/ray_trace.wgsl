@@ -1355,6 +1355,23 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     return surface;
 }
 
+// Beer-Lambert absorption across `t` world units of glass.
+//
+// `transmission_per_unit` is a dielectric's albedo, read as the fraction that
+// survives one world unit of travel. `(1,1,1)` is an exact no-op: `pow(1.0, t)`
+// is 1 for every `t`. The floor keeps `pow` off `log2(0)`, where a zero-length
+// segment through a fully absorbing channel would come out NaN.
+//
+// Callers apply it on a *back-face* dielectric hit, where `rec.t` is the length
+// of the segment that was inside the glass -- every segment but the camera ray
+// is normalised, and the camera is never inside the glass. That assumes the
+// entry and exit surfaces belong to the same material, which holds for any
+// closed glass object and is the only case where interior absorption means
+// anything.
+fn dielectric_transmittance(transmission_per_unit: vec3<f32>, t: f32) -> vec3<f32> {
+    return pow(max(transmission_per_unit, vec3<f32>(1e-4)), vec3<f32>(t));
+}
+
 // ---------------------------------------------------------------------------
 // BSDF
 //
@@ -1582,7 +1599,9 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
         }
 
         s.wi = normalize(direction);
-        // Clear glass: the surface tints nothing on the way through.
+        // The interface itself tints nothing: a dielectric's albedo is an
+        // interior absorption, applied per unit travelled by the transport
+        // loop, not a reflectance this lobe can fold in.
         s.weight = vec3<f32>(1.0);
         s.valid = true;
     }
@@ -2075,6 +2094,12 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
         let surface = surface_at(resolve_material_index_dominant(rec.material_index), rec);
         distance += rec.t;
 
+        // The same absorption trace_sample applies, or the edge stop sees a
+        // clear glass where the samples see a green one.
+        if (has_dielectrics && surface.mat_type == MAT_DIELECTRIC && !rec.front_face) {
+            tint *= dielectric_transmittance(surface.albedo, rec.t);
+        }
+
         // A *rough* metal ends the chain rather than continuing it. What it
         // reflects is not a sharp image, so following it would make
         // neighbouring pixels record unrelated guides -- the one thing an edge
@@ -2141,7 +2166,8 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
 // A Dirac lobe has no light-sampling counterpart, so it skips NEE and the
 // emitter it reaches is taken at full weight. Which lobes those are is the
 // BSDF layer's business, not this loop's: everything below dispatches on
-// `Bsdf`, never on `mat_type`, except the emitter test.
+// `Bsdf`, never on `mat_type`, except the emitter test and the absorption of
+// the segment just travelled, neither of which is a scattering question.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * width + pixel.x;
     let smp = sampler_new(index, sample_index);
@@ -2185,6 +2211,13 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         let rec = resolve_hit(r, hit_ref);
         let surface = resolve_surface(rec, smp, depth);
         path_length += rec.t;
+
+        // Absorption inside a dielectric, which is a property of the segment
+        // just travelled rather than of any lobe -- the one other place this
+        // loop has to know a material type.
+        if (has_dielectrics && surface.mat_type == MAT_DIELECTRIC && !rec.front_face) {
+            throughput *= dielectric_transmittance(surface.albedo, rec.t);
+        }
 
         if (surface.mat_type == MAT_DIFFUSE_LIGHT) {
             if (rec.front_face) {

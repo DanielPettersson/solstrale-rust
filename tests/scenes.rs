@@ -635,7 +635,9 @@ pub fn create_light_attenuation_scene(
     let red = Lambertian::new(SolidColor::new(1., 0., 0.).into(), None);
     let green = Lambertian::new(SolidColor::new(0., 1., 0.).into(), None);
     let blue = Lambertian::new(SolidColor::new(0., 0., 1.).into(), None);
-    let glass = Dielectric::new(SolidColor::new(0.8, 0.8, 0.8).into(), None, 1.5);
+    // Clear, not the 0.8 grey it used to be: that value was silently ignored
+    // and is now load-bearing, and this scene has never been about absorption.
+    let glass = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5);
 
     world.push(Sphere::new(Vec3::new(0., 0.2, 0.), 0.03, light.into()).into());
     world.push(Sphere::new(Vec3::new(0.25, 0.1, 0.25), 0.1, green.into()).into());
@@ -1285,6 +1287,69 @@ pub fn create_wide_light_scene(render_config: RenderConfig) -> Scene {
             aperture_size: 0.,
             look_from: Vec3::new(0., 10., 45.),
             look_at: Vec3::new(0., 6., 0.),
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: ZERO_VECTOR,
+        render_config,
+    }
+}
+
+/// A glass slab of a given thickness in front of a unit emitter, with a black
+/// background and nothing else in the frame.
+///
+/// Built so that the centre of the image measures Beer-Lambert absorption and
+/// nothing else. The slab's faces are perpendicular to the view direction, so
+/// the central rays enter at normal incidence, do not bend, and cross exactly
+/// `thickness` world units of glass before landing on a surface of radiance 1.
+///
+/// The background is black because it is what the front face's Fresnel
+/// reflection returns, and an untinted term there does not cancel in a ratio.
+/// Measured against a white background instead, green over red through two
+/// units reads 0.273 where it should read 0.250, and blue 0.098 against 0.063:
+/// the thicker the slab, the more the reflected white swamps what gets through.
+#[allow(dead_code)]
+pub fn create_glass_slab_scene(
+    render_config: RenderConfig,
+    thickness: f64,
+    transmission_per_unit: Vec3,
+) -> Scene {
+    let glass = Dielectric::new(
+        SolidColor::new(
+            transmission_per_unit.x,
+            transmission_per_unit.y,
+            transmission_per_unit.z,
+        )
+        .into(),
+        None,
+        1.5,
+    );
+
+    let mut world = Quad::new_box(
+        Vec3::new(-4., -4., -thickness / 2.),
+        Vec3::new(4., 4., thickness / 2.),
+        glass.into(),
+        &NopTransformer(),
+    );
+    world.push(
+        Quad::new(
+            Vec3::new(-20., -20., -10.),
+            Vec3::new(40., 0., 0.),
+            Vec3::new(0., 40., 0.),
+            DiffuseLight::new(1., 1., 1., None).into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            // Narrow, so every pixel the test reads crosses the slab at
+            // essentially normal incidence.
+            vertical_fov_degrees: 10.,
+            aperture_size: 0.,
+            look_from: Vec3::new(0., 0., 3.),
+            look_at: ZERO_VECTOR,
             up: Vec3::new(0., 1., 0.),
         },
         background_color: ZERO_VECTOR,

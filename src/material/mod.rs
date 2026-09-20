@@ -112,7 +112,21 @@ pub struct Dielectric {
 }
 
 impl Dielectric {
-    /// Creates a new dielectric material
+    /// Creates a new dielectric material.
+    ///
+    /// `albedo` is the fraction transmitted **per world unit** travelled inside
+    /// the glass, applied as Beer-Lambert absorption between the entry and exit
+    /// faces. `(1, 1, 1)` is clear glass and exactly a no-op. A radius-1 sphere
+    /// of `(0.5, 1, 0.5)` passes a quarter of its red and blue across the two
+    /// units through its middle and more near the silhouette, where the chord
+    /// is shorter -- the depth-dependent tint that makes glass read as a solid
+    /// rather than a coloured film.
+    ///
+    /// Per unit rather than a colour at a reference depth, because that form
+    /// needs a second parameter to express clear glass at all.
+    ///
+    /// Entry and exit are assumed to be the same material, so nested or
+    /// intersecting glass is not described.
     pub fn new(albedo: Textures, normal: Option<Textures>, index_of_refraction: f64) -> Self {
         Dielectric {
             albedo,

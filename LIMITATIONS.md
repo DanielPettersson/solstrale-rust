@@ -176,6 +176,18 @@ Correct but imperfect; documented so they read as choices rather than bugs.
 - **Dielectrics block NEE shadow rays.** Light through glass is found only by
   BSDF-sampled paths, at full MIS weight. Unbiased, but caustics stay noisy —
   the standard trade-off of naive NEE.
+- **Glass is smooth and non-dispersive.** `Dielectric` has a Beer–Lambert
+  interior absorption and two perfectly smooth interfaces, and nothing else. A
+  frosted one needs a GGX BTDF (Walter 2007) with the microfacet refraction
+  Jacobian and a second alpha, roughly tripling this arm; dispersion needs
+  per-wavelength transport, which breaks the `vec3 throughput` shortcut
+  everywhere rather than just here. Both are separate pieces of work, and
+  nothing currently asks for either.
+- **Absorption assumes the glass is closed and unnested.** The interior term is
+  applied on a back-face hit using that surface's own albedo, so it is the exit
+  material that prices the segment. Correct for any closed object, wrong for
+  nested or intersecting glass, which would need a medium stack the shader does
+  not carry.
 - **`Blend` is never `is_light()`.** A blend containing a `DiffuseLight` is not in
   the lights array, so it gets no NEE and is found by BSDF paths with weight 1.
   Consistent and unbiased, because the MIS PDF covers exactly the same set:
