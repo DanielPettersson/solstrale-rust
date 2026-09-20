@@ -75,6 +75,10 @@ const LEAF_OFFSET_MASK = 0x00FFFFFFu;
 const PRIM_TYPE_SHIFT = 30u;
 const PRIM_INDEX_MASK = 0x3FFFFFFFu;
 
+const PRIM_TYPE_SPHERE = 0u;
+const PRIM_TYPE_TRIANGLE = 1u;
+const PRIM_TYPE_QUAD = 2u;
+
 // Traversal defers only the farther child, so a tree of this depth pushes at
 // most one entry fewer than there are slots here. `Bvh::new` asserts its
 // depth against the matching MAX_TRAVERSAL_DEPTH, because overflowing this
@@ -203,17 +207,17 @@ struct Camera {
     v: vec3<f32>,
 }
 
+// Only what a dispatch varies. The image size and the light count are fixed
+// for the life of a pipeline, so they are overrides below rather than fields
+// here.
 struct RenderConfig {
-    width: u32,
-    height: u32,
     // Samples already accumulated before this dispatch.
     sample_count: u32,
     max_depth: u32,
-    background_color: vec3<f32>,
-    light_count: u32,
     samples_per_batch: u32,
     // Minimum samples a pixel must have before adaptive sampling may skip it.
     min_samples_per_pixel: u32,
+    background_color: vec3<f32>,
     // Relative standard-error threshold below which a pixel is converged.
     variance_threshold: f32,
     // Distinguishes successive accumulation restarts, and carries
@@ -222,9 +226,6 @@ struct RenderConfig {
     // pure function of pixel and sample index, so every frame replays an
     // identical sample sequence -- which reads as a static grain pinned to the
     // screen rather than as noise.
-    //
-    // Scalar, not a vec3: a vec3 here would align to 16 and push the struct
-    // to 64 bytes, which no longer matches the Rust mirror.
     restart_index: u32,
 }
 
@@ -317,6 +318,65 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 // and `pack_oct` in scene_flattener.rs.
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
+
+// ---------------------------------------------------------------------------
+// Pipeline specialisation
+//
+// Facts that hold for the whole life of a pipeline, handed to the shader as
+// override constants rather than as uniforms. naga substitutes these before it
+// emits SPIR-V, so a `false` here deletes the branch it guards and everything
+// under it, rather than merely making it predictable. `Renderer::new` already
+// builds the module and its one pipeline per render, so the only cost is a
+// shader-cache miss the first time a given combination is seen.
+//
+// Every flag below removes a branch the scene could never have taken, so none
+// of them changes a single sample -- see `Specialisation` in renderer/mod.rs.
+//
+// `max_depth` is deliberately not among them. A constant trip count buys
+// unrolling and nothing else, and the loop body is the whole material switch
+// plus two full BVH traversals; unrolling that ten times is an instruction
+// cache disaster on a shader that is already latency-bound. It stays in the
+// uniform.
+// ---------------------------------------------------------------------------
+
+override width: u32 = 1u;
+override height: u32 = 1u;
+
+// Emitters in the scene, so light_pdf_value's loop has a constant trip count
+// and the 1/light_count average is a constant multiply.
+override light_count: u32 = 0u;
+
+// Which primitive types the scene contains. Each `false` strips one arm from
+// hit_leaf, leaf_occluded, resolve_hit, sample_light and light_pdf_value. There
+// is no flag for triangles: they are the arm the others fall through to, so on
+// an all-triangle scene those chains become straight-line code.
+override has_spheres: bool = true;
+override has_quads: bool = true;
+
+// Whether `prim_refs` is the identity map, which it is exactly when every
+// primitive is a triangle. Worth the most of anything here: the innermost
+// traversal loop then reads the triangle's address straight out of the leaf
+// slot rather than chasing a reference to it, which removes one of the two
+// dependent loads per primitive test.
+override identity_prim_refs: bool = false;
+
+// Which material kinds the scene contains, counting the ones inside blends.
+// `has_blends` is the one that fires on the widest range of scenes: without it
+// every bounce pays for resolve_surface's ten-iteration walk, a materials[]
+// fetch, a compare and a branch.
+override has_blends: bool = true;
+override has_metal: bool = true;
+override has_dielectrics: bool = true;
+
+// Whether any material samples the atlas, for albedo and for normals. Strips
+// the textureSampleLevel branches from surface_at.
+override has_textures: bool = true;
+override has_normal_maps: bool = true;
+
+// Next-event estimation. Not a win in itself -- both arms of it are real work.
+// It is here so the estimator can be measured against plain BSDF sampling
+// without editing this file.
+override nee_enabled: bool = true;
 
 // Selects the sampler backing: 1 draws from an Owen-scrambled Sobol sequence,
 // 0 from white noise. An override rather than a uniform because an override is
@@ -616,19 +676,22 @@ fn sphere_random_direction(s: Sphere, origin: vec3<f32>, u: vec2<f32>) -> vec3<f
 // every diffuse bounce, and the full UV/tangent work the shared hit routines
 // used to do was discarded here every single time.
 fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
-    if (config.light_count == 0u) { return 0.0; }
+    if (light_count == 0u) { return 0.0; }
 
     let r = Ray(origin, direction);
     let dir_len = length(direction);
     let dir_len_sq = dot(direction, direction);
     var sum = 0.0;
 
-    for (var i = 0u; i < config.light_count; i++) {
+    for (var i = 0u; i < light_count; i++) {
         let light = lights[i];
         var t_hit = 0.0;
         var bary = vec2<f32>(0.0);
 
-        if (light.prim_type == 0u) { // Sphere
+        // Triangles are the fallback arm here and everywhere else a primitive
+        // type is dispatched on, so a scene without spheres or quads leaves
+        // nothing of this chain behind.
+        if (has_spheres && light.prim_type == PRIM_TYPE_SPHERE) {
             if (hit_sphere_t(r, spheres[light.prim_index], 0.001, 1e20, &t_hit)) {
                 let s = spheres[light.prim_index];
                 let center = s.center_and_radius.xyz;
@@ -638,14 +701,7 @@ fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
                 let solid_angle = 2.0 * 3.14159265359 * (1.0 - cos_theta_max);
                 sum += 1.0 / solid_angle;
             }
-        } else if (light.prim_type == 1u) { // Triangle
-            if (hit_triangle_t(r, triangle_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
-                let attr = triangle_attr[light.prim_index];
-                let dist_sq = t_hit * t_hit * dir_len_sq;
-                let cosine = abs(dot(direction, attr.normal) / dir_len);
-                sum += dist_sq / (cosine * attr.area);
-            }
-        } else if (light.prim_type == 2u) { // Quad
+        } else if (has_quads && light.prim_type == PRIM_TYPE_QUAD) {
             if (hit_quad_t(r, quad_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
                 let attr = quad_attr[light.prim_index];
                 let normal = quad_pos[light.prim_index].normal;
@@ -653,9 +709,16 @@ fn light_pdf_value(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
                 let cosine = abs(dot(direction, normal) / dir_len);
                 sum += dist_sq / (cosine * attr.area);
             }
+        } else {
+            if (hit_triangle_t(r, triangle_pos[light.prim_index], 0.001, 1e20, &t_hit, &bary)) {
+                let attr = triangle_attr[light.prim_index];
+                let dist_sq = t_hit * t_hit * dir_len_sq;
+                let cosine = abs(dot(direction, attr.normal) / dir_len);
+                sum += dist_sq / (cosine * attr.area);
+            }
         }
     }
-    return sum / f32(config.light_count);
+    return sum / f32(light_count);
 }
 
 // One sample of the direct-lighting strategy: pick a light uniformly, sample a
@@ -680,18 +743,18 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     ls.attenuation_factor = 0.0;
     ls.valid = false;
 
-    if (config.light_count == 0u) { return ls; }
+    if (light_count == 0u) { return ls; }
 
-    let idx = min(u32(pick * f32(config.light_count)), config.light_count - 1u);
+    let idx = min(u32(pick * f32(light_count)), light_count - 1u);
     let light = lights[idx];
 
     var to_light = vec3<f32>(0.0);
-    if (light.prim_type == 0u) {
+    if (has_spheres && light.prim_type == PRIM_TYPE_SPHERE) {
         to_light = sphere_random_direction(spheres[light.prim_index], origin, u);
-    } else if (light.prim_type == 1u) {
-        to_light = triangle_random_direction(triangle_pos[light.prim_index], origin, u);
-    } else {
+    } else if (has_quads && light.prim_type == PRIM_TYPE_QUAD) {
         to_light = quad_random_direction(quad_pos[light.prim_index], origin, u);
+    } else {
+        to_light = triangle_random_direction(triangle_pos[light.prim_index], origin, u);
     }
 
     let len_sq = dot(to_light, to_light);
@@ -707,20 +770,20 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     var normal = vec3<f32>(0.0);
     var mat_idx = 0u;
 
-    if (light.prim_type == 0u) {
+    if (has_spheres && light.prim_type == PRIM_TYPE_SPHERE) {
         if (!hit_sphere_t(probe, spheres[light.prim_index], RAY_EPS, 1e20, &t_hit)) { return ls; }
         let sph = spheres[light.prim_index];
         normal = (ray_at(probe, t_hit) - sph.center_and_radius.xyz) / sph.center_and_radius.w;
         mat_idx = sph.material_index;
-    } else if (light.prim_type == 1u) {
+    } else if (has_quads && light.prim_type == PRIM_TYPE_QUAD) {
+        if (!hit_quad_t(probe, quad_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
+        normal = quad_pos[light.prim_index].normal;
+        mat_idx = quad_attr[light.prim_index].material_index;
+    } else {
         if (!hit_triangle_t(probe, triangle_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
         let attr = triangle_attr[light.prim_index];
         normal = attr.normal;
         mat_idx = attr.material_index;
-    } else {
-        if (!hit_quad_t(probe, quad_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
-        normal = quad_pos[light.prim_index].normal;
-        mat_idx = quad_attr[light.prim_index].material_index;
     }
 
     // Lights emit from their front face only, matching what a BSDF path sees
@@ -947,16 +1010,18 @@ struct Surface {
 // decorrelation than it returns.
 fn resolve_surface(rec: HitRecord, smp: Sampler, depth: u32) -> Surface {
     var mat_idx = rec.material_index;
-    for (var i = 0u; i < 10u; i++) {
-        let material = materials[mat_idx];
-        if (material.mat_type == MAT_BLEND) {
-            if (sampler_extra(smp, depth * 16u + i) > material.blend_factor) {
-                mat_idx = material.blend_indices.x;
+    if (has_blends) {
+        for (var i = 0u; i < 10u; i++) {
+            let material = materials[mat_idx];
+            if (material.mat_type == MAT_BLEND) {
+                if (sampler_extra(smp, depth * 16u + i) > material.blend_factor) {
+                    mat_idx = material.blend_indices.x;
+                } else {
+                    mat_idx = material.blend_indices.y;
+                }
             } else {
-                mat_idx = material.blend_indices.y;
+                break;
             }
-        } else {
-            break;
         }
     }
 
@@ -974,16 +1039,18 @@ fn resolve_surface(rec: HitRecord, smp: Sampler, depth: u32) -> Surface {
 // neighbouring pixels disagree about the surface they are looking at.
 fn resolve_material_index_dominant(start: u32) -> u32 {
     var mat_idx = start;
-    for (var i = 0u; i < 10u; i++) {
-        let material = materials[mat_idx];
-        if (material.mat_type == MAT_BLEND) {
-            if (material.blend_factor < 0.5) {
-                mat_idx = material.blend_indices.x;
+    if (has_blends) {
+        for (var i = 0u; i < 10u; i++) {
+            let material = materials[mat_idx];
+            if (material.mat_type == MAT_BLEND) {
+                if (material.blend_factor < 0.5) {
+                    mat_idx = material.blend_indices.x;
+                } else {
+                    mat_idx = material.blend_indices.y;
+                }
             } else {
-                mat_idx = material.blend_indices.y;
+                break;
             }
-        } else {
-            break;
         }
     }
     return mat_idx;
@@ -1003,7 +1070,7 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     surface.refraction_index = material.refraction_index;
 
     surface.albedo = material.albedo;
-    if (material.texture_index >= 0) {
+    if (has_textures && material.texture_index >= 0) {
         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
         let uv_atlas = material.albedo_offset + uv * material.albedo_scale;
         // Decoded here rather than by the hardware, because the atlas is
@@ -1016,7 +1083,7 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     }
 
     surface.normal = rec.normal;
-    if (material.normal_texture_index >= 0) {
+    if (has_normal_maps && material.normal_texture_index >= 0) {
         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
         let uv_atlas = material.normal_offset + uv * material.normal_scale;
         let map_color = textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb;
@@ -1102,9 +1169,9 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
 
     if (surface.mat_type == MAT_LAMBERTIAN) {
         b.kind = BSDF_DIFFUSE;
-    } else if (surface.mat_type == MAT_METAL) {
+    } else if (has_metal && surface.mat_type == MAT_METAL) {
         b.kind = BSDF_CONDUCTOR;
-    } else if (surface.mat_type == MAT_DIELECTRIC) {
+    } else if (has_dielectrics && surface.mat_type == MAT_DIELECTRIC) {
         b.kind = BSDF_DIELECTRIC;
     } else {
         b.kind = BSDF_NONE;
@@ -1116,7 +1183,7 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
 // to land on. This is what gates next-event estimation -- not the material
 // type, which is the point of the whole layer.
 fn bsdf_is_specular(b: Bsdf) -> bool {
-    if (b.kind == BSDF_CONDUCTOR) {
+    if (has_metal && b.kind == BSDF_CONDUCTOR) {
         // A rough conductor has a density for a light sample to land on, so it
         // gets next-event estimation like any other spread lobe. Only the
         // mirror end of the range is a delta.
@@ -1142,7 +1209,7 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         if (cos_i <= 0.0 || dot(b.ng, wi) <= 0.0) { return e; }
         e.f_cos = (b.base_color / PI) * cos_i;
         e.pdf = cos_i / PI;
-    } else if (b.kind == BSDF_CONDUCTOR) {
+    } else if (has_metal && b.kind == BSDF_CONDUCTOR) {
         // A mirror has no density a light sample can land on.
         if (b.alpha < GGX_ALPHA_MIN) { return e; }
 
@@ -1199,7 +1266,7 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
         s.pdf = cos_theta / PI;
         s.specular = false;
         s.valid = true;
-    } else if (b.kind == BSDF_CONDUCTOR) {
+    } else if (has_metal && b.kind == BSDF_CONDUCTOR) {
         let wo_l = onb_from_world(b.frame, wo);
         // A shading normal the view ray is already behind has no lobe above
         // the surface to sample.
@@ -1239,7 +1306,7 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             s.specular = false;
             s.valid = true;
         }
-    } else if (b.kind == BSDF_DIELECTRIC) {
+    } else if (has_dielectrics && b.kind == BSDF_DIELECTRIC) {
         let cos_theta = min(dot(wo, b.frame.w), 1.0);
         let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 
@@ -1387,6 +1454,29 @@ fn hit_aabb(
     return enter <= exit;
 }
 
+// One entry of a leaf's primitive list, decoded.
+struct PrimRef {
+    prim_type: u32,
+    prim_idx: u32,
+}
+
+// Reads leaf slot `slot`.
+//
+// The traversal inner loop used to do two dependent global loads per primitive
+// test: `prim_refs[slot]` and then the geometry it points at. On an all-
+// triangle scene the first is the identity -- `flatten_scene` walks the leaf
+// order and hands out per-type indices as it goes, so slot k holds triangle k
+// -- and dropping it makes the geometry's address known from the slot alone.
+// That is a whole round trip out of the innermost loop of a latency-bound
+// tracer, which is worth more than any of the arithmetic the other flags save.
+fn prim_ref_at(slot: u32) -> PrimRef {
+    if (identity_prim_refs) {
+        return PrimRef(PRIM_TYPE_TRIANGLE, slot);
+    }
+    let prim_ref = prim_refs[slot];
+    return PrimRef(prim_ref >> PRIM_TYPE_SHIFT, prim_ref & PRIM_INDEX_MASK);
+}
+
 // Intersects the primitives of one inline leaf, tightening closest_so_far.
 fn hit_leaf(
     r: Ray,
@@ -1400,27 +1490,25 @@ fn hit_leaf(
 
     var hit_any = false;
     for (var i = 0u; i < count; i++) {
-        let prim_ref = prim_refs[offset + i];
-        let prim_type = prim_ref >> PRIM_TYPE_SHIFT;
-        let prim_idx = prim_ref & PRIM_INDEX_MASK;
+        let p = prim_ref_at(offset + i);
 
         var t_hit = 0.0;
         var bary = vec2<f32>(0.0);
         var hit = false;
-        if (prim_type == 0u) {
-            hit = hit_sphere_t(r, spheres[prim_idx], t_min, *closest_so_far, &t_hit);
-        } else if (prim_type == 1u) {
-            hit = hit_triangle_t(r, triangle_pos[prim_idx], t_min, *closest_so_far, &t_hit, &bary);
-        } else if (prim_type == 2u) {
-            hit = hit_quad_t(r, quad_pos[prim_idx], t_min, *closest_so_far, &t_hit, &bary);
+        if (has_spheres && p.prim_type == PRIM_TYPE_SPHERE) {
+            hit = hit_sphere_t(r, spheres[p.prim_idx], t_min, *closest_so_far, &t_hit);
+        } else if (has_quads && p.prim_type == PRIM_TYPE_QUAD) {
+            hit = hit_quad_t(r, quad_pos[p.prim_idx], t_min, *closest_so_far, &t_hit, &bary);
+        } else {
+            hit = hit_triangle_t(r, triangle_pos[p.prim_idx], t_min, *closest_so_far, &t_hit, &bary);
         }
 
         if (hit) {
             hit_any = true;
             *closest_so_far = t_hit;
             (*hit_ref).t = t_hit;
-            (*hit_ref).prim_type = prim_type;
-            (*hit_ref).prim_idx = prim_idx;
+            (*hit_ref).prim_type = p.prim_type;
+            (*hit_ref).prim_idx = p.prim_idx;
             (*hit_ref).bary = bary;
         }
     }
@@ -1499,18 +1587,16 @@ fn leaf_occluded(r: Ray, leaf: u32, t_max: f32) -> bool {
     let offset = leaf & LEAF_OFFSET_MASK;
 
     for (var i = 0u; i < count; i++) {
-        let prim_ref = prim_refs[offset + i];
-        let prim_type = prim_ref >> PRIM_TYPE_SHIFT;
-        let prim_idx = prim_ref & PRIM_INDEX_MASK;
+        let p = prim_ref_at(offset + i);
 
         var t_hit = 0.0;
         var bary = vec2<f32>(0.0);
-        if (prim_type == 0u) {
-            if (hit_sphere_t(r, spheres[prim_idx], RAY_EPS, t_max, &t_hit)) { return true; }
-        } else if (prim_type == 1u) {
-            if (hit_triangle_t(r, triangle_pos[prim_idx], RAY_EPS, t_max, &t_hit, &bary)) { return true; }
+        if (has_spheres && p.prim_type == PRIM_TYPE_SPHERE) {
+            if (hit_sphere_t(r, spheres[p.prim_idx], RAY_EPS, t_max, &t_hit)) { return true; }
+        } else if (has_quads && p.prim_type == PRIM_TYPE_QUAD) {
+            if (hit_quad_t(r, quad_pos[p.prim_idx], RAY_EPS, t_max, &t_hit, &bary)) { return true; }
         } else {
-            if (hit_quad_t(r, quad_pos[prim_idx], RAY_EPS, t_max, &t_hit, &bary)) { return true; }
+            if (hit_triangle_t(r, triangle_pos[p.prim_idx], RAY_EPS, t_max, &t_hit, &bary)) { return true; }
         }
     }
     return false;
@@ -1582,7 +1668,7 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
     rec.t = hit_ref.t;
     rec.p = ray_at(r, hit_ref.t);
 
-    if (hit_ref.prim_type == 0u) {
+    if (has_spheres && hit_ref.prim_type == PRIM_TYPE_SPHERE) {
         let s = spheres[hit_ref.prim_idx];
         let center = s.center_and_radius.xyz;
         let radius = s.center_and_radius.w;
@@ -1609,7 +1695,19 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
         }
         rec.tangent = normalize(cross(a, outward_normal));
         rec.bi_tangent = cross(outward_normal, rec.tangent);
-    } else if (hit_ref.prim_type == 1u) {
+    } else if (has_quads && hit_ref.prim_type == PRIM_TYPE_QUAD) {
+        let attr = quad_attr[hit_ref.prim_idx];
+        let normal = quad_pos[hit_ref.prim_idx].normal;
+
+        rec.front_face = dot(r.direction, normal) < 0.0;
+        rec.normal = select(-normal, normal, rec.front_face);
+        // A quad is planar, so shading and geometry agree everywhere.
+        rec.geometric_normal = rec.normal;
+        rec.material_index = attr.material_index;
+        rec.uv = hit_ref.bary;
+        rec.tangent = attr.tangent;
+        rec.bi_tangent = attr.bi_tangent;
+    } else {
         let attr = triangle_attr[hit_ref.prim_idx];
         let u = hit_ref.bary.x;
         let v = hit_ref.bary.y;
@@ -1632,18 +1730,6 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
         rec.normal = select(-shading_normal, shading_normal, rec.front_face);
         rec.material_index = attr.material_index;
         rec.uv = w * attr.uv0 + u * attr.uv1 + v * attr.uv2;
-        rec.tangent = attr.tangent;
-        rec.bi_tangent = attr.bi_tangent;
-    } else {
-        let attr = quad_attr[hit_ref.prim_idx];
-        let normal = quad_pos[hit_ref.prim_idx].normal;
-
-        rec.front_face = dot(r.direction, normal) < 0.0;
-        rec.normal = select(-normal, normal, rec.front_face);
-        // A quad is planar, so shading and geometry agree everywhere.
-        rec.geometric_normal = rec.normal;
-        rec.material_index = attr.material_index;
-        rec.uv = hit_ref.bary;
         rec.tangent = attr.tangent;
         rec.bi_tangent = attr.bi_tangent;
     }
@@ -1698,8 +1784,8 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
     var out: GuideSample;
     out.specular_depth = 0u;
 
-    let u = (f32(pixel.x) + 0.5) / f32(config.width);
-    let v = 1.0 - (f32(pixel.y) + 0.5) / f32(config.height);
+    let u = (f32(pixel.x) + 0.5) / f32(width);
+    let v = 1.0 - (f32(pixel.y) + 0.5) / f32(height);
     // Normalised, unlike the primary ray in trace_sample, so rec.t is in world
     // units at every segment and the lengths below can simply be summed.
     var r = Ray(
@@ -1733,8 +1819,8 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
         // neighbouring pixels record unrelated guides -- the one thing an edge
         // stop cannot survive, and the same reason the Fresnel coin flip below
         // is resolved deterministically.
-        let specular = (surface.mat_type == MAT_METAL && surface.fuzz < FUZZ_SPECULAR_THRESHOLD)
-            || surface.mat_type == MAT_DIELECTRIC;
+        let specular = (has_metal && surface.mat_type == MAT_METAL && surface.fuzz < FUZZ_SPECULAR_THRESHOLD)
+            || (has_dielectrics && surface.mat_type == MAT_DIELECTRIC);
         if (!specular || bounce == GUIDE_MAX_SPECULAR) {
             // The first surface that scatters -- or, once the budget is spent,
             // whatever specular surface the chain stalled on, which is the old
@@ -1750,7 +1836,7 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
 
         let unit_direction = normalize(r.direction);
         var direction: vec3<f32>;
-        if (surface.mat_type == MAT_METAL) {
+        if (has_metal && surface.mat_type == MAT_METAL) {
             // Only a near-mirror metal gets here, so the mirror direction is
             // the whole lobe rather than the mean of one.
             direction = reflect(unit_direction, surface.normal);
@@ -1796,12 +1882,12 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
 // BSDF layer's business, not this loop's: everything below dispatches on
 // `Bsdf`, never on `mat_type`, except the emitter test.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
-    let index = pixel.y * config.width + pixel.x;
+    let index = pixel.y * width + pixel.x;
     let smp = sampler_new(index, sample_index);
 
     let jitter = sampler_2d(smp, PAIR_PIXEL_JITTER);
-    let u = (f32(pixel.x) + jitter.x) / f32(config.width);
-    let v = 1.0 - (f32(pixel.y) + jitter.y) / f32(config.height);
+    let u = (f32(pixel.x) + jitter.x) / f32(width);
+    let v = 1.0 - (f32(pixel.y) + jitter.y) / f32(height);
 
     var offset = vec3<f32>(0.0);
     if (camera.lens_radius > 0.0) {
@@ -1847,10 +1933,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                 }
 
                 // Weight against the direct-lighting strategy that could also
-                // have produced this direction, unless the previous bounce was
-                // specular and no such strategy exists.
+                // have produced this direction, unless there is no such
+                // strategy: the previous bounce was specular, or next-event
+                // estimation is off.
                 var weight = 1.0;
-                if (!prev_specular) {
+                if (nee_enabled && !prev_specular) {
                     let pdf_light = light_pdf_value(r.origin, r.direction);
                     weight = prev_bsdf_pdf / (prev_bsdf_pdf + pdf_light);
                 }
@@ -1867,7 +1954,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         //
         // Gated on the lobe, not on the material: anything with a density a
         // light sample can land on gets a shadow ray.
-        if (!bsdf_is_specular(b)) {
+        if (nee_enabled && !bsdf_is_specular(b)) {
             let ls = sample_light(
                 rec.p,
                 sampler_1d(smp, dim_x(scalars)),
@@ -1937,10 +2024,10 @@ const ADAPTIVE_LUMINANCE_FLOOR = 1e-4;
 // BVH traversal divergence actually costs.
 @compute @workgroup_size(8, 8)
 fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if (global_id.x >= config.width || global_id.y >= config.height) {
+    if (global_id.x >= width || global_id.y >= height) {
         return;
     }
-    let index = global_id.y * config.width + global_id.x;
+    let index = global_id.y * width + global_id.x;
     let pixel = global_id.xy;
 
     // A restart (accumulation reset on camera/depth change) discards whatever

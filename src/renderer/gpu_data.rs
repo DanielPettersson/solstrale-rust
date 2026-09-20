@@ -191,6 +191,25 @@ pub const PRIM_TYPE_SHIFT: u32 = 30;
 /// Mask for the primitive index within a [`PRIM_TYPE_SHIFT`]-tagged reference.
 pub const PRIM_INDEX_MASK: u32 = (1 << PRIM_TYPE_SHIFT) - 1;
 
+/// Sphere, as tagged in bits 31..30 of a `prim_refs` entry and in [`LightRef`].
+pub const PRIM_TYPE_SPHERE: u32 = 0;
+/// Triangle, as tagged in bits 31..30 of a `prim_refs` entry and in [`LightRef`].
+pub const PRIM_TYPE_TRIANGLE: u32 = 1;
+/// Quad, as tagged in bits 31..30 of a `prim_refs` entry and in [`LightRef`].
+pub const PRIM_TYPE_QUAD: u32 = 2;
+
+/// [`Material::mat_type`] values. Mirrored by the `MAT_*` constants in
+/// `renderer/ray_trace.wgsl`.
+pub const MAT_LAMBERTIAN: u32 = 0;
+/// See [`MAT_LAMBERTIAN`].
+pub const MAT_METAL: u32 = 1;
+/// See [`MAT_LAMBERTIAN`].
+pub const MAT_DIELECTRIC: u32 = 2;
+/// See [`MAT_LAMBERTIAN`].
+pub const MAT_DIFFUSE_LIGHT: u32 = 3;
+/// See [`MAT_LAMBERTIAN`].
+pub const MAT_BLEND: u32 = 4;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Material structure matching WGSL layout
@@ -269,29 +288,32 @@ pub struct LightRef {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-/// Render configuration matching WGSL layout
+/// Render configuration matching WGSL layout.
+///
+/// What is *not* here is as deliberate as what is. The image size and the light
+/// count are fixed for the life of a `Renderer`, so they reach the shader as
+/// override constants instead -- see `Specialisation` in `renderer`. Only the
+/// fields a dispatch actually varies are left.
 pub struct GpuRenderConfig {
-    /// Width of the image
-    pub width: u32,
-    /// Height of the image
-    pub height: u32,
     /// Number of samples already accumulated into the output buffer before
     /// this dispatch. Also seeds the RNG.
     pub sample_count: u32,
     /// Maximum number of ray bounces
     pub max_depth: u32,
-    /// Background color
-    pub background_color: [f32; 3],
-    /// Number of light sources in the scene
-    pub light_count: u32,
     /// Samples traced per dispatch, accumulated in-shader
     pub samples_per_batch: u32,
     /// Minimum samples a pixel must have before adaptive sampling may skip it
     pub min_samples_per_pixel: u32,
+    /// Background color
+    pub background_color: [f32; 3],
     /// Relative standard-error threshold below which a pixel is converged
     pub variance_threshold: f32,
     /// Distinguishes successive accumulation restarts, mixed into every
-    /// pixel's sampler seed, and seeded from `RenderConfig::seed`. Occupies
-    /// what was padding, so the 48-byte layout is unchanged.
+    /// pixel's sampler seed, and seeded from `RenderConfig::seed`.
     pub restart_index: u32,
+    /// WGSL rounds a struct containing a `vec3<f32>` up to its 16-byte
+    /// alignment, so the uniform is 48 bytes whether these three words are
+    /// spelled out or not. Spelled out, `size_of` agrees with the binding size
+    /// the layout asks for.
+    pub _padding: [u32; 3],
 }
