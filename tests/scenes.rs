@@ -1241,3 +1241,53 @@ pub const FURNACE_LOOK_FROM: Vec3 = Vec3 {
     y: 0.,
     z: 4.,
 };
+
+/// A 100x100x20 room whose whole ceiling emits: every surface in it is lit by a
+/// quad subtending most of the hemisphere above it, and the walls run right up
+/// to the emitter's own plane.
+///
+/// The configuration solid-angle sampling of a quad exists for, and the one no
+/// other scene in the suite has. Cornell's ceiling emitter is 130x105 seen from
+/// 224 to 554 units away, where area sampling's `d^2 / cos` varies by 21% at
+/// worst. Here it varies by a factor of 49 across the floor, and without bound
+/// on the walls, where `cos` at the light goes to zero as the emitter's plane
+/// is approached -- every bit of that variation is noise the light PDF puts
+/// into the image.
+#[allow(dead_code)]
+pub fn create_wide_light_scene(render_config: RenderConfig) -> Scene {
+    let nop = NopTransformer();
+    let grey = Lambertian::new(SolidColor::new(0.73, 0.73, 0.73).into(), None);
+    let x = Vec3::new(100., 0., 0.);
+    let y = Vec3::new(0., 20., 0.);
+    let z = Vec3::new(0., 0., 100.);
+    let corner = Vec3::new(-50., 0., -50.);
+
+    let world: Vec<Hittables> = vec![
+        Quad::new(corner, x, z, grey.clone().into(), &nop).into(),
+        Quad::new(corner, x, y, grey.clone().into(), &nop).into(),
+        Quad::new(corner, y, z, grey.clone().into(), &nop).into(),
+        Quad::new(Vec3::new(50., 0., -50.), y, z, grey.clone().into(), &nop).into(),
+        Quad::new(Vec3::new(-50., 0., 50.), x, y, grey.into(), &nop).into(),
+        Quad::new(
+            Vec3::new(-50., 20., -50.),
+            x,
+            z,
+            DiffuseLight::new(1., 1., 1., None).into(),
+            &nop,
+        )
+        .into(),
+    ];
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 60.,
+            aperture_size: 0.,
+            look_from: Vec3::new(0., 10., 45.),
+            look_at: Vec3::new(0., 6., 0.),
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: ZERO_VECTOR,
+        render_config,
+    }
+}

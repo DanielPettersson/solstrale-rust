@@ -31,7 +31,8 @@ use crate::scenes::{
     create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
     create_rough_metal_scene, create_simple_test_scene, create_smooth_vs_flat_scene,
     create_specular_scene, create_srgb_decode_scene, create_test_scene,
-    create_texture_mapping_scene, create_uv_scene, rough_metal_sphere_center,
+    create_texture_mapping_scene, create_uv_scene, create_wide_light_scene,
+    rough_metal_sphere_center,
 };
 
 mod scenes;
@@ -1277,6 +1278,33 @@ fn trimmed_linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     (squared[..keep].iter().sum::<f64>() / (keep * 3) as f64).sqrt()
 }
 
+/// [`linear_rmse`] over a rectangle of the frame, as `(x0, y0, x1, y1)` with
+/// the upper bounds exclusive and row 0 at the top.
+///
+/// A whole-image figure is the wrong instrument for a change whose effect is
+/// concentrated: the win from better light sampling lives on the surfaces near
+/// the light, and averaging it over the rest of the frame divides it by the
+/// fraction of pixels that saw it.
+fn cropped_linear_rmse(
+    a: &[[f32; 4]],
+    b: &[[f32; 4]],
+    width: usize,
+    crop: (usize, usize, usize, usize),
+) -> f64 {
+    let (x0, y0, x1, y1) = crop;
+    let mut sum = 0.0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (p, q) = (a[y * width + x], b[y * width + x]);
+            for c in 0..3 {
+                let d = (p[c] - q[c]) as f64;
+                sum += d * d;
+            }
+        }
+    }
+    (sum / ((x1 - x0) * (y1 - y0) * 3) as f64).sqrt()
+}
+
 fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
     let sum: f64 = a
         .iter()
@@ -2255,6 +2283,91 @@ fn sampler_convergence_sweep() {
     }
 }
 
+/// Diagnostic, not a gate: how noisy the direct-lighting estimator is, as
+/// linear RMSE against a converged reference, whole-frame and on the crop
+/// where a change to it can actually show.
+/// `cargo test light_sampling_sweep -- --ignored --nocapture`
+///
+/// The crop column is the point of this sweep. A light sampling change moves
+/// the surfaces near the light and nothing else, so a whole-image figure
+/// divides its effect by the fraction of the frame that saw it -- and `grain`
+/// would be worse still, being a whole-image RMS over a whole-image mean. On
+/// Cornell the emitter is in the ceiling, so the crop is the upper third: the
+/// ceiling itself, the top of the tall box and the upper walls.
+///
+/// The test scene's crop is where its triangle light sits, which is the only
+/// triangle emitter in the suite and therefore the only place the spherical
+/// triangle question (issue #49) could be answered from. `wide_light`'s is its
+/// walls, which run up to the emitter's own plane and are where area sampling's
+/// `d^2 / cos` has no bound at all.
+///
+/// Adaptive sampling is off in every arm, so every pixel really has the sample
+/// count in the column and the comparison across builds means what it says. References are rendered at a different seed; see [`as_reference`].
+#[test]
+#[ignore]
+fn light_sampling_sweep() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    // Name, builder, dimensions, and the crop with its label.
+    type Arm = (
+        &'static str,
+        fn(u32) -> Scene,
+        usize,
+        usize,
+        &'static str,
+        (usize, usize, usize, usize),
+    );
+    let arms: [Arm; 3] = [
+        (
+            "cornell",
+            |spp| cornell_denoise_scene(spp, None),
+            200,
+            200,
+            "upper third",
+            (0, 0, 200, 66),
+        ),
+        (
+            "test_scene",
+            |spp| denoise_scene(spp, None, false),
+            200,
+            100,
+            "triangle",
+            (0, 4, 48, 50),
+        ),
+        (
+            "wide_light",
+            |spp| {
+                create_wide_light_scene(RenderConfig {
+                    width: 200,
+                    height: 100,
+                    samples_per_pixel: spp,
+                    min_samples_per_pixel: u32::MAX,
+                    ..Default::default()
+                })
+            },
+            200,
+            100,
+            "walls",
+            (0, 18, 200, 50),
+        ),
+    ];
+
+    for (name, build, width, _height, crop_name, crop) in arms {
+        let reference = render_linear(as_reference(build(4000)), device, queue);
+        for spp in [8u32, 32, 128, 512] {
+            let image = render_linear(build(spp), device, queue);
+            println!(
+                "{:<10} spp={:<4} rmse {:.5}   {} {:.5}",
+                name,
+                spp,
+                linear_rmse(&image, &reference),
+                crop_name,
+                cropped_linear_rmse(&image, &reference, width, crop),
+            );
+        }
+    }
+}
+
 /// Diagnostic, not a gate: what the denoiser leaves on screen, across the
 /// sample-count and strength grid. This is how `FULL_STRENGTH_GRAIN` in
 /// `post/denoise.rs` was chosen, and re-running it is how to re-choose it.
@@ -2906,3 +3019,63 @@ fn test_rough_metal_converges_with_nee() {
 /// take a shadow ray, which is the point of the bound rather than its exact
 /// value.
 const ROUGH_METAL_RMSE_BOUND: f64 = 0.35;
+
+/// The regression net under solid-angle sampling of a quad light, on the one
+/// scene in the suite whose light is large enough for it to matter.
+///
+/// Nothing else could hold it. On Cornell the technique is worth between half a
+/// percent and three percent of RMSE -- real, and far inside the noise of any
+/// gate that could be written around it -- because its emitter subtends a small
+/// enough solid angle that area sampling's `d^2 / cos` barely varies across it.
+/// Here that factor varies by 49 across the floor and without bound on the
+/// walls, and the same measurement separates the two samplers by 36%.
+///
+/// It catches variance, not bias: the reference is rendered by the same code,
+/// so a sampler that lost energy would move both arms together and read as
+/// unchanged. `test_bsdf_only_sampling_converges_to_the_same_image` is what
+/// holds that end, against an estimator that samples no light at all.
+///
+/// Relative to the reference's own mean, as `test_rough_metal_converges_with_nee`
+/// is and for the same reason: an absolute figure rewards an arm that is simply
+/// darker.
+#[test]
+fn test_wide_quad_light_is_solid_angle_sampled() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    let config = |samples_per_pixel| RenderConfig {
+        width: 200,
+        height: 100,
+        samples_per_pixel,
+        // Off: adaptive sampling would stop spending samples on the very pixels
+        // whose noise is the measurement.
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    };
+
+    let noisy = render_linear(create_wide_light_scene(config(16)), device, queue);
+    let reference = render_linear(
+        as_reference(create_wide_light_scene(config(2000))),
+        device,
+        queue,
+    );
+
+    let mean: f64 = reference
+        .iter()
+        .map(|p| (p[0] + p[1] + p[2]) as f64 / 3.)
+        .sum::<f64>()
+        / reference.len() as f64;
+    let relative = linear_rmse(&noisy, &reference) / mean;
+    println!("wide quad light, 16 spp against 2000 spp: {relative:.4} of the mean");
+
+    assert!(
+        relative < WIDE_LIGHT_RMSE_BOUND,
+        "16 spp of the wide-light scene is at {relative:.4} relative RMSE against its own \
+         2000 spp reference, past the pinned {WIDE_LIGHT_RMSE_BOUND}"
+    );
+}
+
+/// Pinned between the two samplers, with room for a different driver's
+/// arithmetic on the side that has to pass. Sampling the light by solid angle
+/// measures 0.0283; sampling it by area measures 0.0444, which is what the
+/// bound is really placed against.
+const WIDE_LIGHT_RMSE_BOUND: f64 = 0.035;

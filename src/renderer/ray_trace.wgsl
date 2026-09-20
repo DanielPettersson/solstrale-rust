@@ -672,9 +672,156 @@ fn triangle_random_direction(t: TrianglePos, origin: vec3<f32>, u: vec2<f32>) ->
     return p - origin;
 }
 
+// Where a sampled quad point becomes a direction, on both arms: `u` is the
+// point in the quad's own (u, v) parameters, which is what
+// `quad_solid_angle_uv` returns as well.
+//
+// On its own this is area sampling, the fallback for a quad the
+// spherical-rectangle parametrisation does not cover. The `d^2 / cos` its PDF
+// then needs varies across the light, and that variation is noise.
 fn quad_random_direction(q: QuadPos, origin: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
     let p = q.Q + q.u * u.x + q.v * u.y;
     return p - origin;
+}
+
+// How near to a right angle a quad's edges must be for the spherical-rectangle
+// parametrisation to apply. `Quad::new` takes any two edge vectors, so a
+// sheared parallelogram is representable; the parametrisation is not defined
+// for one.
+const QUAD_ORTHOGONAL_EPS = 1e-4;
+
+// Smallest solid angle worth the parametrisation, and the numerical guard.
+// `solid_angle` below is four interior angles less 2*pi, so a small one is a
+// difference of quantities near pi: in f32 that leaves about 1e-6 of absolute
+// error however small the true value is. At 1e-3 that error is a thousandth of
+// the PDF, and below it area sampling is already within a few percent of
+// optimal -- nothing to win, and precision to lose.
+const MIN_SOLID_ANGLE = 1e-3;
+
+// A quad seen from a shading point, in the frame the spherical-rectangle
+// parametrisation works in (Urena, Fajardo & King 2013, "An Area-Preserving
+// Parametrization for Spherical Rectangles").
+//
+// The frame's axes are not kept: everything downstream is a coordinate in it,
+// and the point the sampler produces leaves in the quad's own parameters. That
+// is what holds the tracer at 128 VGPRs -- carrying three more vec3s through
+// `sample_light` costs 40 and a quarter of the occupancy with it.
+//
+// A zero `solid_angle` means this quad is not sampled that way from here, which
+// is what `quad_use_solid_angle` reads: one computation, so the sampler and the
+// PDF cannot come to different conclusions about which arm a quad is on.
+struct QuadSphericalRect {
+    // Signed distance to the quad's plane, negative by construction.
+    z0: f32,
+    // The quad's extent in the frame, as seen from the shading point.
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    // The two constants the inverse CDF in x needs, and its lower limit.
+    b0: f32,
+    b1: f32,
+    k: f32,
+    solid_angle: f32,
+}
+
+fn quad_spherical(q: QuadPos, origin: vec3<f32>) -> QuadSphericalRect {
+    var sr: QuadSphericalRect;
+    sr.solid_angle = 0.0;
+
+    let ul = length(q.u);
+    let vl = length(q.v);
+    let ex = q.u / ul;
+    let ey = q.v / vl;
+    // Negated rather than written as `>=`, so a degenerate quad -- whose edges
+    // normalise to NaN -- falls out here too.
+    if (!(abs(dot(ex, ey)) < QUAD_ORTHOGONAL_EPS)) { return sr; }
+
+    let d = q.Q - origin;
+    // The paper points the third axis at the quad, which negates `z0` and the
+    // axis together and leaves the other two alone. Only `z0` survives into the
+    // arithmetic below, so the flip is just its sign.
+    sr.z0 = -abs(dot(d, cross(ex, ey)));
+    sr.x0 = dot(d, ex);
+    sr.y0 = dot(d, ey);
+    sr.x1 = sr.x0 + ul;
+    sr.y1 = sr.y0 + vl;
+
+    // Girard's theorem: the solid angle is the four interior angles less 2*pi.
+    // The paper builds those from normalised cross products of the corner
+    // vectors, but in this frame each of those normals has a zero component --
+    // the plane through two corners that share an x contains the frame's y axis
+    // -- so every cross product and vec3 normalize collapses into the four
+    // scalar reciprocal square roots below, and `b0` and `b1` with them.
+    let z0sq = sr.z0 * sr.z0;
+    let ix0 = inverseSqrt(z0sq + sr.x0 * sr.x0);
+    let ix1 = inverseSqrt(z0sq + sr.x1 * sr.x1);
+    let iy0 = inverseSqrt(z0sq + sr.y0 * sr.y0);
+    let iy1 = inverseSqrt(z0sq + sr.y1 * sr.y1);
+
+    let g0 = acos(clamp(sr.x1 * sr.y0 * ix1 * iy0, -1.0, 1.0));
+    let g1 = acos(clamp(-sr.x1 * sr.y1 * ix1 * iy1, -1.0, 1.0));
+    let g2 = acos(clamp(sr.x0 * sr.y1 * ix0 * iy1, -1.0, 1.0));
+    let g3 = acos(clamp(-sr.x0 * sr.y0 * ix0 * iy0, -1.0, 1.0));
+
+    sr.b0 = -sr.y0 * iy0;
+    sr.b1 = sr.y1 * iy1;
+    sr.k = TWO_PI - g2 - g3;
+    sr.solid_angle = g0 + g1 - sr.k;
+    return sr;
+}
+
+fn quad_use_solid_angle(sr: QuadSphericalRect) -> bool {
+    return sr.solid_angle > MIN_SOLID_ANGLE;
+}
+
+// The one definition of a quad light's density, on either arm. `sample_light`
+// reaches it with the `sr` it sampled from and `light_prim_pdf` with one built
+// from the same origin, so neither the arm nor the density can drift from what
+// the other side believes.
+//
+// `direction`, `distance` and `normal` are the area arm's conversion and are
+// unread on the solid-angle arm, which is already a density over directions.
+fn quad_prim_pdf(
+    sr: QuadSphericalRect,
+    prim_index: u32,
+    direction: vec3<f32>,
+    distance: f32,
+    normal: vec3<f32>,
+) -> f32 {
+    if (quad_use_solid_angle(sr)) { return 1.0 / sr.solid_angle; }
+    return (distance * distance) / (abs(dot(direction, normal)) * quad_attr[prim_index].area);
+}
+
+// A point on the quad whose direction is uniform in solid angle, so the density
+// is the constant `1 / solid_angle`. In the quad's own (u, v) parameters, for
+// `quad_random_direction` to turn into a direction.
+fn quad_solid_angle_uv(sr: QuadSphericalRect, u: vec2<f32>) -> vec2<f32> {
+    // u.x picks a solid-angle-proportional slice of the rectangle; `xu` is
+    // where that slice cuts it.
+    let au = u.x * sr.solid_angle + sr.k;
+    let fu = (cos(au) * sr.b0 - sr.b1) / sin(au);
+    // fu overflowing to infinity is the sin(au) -> 0 limit, and lands on the
+    // right answer of cu = 0.
+    var cu = inverseSqrt(fu * fu + sr.b0 * sr.b0) * select(-1.0, 1.0, fu > 0.0);
+    cu = clamp(cu, -1.0, 1.0);
+
+    var xu = -(cu * sr.z0) * inverseSqrt(max(1.0 - cu * cu, 1e-20));
+    xu = clamp(xu, sr.x0, sr.x1);
+
+    // Then u.y along that slice, which is a 1D projected-angle integral with a
+    // closed form.
+    let d2 = xu * xu + sr.z0 * sr.z0;
+    let h0 = sr.y0 * inverseSqrt(d2 + sr.y0 * sr.y0);
+    let h1 = sr.y1 * inverseSqrt(d2 + sr.y1 * sr.y1);
+    let hv = h0 + u.y * (h1 - h0);
+    let hv2 = hv * hv;
+    // |hv| at 1 is the grazing limit, where yv runs off to an edge. The paper's
+    // code always takes y1 there; the sign of hv says which edge it is.
+    let edge = select(sr.y0, sr.y1, hv > 0.0);
+    let yv = select(edge, hv * sqrt(d2) * inverseSqrt(1.0 - hv2), hv2 < 1.0 - 1e-6);
+
+    return vec2<f32>((xu - sr.x0) / (sr.x1 - sr.x0), (yv - sr.y0) / (sr.y1 - sr.y0));
 }
 
 fn sphere_random_direction(s: Sphere, origin: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
@@ -700,8 +847,8 @@ fn sphere_random_direction(s: Sphere, origin: vec3<f32>, u: vec2<f32>) -> vec3<f
 //
 // `normal` is the primitive's geometric normal, not the shading normal: the
 // area-to-solid-angle Jacobian belongs to the facet the point was sampled on.
-// Unused for spheres, which are sampled as a cone of directions rather than by
-// area, and so have no area term to convert.
+// Unused for spheres, and for a quad on the solid-angle arm below: both are
+// sampled in the direction domain already and have no area term to convert.
 fn light_prim_pdf(
     prim_type: u32,
     prim_index: u32,
@@ -723,12 +870,16 @@ fn light_prim_pdf(
         return 1.0 / solid_angle;
     }
 
-    var area = 0.0;
     if (has_quads && prim_type == PRIM_TYPE_QUAD) {
-        area = quad_attr[prim_index].area;
-    } else {
-        area = triangle_attr[prim_index].area;
+        return quad_prim_pdf(
+            quad_spherical(quad_pos[prim_index], origin),
+            prim_index,
+            direction,
+            distance,
+            normal,
+        );
     }
+    let area = triangle_attr[prim_index].area;
     return (distance * distance) / (abs(dot(direction, normal)) * area);
 }
 
@@ -839,11 +990,17 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     let prim_type = light.prim >> PRIM_TYPE_SHIFT;
     let prim_index = light.prim & PRIM_INDEX_MASK;
 
+    // Hoisted only so the density below can reuse it rather than rebuild it;
+    // every field but `solid_angle` is dead by then.
+    var sr: QuadSphericalRect;
     var to_light = vec3<f32>(0.0);
     if (has_spheres && prim_type == PRIM_TYPE_SPHERE) {
         to_light = sphere_random_direction(spheres[prim_index], origin, u);
     } else if (has_quads && prim_type == PRIM_TYPE_QUAD) {
-        to_light = quad_random_direction(quad_pos[prim_index], origin, u);
+        sr = quad_spherical(quad_pos[prim_index], origin);
+        var quv = u;
+        if (quad_use_solid_angle(sr)) { quv = quad_solid_angle_uv(sr, u); }
+        to_light = quad_random_direction(quad_pos[prim_index], origin, quv);
     } else {
         to_light = triangle_random_direction(triangle_pos[prim_index], origin, u);
     }
@@ -855,6 +1012,11 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     // Intersect the chosen light itself: sphere sampling yields a direction
     // rather than a point, and we need the distance either way so the shadow
     // ray can stop just short of the light instead of hitting it.
+    //
+    // A solid-angle-sampled quad is guaranteed to be hit, so for that arm this
+    // is pure overhead -- and also the check that turns a parametrisation that
+    // has gone wrong into a lost sample rather than a bias. Worth its cost
+    // until the technique has been trusted for a while.
     let probe = Ray(origin, dir);
     var t_hit = 0.0;
     var bary = vec2<f32>(0.0);
@@ -885,10 +1047,16 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     let material = materials[mat_idx];
     let emission = select(vec3<f32>(0.0), material.emission, material.mat_type == MAT_DIFFUSE_LIGHT);
 
+    var prim_pdf = 0.0;
+    if (has_quads && prim_type == PRIM_TYPE_QUAD) {
+        prim_pdf = quad_prim_pdf(sr, prim_index, dir, t_hit, normal);
+    } else {
+        prim_pdf = light_prim_pdf(prim_type, prim_index, origin, dir, t_hit, normal);
+    }
+
     ls.direction = dir;
     ls.distance = t_hit;
-    ls.pdf = light_prim_pdf(prim_type, prim_index, origin, dir, t_hit, normal)
-        * light.select_pdf;
+    ls.pdf = prim_pdf * light.select_pdf;
     ls.emission = emission;
     ls.attenuation_factor = material.attenuation_factor;
     ls.valid = true;
