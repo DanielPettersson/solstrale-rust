@@ -137,9 +137,17 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
   vertex so far was specular" instead of `depth == 0` would exempt it, but it
   would equally exempt fuzzy-metal paths onto small lights, which are genuine
-  fireflies. At a threshold of 10 the clamp barely fires on either, so this
-  buys close to nothing today; revisit only alongside a scene built to show
-  caustics.
+  fireflies.
+
+  It buys close to nothing on the scenes in the golden suite, whose lights are
+  dim enough that the threshold of 10 is never reached. It is not free on a
+  scene with a bright pinpoint: a 300-radiance emitter seen straight through a
+  glass ball arrives at very nearly its own radiance, is cut to 10, and the
+  converged image then sits 5% below an unclamped reference — 17% on
+  `create_rough_metal_scene`, whose mirror sphere does the same thing. That is
+  why `create_rough_glass_scene` runs its light at radiance 5: at 300 the clamp
+  is the dominant variance reducer in the frame, and every measurement taken on
+  it measures the clamp rather than the estimator.
 - **Adaptive sampling got slower at high spp, and should have.** Unclamping
   direct light raises the per-sample variance the Welford estimator sees, so
   fewer pixels are declared converged: `adaptive_sampling/adaptive` (2000 spp)
@@ -173,16 +181,51 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   and estimating the variance of the mean directly -- touches Welford, adaptive
   sampling and the denoiser's variance input at once, and is a change of its
   own.
-- **Dielectrics block NEE shadow rays.** Light through glass is found only by
-  BSDF-sampled paths, at full MIS weight. Unbiased, but caustics stay noisy —
-  the standard trade-off of naive NEE.
-- **Glass is smooth and non-dispersive.** `Dielectric` has a Beer–Lambert
-  interior absorption and two perfectly smooth interfaces, and nothing else. A
-  frosted one needs a GGX BTDF (Walter 2007) with the microfacet refraction
-  Jacobian and a second alpha, roughly tripling this arm; dispersion needs
-  per-wavelength transport, which breaks the `vec3 throughput` shortcut
-  everywhere rather than just here. Both are separate pieces of work, and
-  nothing currently asks for either.
+- **Dielectrics block NEE shadow rays.** `leaf_occluded` treats glass as
+  opaque, so a shadow ray aimed through it comes back blocked. Light behind
+  glass is therefore found only by BSDF-sampled paths, at full MIS weight.
+  Unbiased, but caustics stay noisy — the standard trade-off of naive NEE.
+
+  A rough dielectric gains from next-event estimation only where the
+  half-space beyond it is unobstructed. At the *entry* interface of a closed
+  object the object's own far side blocks every shadow ray, so only the exit
+  interface can take one; a rough glass ball is lit by direct light on the way
+  out, not on the way in.
+- **Rough glass loses energy, and no correction puts it back.** The dielectric
+  is single-scatter GGX, as the conductor was before Turquin's factor: every
+  ray a microfacet sends onto another microfacet is dropped. Measured in a
+  furnace — a lossless glass ball in a uniform environment must be invisible,
+  which is a cleaner invariant than the conductor's because it holds for any
+  IOR and any number of internal bounces — a white 1.5 sphere reads
+
+  ```text
+  roughness  0      0.15    0.3     0.5     0.75    1
+             1.0000 0.9983  0.9785  0.8502  0.5805  0.3702
+  ```
+
+  Smooth glass is exactly invisible, which is the check that the Dirac path is
+  lossless; a fully rough ball keeps 37% of what it is given. The compensation
+  is its own commit, as it was for metal, and the artefact that would pin it is
+  a dielectric furnace test this one does not add.
+- **Glass is non-dispersive.** `Dielectric` now has a Beer–Lambert interior
+  absorption and a GGX microfacet lobe at both interfaces. Dispersion still
+  needs per-wavelength transport, which breaks the `vec3 throughput` shortcut
+  everywhere rather than just here, and nothing currently asks for it.
+- **The dielectric's Fresnel is Schlick's, including below the critical
+  angle.** `reflectance()` is the single Fresnel for both the conductor and the
+  dielectric, and it is at its worst on the inside of glass approaching total
+  internal reflection: at the 41.8° critical angle of a 1.5 interface the exact
+  term is 1 and Schlick's is 0.04. The reflected and transmitted lobes are
+  therefore mixed wrongly in a band just inside the critical angle. Adopting
+  exact Fresnel is more correct and moves every existing smooth-glass golden,
+  so it belongs in a commit of its own rather than riding along with the
+  microfacet lobe.
+- **No `eta^2` radiance factor on the transmission lobe.** PBRT's radiance-mode
+  `1 / etap^2` is omitted, consistently in `bsdf_sample` and `bsdf_eval`. It
+  cancels over any closed glass object — the entry and exit interfaces apply
+  reciprocal factors — the smooth arm omits it too (its weight is exactly 1),
+  and adding it would move the smooth goldens. What MIS requires is that the
+  two estimators of a vertex agree with each other, which they do.
 - **Absorption assumes the glass is closed and unnested.** The interior term is
   applied on a back-face hit using that surface's own albedo, so it is the exit
   material that prices the segment. Correct for any closed object, wrong for
@@ -812,6 +855,21 @@ the tracer is the only thing on this list worth optimising. Within bloom, the
 so the blur is linear in the kernel as expected and bloom's fixed cost is
 0.16 ms. Within the denoiser, prepare is 0.11 ms, the variance prefilter
 0.39 ms, the five à-trous iterations 1.46 ms and the resolve 0.13 ms.
+
+**The rough dielectric costs a quarter of the tracer's occupancy, and only
+where it is used.** The microfacet arm is the largest single addition the
+material code has taken: with it compiled in, `test_scene` goes 128 -> 168
+VGPRs and 8 -> 6 subgroups per SIMD, for 4 KiB more code. `has_rough_dielectrics`
+is what keeps that off every scene whose glass is smooth, which is all of them
+but one.
+
+Two things about how the flag has to be spelled, both measured rather than
+assumed. Naga folds an override out of an `if` *condition* and deletes the arm
+behind it; it does not fold `!has_rough_dielectrics || ...` written inside the
+body, which survives into the ISA as a real branch and takes the occupancy with
+it. The two spellings of the one line in `bsdf_is_specular` are 8 subgroups
+against 6. The same applies to the arm order in `bsdf_sample`: the rough branch
+goes in the `if` and the smooth one in the `else`, not the other way round.
 
 **The post chain costs three to fifteen times its compute.** Against
 `post/none` at 53.31 ms, criterion puts `post/saturation` at 54.16 ms -- 0.86 ms

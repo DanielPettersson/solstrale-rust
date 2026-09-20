@@ -608,7 +608,7 @@ fn add_material(
             Some(&m.albedo),
             None,
             m.normal.as_ref(),
-            0.0,
+            m.roughness as f32,
             m.index_of_refraction as f32,
             MAT_DIELECTRIC,
             0.0,

@@ -10,7 +10,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use derive_more::{Constructor, Display};
 
 use crate::scenes::{
-    create_many_lights_scene, create_rough_metal_scene, create_test_scene, new_bvh_test_scene,
+    create_many_lights_scene, create_rough_glass_scene, create_rough_metal_scene,
+    create_test_scene, new_bvh_test_scene,
 };
 use solstrale::camera::CameraConfig;
 use solstrale::geo::transformation::NopTransformer;
@@ -399,6 +400,24 @@ pub fn render_benchmark(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 create_rough_metal_scene(RenderConfig {
+                    samples_per_pixel: 64,
+                    width: 800,
+                    height: 600,
+                    ..RenderConfig::default()
+                })
+            },
+            render_and_sync,
+        )
+    });
+
+    // The dielectric's twin of the arm above. Glass is the more expensive of
+    // the two: every rough vertex is a shadow ray the smooth arm never cast,
+    // and half the lobe carries the path *through* the sphere, so the bounce
+    // count per path is roughly double the metal scene's.
+    group.bench_function("rough_glass_800x600_64spp", |b| {
+        b.iter_with_setup(
+            || {
+                create_rough_glass_scene(RenderConfig {
                     samples_per_pixel: 64,
                     width: 800,
                     height: 600,

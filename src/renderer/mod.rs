@@ -76,6 +76,9 @@ struct Specialisation {
     has_blends: bool,
     has_metal: bool,
     has_dielectrics: bool,
+    /// Whether any dielectric is rough, which is what the microfacet arm costs
+    /// its occupancy for. See the override's note in `ray_trace.wgsl`.
+    has_rough_dielectrics: bool,
     has_textures: bool,
     has_normal_maps: bool,
     light_count: u32,
@@ -95,6 +98,11 @@ impl Specialisation {
             has_blends: any(|m| m.mat_type == MAT_BLEND),
             has_metal: any(|m| m.mat_type == MAT_METAL),
             has_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC),
+            // Any roughness at all, not a threshold: the shader still routes a
+            // roughness below `GGX_ALPHA_MIN` down the Dirac path, so this only
+            // has to be conservative, and a duplicated cutoff on this side is a
+            // thing to keep in step for no gain.
+            has_rough_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC && m.fuzz > 0.),
             has_textures: any(|m| m.texture_index >= 0),
             has_normal_maps: any(|m| m.normal_texture_index >= 0),
             light_count: data.lights.len() as u32,
@@ -112,6 +120,7 @@ impl Specialisation {
             has_blends: true,
             has_metal: true,
             has_dielectrics: true,
+            has_rough_dielectrics: true,
             has_textures: true,
             has_normal_maps: true,
             light_count,
@@ -139,6 +148,7 @@ impl Specialisation {
             ("has_blends", flag(self.has_blends)),
             ("has_metal", flag(self.has_metal)),
             ("has_dielectrics", flag(self.has_dielectrics)),
+            ("has_rough_dielectrics", flag(self.has_rough_dielectrics)),
             ("has_textures", flag(self.has_textures)),
             ("has_normal_maps", flag(self.has_normal_maps)),
             ("nee_enabled", flag(estimator.nee_enabled)),
