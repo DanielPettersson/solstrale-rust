@@ -181,6 +181,26 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   Consistent and unbiased, because the MIS PDF covers exactly the same set:
   `light_hit_pdf` looks the primitive up in `lights`, does not find it, and
   returns 0.
+- **Light selection is power-proportional, and therefore view-independent.**
+  `build_alias_table` (`renderer/scene_flattener.rs`) ranks emitters by
+  `pi * A * luminance(L)` and nothing else, so a powerful light sealed behind a
+  wall is picked as often as its power says and every one of those shadow rays
+  comes back occluded, while a dim light directly overhead is picked rarely. It
+  is the right first cut — power is the one term that holds for the whole scene,
+  it costs a single buffer field, and it is what makes an emissive mesh usable
+  at all — but it is not importance at the shading point. The fix is a
+  Conty–Kulla light BVH with importance evaluated where the shading happens,
+  which is a much larger piece of work; the numbers it has to beat are in the
+  measurement record below.
+- **A textured emitter is ranked by the mean of its texture.** `mean_color`
+  averages every texel, sRGB-decoded, so an emitter that is bright in one corner
+  and black elsewhere is selected as though it were uniformly dim. That is the
+  correct total power and the wrong distribution within the primitive, which
+  `sample_light` samples by area regardless. The alternative considered was
+  falling back to uniform selection for such lights, which is worse in every
+  case that is not adversarial. Note that the *shading* still reads the flat
+  `GpuMaterial.emission` — one texel at UV (0, 0) — which is the separate gap
+  recorded as issue #59.
 - **The BVH leaf permutation trades build time for peak memory above ~400k
   primitives.** `permute_in_place` (`hittable/bvh.rs`) allocates nothing, where
   the staging-vector gather it replaced allocated a second full-size primitive
@@ -590,6 +610,61 @@ about 0.2% at 8 spp against 4000 and ignorable. With this sampler it is
 structural — an 8-sample render is literally a sub-net of the 4000-sample
 reference — and it flattered every arm by roughly 10% before the references were
 moved to `seed: 1`.
+
+### Light selection
+
+Done: `sample_light` picks an emitter in proportion to its emitted power, from
+Vose's alias table built once per scene by `build_alias_table`
+(`renderer/scene_flattener.rs`). One 1D draw as before — `pick * L` splits into
+the slot and the coin — so the dimension budget is untouched, and both the
+sampler and the MIS weight read the pick probability from `select_pdf`, the same
+field of the same `LightRef`, which is what stops the two drifting apart. Cost:
+`LightRef` went from 8 bytes to 16.
+
+`create_many_lights_scene` is what justifies it, because nothing else could: 120
+ceiling emitters over three decades of radiance, where the brightest 10% carry
+53% of the power. Linear RMSE at 400x300 against a 4000 spp reference, adaptive
+sampling off:
+
+| spp | uniform | by power | ratio |
+| --- | --- | --- | --- |
+| 64 | 0.04208 | 0.02625 | 1.60x |
+| 256 | 0.01809 | 0.01202 | 1.51x |
+
+Short of the 2-5x the issue predicted, and the reason is the scene rather than
+the code: a geometric ramp over three decades spreads the power much more evenly
+than the phrase suggests. 1.5x of RMSE is 2.3x the samples for the same error.
+`render/many_lights_400x300_256spp` is the bench arm that tracks the cost of
+tracing it, at 306.7 ms.
+
+**The prediction that "no existing scene will move" was wrong, and `test_scene`
+is why.** Its three lights carry 99.6%, 0.32% and 0.079% of the scene's power,
+so uniform selection was spending two shadow rays in three on lights worth 0.4%
+of the energy, and the one that carries the scene got one pick in three with its
+samples arriving at three times the weight to compensate. At 8 spp against a 2000 spp
+reference its linear RMSE falls 15%, 0.2325 → 0.1986, which is what made
+`test_denoise_improves_low_sample_image`'s ratio gate need restating — the
+denoiser's input got quieter faster than its output did.
+
+It also got *faster*, which was not expected at all:
+`render/test_scene_800x600_64spp` 180.8 ms → 167.4 ms (−7.9%),
+`adaptive_sampling/adaptive` 1.695 s → 1.575 s (−7.1%), `forced_off` 1.712 s →
+1.605 s (−6.3%). Not occupancy and not code size: RADV reports the tracer
+unchanged at 128 VGPRs, 108 SGPRs and 8 subgroups per SIMD, with 5855 → 5876
+instructions — slightly *more* code. The likeliest explanation is coherence,
+with one light now taking 99.6% of the picks a wave makes, so the primitive-type
+dispatch in `sample_light` and the shadow rays behind it stop diverging across
+the wave. That is a hypothesis; it has not been measured directly, and the way
+to would be a divergence counter rather than another timing.
+
+A single-light scene is bit-identical: one emitter gives `select_pdf` 1.0 and
+`alias_prob` 1.0, which is the old `/ f32(light_count)` exactly. Cornell and the
+specular scene reproduce their old means in
+`test_bsdf_only_sampling_converges_to_the_same_image` to the last digit.
+`test_scene` moves in that test too, and in the direction that confirms the
+rest: its NEE mean sat 0.13% from the BSDF-only oracle at 2000 spp and now sits
+0.01% from it. Both arms were always converging to the same number — what
+shrank is how much noise the NEE arm still had left at 2000 spp.
 
 ### GPU timing and occupancy
 

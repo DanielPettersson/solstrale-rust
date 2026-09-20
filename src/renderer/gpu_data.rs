@@ -278,12 +278,28 @@ pub struct GpuCamera {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-/// Reference to a light source
+/// Reference to a light source, plus its share of the scene's emitted power.
+///
+/// The sampler and the MIS weight both need the probability of picking this
+/// light. They read it from `select_pdf` -- the same field of the same entry --
+/// rather than each computing it, which is what keeps a non-uniform selector
+/// from silently biasing the image: there is no second expression to drift.
+///
+/// `alias_prob` and `alias_index` are Vose's alias table over `select_pdf`, so
+/// selection is one 1D draw regardless of how many emitters there are. See
+/// `build_alias_table` in `scene_flattener`.
 pub struct LightRef {
-    /// Type of the primitive (0=Sphere, 1=Triangle, 2=Quad)
-    pub prim_type: u32,
-    /// Index of the primitive in its respective buffer
-    pub prim_index: u32,
+    /// `(prim_type << PRIM_TYPE_SHIFT) | prim_index`, the packing `prim_refs`
+    /// uses. Lights are sorted by it so the tracer can binary-search a hit
+    /// primitive back to its entry here.
+    pub prim: u32,
+    /// Probability that `sample_light` picks this light: its emitted power over
+    /// the scene's total, or `1 / light_count` when no light emits anything.
+    pub select_pdf: f32,
+    /// Chance of keeping this slot rather than jumping to `alias_index`.
+    pub alias_prob: f32,
+    /// The slot this one's leftover probability was filled from.
+    pub alias_index: u32,
 }
 
 #[repr(C)]

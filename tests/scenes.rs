@@ -942,6 +942,111 @@ pub fn create_cornell_stacked_lights_scene(render_config: RenderConfig) -> Scene
     cornell_scene(render_config, world)
 }
 
+/// A room whose ceiling is a 12x10 grid of emissive quads spanning three orders
+/// of magnitude of radiance.
+///
+/// The scene light selection exists for, and the one the other scenes here
+/// cannot stand in for: Cornell and the specular scene have one emitter, where
+/// there is nothing to choose, and the test scene has three. Here the brightest
+/// twelve of the 120 carry 53% of the emitted power, so a uniform pick sends
+/// them one shadow ray in ten and spends the other nine on emitters worth
+/// little; the samples that matter then arrive scaled up to compensate. That is
+/// variance, not bias, which is why it shows up as noise at a fixed sample
+/// count and in no mean an oracle test could compare.
+///
+/// The radiances are a permuted geometric ramp rather than a gradient: `i * 37
+/// mod 120` is a permutation, since 37 and 120 are coprime, so bright and dim
+/// emitters interleave across the ceiling and no part of the room is lit by one
+/// end of the range alone. Deterministic, with no RNG to seed.
+///
+/// A stand-in for the emissive mesh an OBJ import would bring in, at a
+/// primitive count a test can afford.
+#[allow(dead_code)]
+pub fn create_many_lights_scene(render_config: RenderConfig) -> Scene {
+    const COLS: usize = 12;
+    const ROWS: usize = 10;
+    const COUNT: usize = COLS * ROWS;
+
+    let white = Lambertian::new(SolidColor::new(0.73, 0.73, 0.73).into(), None);
+    let nop = NopTransformer();
+    let mut world: Vec<Hittables> = Vec::new();
+
+    // A 555-unit box open toward the camera, as the Cornell scenes use.
+    let wall = |origin: Vec3, u: Vec3, v: Vec3, mat: Materials| -> Hittables {
+        Quad::new(origin, u, v, mat, &nop).into()
+    };
+    let x = Vec3::new(555., 0., 0.);
+    let y = Vec3::new(0., 555., 0.);
+    let z = Vec3::new(0., 0., 555.);
+    world.push(wall(ZERO_VECTOR, x, z, white.clone().into()));
+    world.push(wall(Vec3::new(0., 555., 0.), x, z, white.clone().into()));
+    world.push(wall(Vec3::new(0., 0., 555.), x, y, white.clone().into()));
+    world.push(wall(ZERO_VECTOR, y, z, white.clone().into()));
+    world.push(wall(Vec3::new(555., 0., 0.), y, z, white.clone().into()));
+
+    // The emitters, just below the ceiling and facing down -- same winding as
+    // the Cornell light, whose u cross v points at -y.
+    let cell = 555. / COLS as f64;
+    let size = cell * 0.6;
+    for i in 0..COUNT {
+        // 0.02 to 20: three decades, geometric so every decade gets the same
+        // share of the emitters rather than the brightest swamping the count.
+        let radiance = 0.02 * 1000f64.powf((i * 37 % COUNT) as f64 / (COUNT - 1) as f64);
+        let col = (i % COLS) as f64;
+        let row = (i / COLS) as f64;
+        world.push(
+            Quad::new(
+                Vec3::new(
+                    (col + 0.2) * cell,
+                    554.,
+                    (row + 0.2) * cell + (555. - ROWS as f64 * cell) / 2.,
+                ),
+                Vec3::new(size, 0., 0.),
+                Vec3::new(0., 0., size),
+                DiffuseLight::new(radiance, radiance, radiance, None).into(),
+                &nop,
+            )
+            .into(),
+        );
+    }
+
+    // Two boxes, so the image has occlusion in it: a shadow is where the
+    // difference between the light that matters and the light that does not
+    // actually lands.
+    world.append(&mut Quad::new_box(
+        ZERO_VECTOR,
+        Vec3::new(165., 330., 165.),
+        white.clone().into(),
+        &Transformations::new(vec![
+            Box::new(RotationY::new(15.)),
+            Box::new(Translation::new(Vec3::new(265., 0., 295.))),
+        ]),
+    ));
+    world.append(&mut Quad::new_box(
+        ZERO_VECTOR,
+        Vec3::new(165., 165., 165.),
+        white.into(),
+        &Transformations::new(vec![
+            Box::new(RotationY::new(-18.)),
+            Box::new(Translation::new(Vec3::new(130., 0., 65.))),
+        ]),
+    ));
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 40.,
+            aperture_size: 0.,
+            look_from: Vec3::new(278., 278., -800.),
+            look_at: Vec3::new(278., 278., 0.),
+            up: Vec3::new(0., 1., 0.),
+        },
+        // No ambient light: every photon in the image came from one of the 120.
+        background_color: ZERO_VECTOR,
+        render_config,
+    }
+}
+
 /// A five-walled box, every wall carrying the material under test, lit by a
 /// sphere hanging inside it. Built for the sRGB decode tests.
 ///

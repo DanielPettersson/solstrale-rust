@@ -26,12 +26,12 @@ use solstrale::util::rgb_color::linear_to_srgb;
 use crate::scenes::{
     FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, ROUGH_METAL_FUZZ, ROUGH_METAL_RADIUS,
     create_blend_material_scene, create_cornell_scene, create_cornell_stacked_lights_scene,
-    create_furnace_scene, create_light_attenuation_scene, create_normal_mapping_scene,
-    create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
-    create_obj_with_triangle, create_quad_rotation_scene, create_rough_metal_scene,
-    create_simple_test_scene, create_smooth_vs_flat_scene, create_specular_scene,
-    create_srgb_decode_scene, create_test_scene, create_texture_mapping_scene, create_uv_scene,
-    rough_metal_sphere_center,
+    create_furnace_scene, create_light_attenuation_scene, create_many_lights_scene,
+    create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
+    create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
+    create_rough_metal_scene, create_simple_test_scene, create_smooth_vs_flat_scene,
+    create_specular_scene, create_srgb_decode_scene, create_test_scene,
+    create_texture_mapping_scene, create_uv_scene, rough_metal_sphere_center,
 };
 
 mod scenes;
@@ -827,12 +827,15 @@ fn test_adaptive_sampling_convergence() {
 /// a 100x50 downsample, which a uniform brightness shift walks straight
 /// through.
 ///
-/// The four scenes are four ways a light PDF can be wrong. Cornell has no
+/// The five scenes are five ways a light PDF can be wrong. Cornell has no
 /// background at all, so a total loss of direct lighting has nowhere to hide;
 /// the stacked-lights Cornell is the one configuration where a direction
 /// reaches two emitters at once; the specular scene drives the weight-1 path
-/// through metal and glass; and the test scene's radius-10 sphere light is
-/// crossed by most of the rays in the frame.
+/// through metal and glass; the test scene's radius-10 sphere light is crossed
+/// by most of the rays in the frame; and the many-lights room is where the
+/// selection probability stops being the constant `1 / light_count` -- a
+/// `select_pdf` that disagreed with the alias table the sampler draws from
+/// would land here as a shifted mean and nowhere else.
 ///
 /// The reference lifts the clamp because the shipped renderer's clamp is the
 /// one thing here that is deliberately biased, and on a BSDF-only path it bites
@@ -863,7 +866,7 @@ fn test_bsdf_only_sampling_converges_to_the_same_image() {
     // still tight enough to catch a PDF that is wrong by a constant factor.
     const TOLERANCE: f64 = 0.005;
 
-    let scenes: [OracleScene; 4] = [
+    let scenes: [OracleScene; 5] = [
         ("cornell", create_cornell_scene),
         (
             "cornell_stacked_lights",
@@ -871,6 +874,7 @@ fn test_bsdf_only_sampling_converges_to_the_same_image() {
         ),
         ("specular", create_specular_scene),
         ("test_scene", create_test_scene),
+        ("many_lights", create_many_lights_scene),
     ];
 
     for (name, build) in scenes {
@@ -1535,26 +1539,28 @@ fn test_denoise_improves_low_sample_image() {
     // Two gates, because the ratio alone is misleading here.
     //
     // The ratio was 0.56 against white noise, 0.62 against the low-discrepancy
-    // sampler and is 0.71 now that image textures are sRGB decoded, and both
-    // loosenings are the same effect: the denominator falls faster than the
-    // numerator. The sampler removed noise before the filter could; the decode
-    // darkened this scene's textured floor, which is the easy, flat majority of
-    // the frame, leaving the RMSE dominated by the untextured reds and the
-    // glass the filter was always going to struggle with. Across the decode the
-    // denominator shrank 17% (0.282 -> 0.234) against the numerator's 5%
-    // (0.175 -> 0.167), so the absolute denoised error -- the thing anyone
-    // actually looks at -- improved again while the ratio got worse again.
+    // sampler, 0.71 once image textures were sRGB decoded, and is 0.82 now that
+    // light selection is power-proportional. Every loosening is the same
+    // effect: the denominator falls faster than the numerator. The sampler
+    // removed noise before the filter could; the decode darkened this scene's
+    // textured floor, which is the easy, flat majority of the frame, leaving
+    // the RMSE dominated by the untextured reds and the glass the filter was
+    // always going to struggle with; and power-proportional selection stopped
+    // this scene's three very differently powered lights being sampled equally
+    // often, which took 15% off the 8 spp input (0.232 -> 0.199) against 2% off
+    // the denoised image (0.166 -> 0.162).
     //
-    // The absolute assertion is what stops the next such change having to make
-    // that argument a third time.
+    // The absolute assertion is what stops each such change having to make that
+    // argument again: in all three the thing anyone actually looks at improved
+    // while the ratio got worse.
     assert!(
-        rmse_denoised < rmse_noisy * 0.75,
-        "denoising 8 spp should cut linear RMSE against the reference by at least 25%, \
+        rmse_denoised < rmse_noisy * 0.85,
+        "denoising 8 spp should cut linear RMSE against the reference by at least 15%, \
          was {} against {}",
         rmse_denoised,
         rmse_noisy
     );
-    // 0.167 measured.
+    // 0.162 measured.
     assert!(
         rmse_denoised < 0.2,
         "denoised 8 spp should land within 0.2 linear RMSE of the reference, was {}",

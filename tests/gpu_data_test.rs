@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use solstrale::renderer::gpu_data::{
-        BvhNode, GpuRenderConfig, Material, QuadAttr, QuadPos, Ray, Sphere, TriangleAttr,
+        BvhNode, GpuRenderConfig, LightRef, Material, QuadAttr, QuadPos, Ray, Sphere, TriangleAttr,
         TrianglePos,
     };
     use std::mem::{offset_of, size_of};
@@ -16,6 +16,8 @@ mod tests {
         assert_eq!(size_of::<TriangleAttr>(), 80);
         assert_eq!(size_of::<QuadPos>(), 80);
         assert_eq!(size_of::<QuadAttr>(), 32);
+        // Packed primitive reference, selection probability, alias pair.
+        assert_eq!(size_of::<LightRef>(), 16);
         // Two child boxes + two meta words, padded for WGSL vec3 alignment.
         assert_eq!(size_of::<BvhNode>(), 64);
         assert_eq!(size_of::<GpuRenderConfig>(), 48);

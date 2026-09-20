@@ -9,7 +9,9 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use derive_more::{Constructor, Display};
 
-use crate::scenes::{create_rough_metal_scene, create_test_scene, new_bvh_test_scene};
+use crate::scenes::{
+    create_many_lights_scene, create_rough_metal_scene, create_test_scene, new_bvh_test_scene,
+};
 use solstrale::camera::CameraConfig;
 use solstrale::geo::transformation::NopTransformer;
 use solstrale::geo::vec3::Vec3;
@@ -400,6 +402,24 @@ pub fn render_benchmark(c: &mut Criterion) {
                     samples_per_pixel: 64,
                     width: 800,
                     height: 600,
+                    ..RenderConfig::default()
+                })
+            },
+            render_and_sync,
+        )
+    });
+
+    // 120 emitters spanning three decades of radiance: the only arm where the
+    // cost of *selecting* a light is on the critical path at all. The others
+    // have one to three, where the alias table is a constant multiply and the
+    // binary search behind the MIS weight is two iterations.
+    group.bench_function("many_lights_400x300_256spp", |b| {
+        b.iter_with_setup(
+            || {
+                create_many_lights_scene(RenderConfig {
+                    samples_per_pixel: 256,
+                    width: 400,
+                    height: 300,
                     ..RenderConfig::default()
                 })
             },

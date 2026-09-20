@@ -12,6 +12,7 @@ use crate::renderer::gpu_data::{
     MAT_METAL, Material as GpuMaterial, PRIM_TYPE_QUAD, PRIM_TYPE_SHIFT, PRIM_TYPE_SPHERE,
     PRIM_TYPE_TRIANGLE, QuadAttr, QuadPos, Sphere as GpuSphere, TriangleAttr, TrianglePos,
 };
+use crate::util::rgb_color::srgb_to_vec3;
 use crate::util::texture_processing::{AtlasLayout, TexturePacker};
 use image::RgbImage;
 use std::collections::HashMap;
@@ -30,6 +31,10 @@ struct FlattenCaches {
     material_ids: HashMap<Vec<u8>, u32, BuildHasherDefault<FxHasher>>,
     /// `Arc::as_ptr` of a decoded texture -> its index in `unique_textures`.
     texture_ids: HashMap<usize, usize, BuildHasherDefault<FxHasher>>,
+    /// `Arc::as_ptr` of a decoded texture -> the mean of its texels, for
+    /// emitters that carry an image. An emissive mesh shares one texture across
+    /// hundreds of triangles, and scanning it per triangle is not affordable.
+    texture_means: HashMap<usize, Vec3, BuildHasherDefault<FxHasher>>,
 }
 
 /// The multiply-xor hash rustc uses internally, over 64-bit words.
@@ -111,8 +116,9 @@ pub struct SceneData {
     pub textures: Vec<Arc<RgbImage>>,
     /// Atlas placement for `textures`, computed once here and reused by the renderer.
     pub atlas_layout: Option<AtlasLayout>,
-    /// Light sources, sorted by `light_key` so the tracer can binary-search
-    /// a primitive back to the lights array.
+    /// Light sources, sorted by `LightRef::prim` so the tracer can
+    /// binary-search a primitive back to the lights array, and carrying the
+    /// power-proportional selection distribution `build_alias_table` computed.
     pub lights: Vec<LightRef>,
     /// Whether `prim_refs[k]` is `(PRIM_TYPE_TRIANGLE << 30) | k` at every `k`.
     ///
@@ -206,7 +212,8 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     // types. Sorting them by the same packed key `prim_refs` uses is what lets
     // the tracer binary-search a hit primitive back to "is this an emitter?"
     // instead of asking every light.
-    data.lights.sort_unstable_by_key(light_key);
+    data.lights.sort_unstable_by_key(|light| light.prim);
+    build_alias_table(&mut data.lights);
 
     data.prim_refs_are_identity = data.triangle_pos.len() == data.prim_refs.len();
     debug_assert!(
@@ -339,10 +346,126 @@ fn aabb_max(a: &Aabb) -> [f32; 3] {
     [a.x.max as f32, a.y.max as f32, a.z.max as f32]
 }
 
-/// The packed `(prim_type, prim_index)` key a [`LightRef`] sorts by, which is
-/// the same packing `prim_refs` uses.
-fn light_key(light: &LightRef) -> u32 {
-    (light.prim_type << PRIM_TYPE_SHIFT) | light.prim_index
+/// A light's entry, with `select_pdf` holding its raw emitted power until
+/// [`build_alias_table`] normalises the set.
+///
+/// Power for a one-sided diffuse emitter is `pi * A * luminance(L)`. A sphere
+/// emits over its whole surface, hence `A = 4 pi r^2` at the call site.
+fn light_ref(
+    prim_type: u32,
+    prim_index: u32,
+    material: &Materials,
+    area: f64,
+    caches: &mut FlattenCaches,
+) -> LightRef {
+    // Only a DiffuseLight answers true to `is_light`, which is what gates every
+    // call here; a Blend holding one is not in `lights` at all.
+    let radiance = match material {
+        Materials::DiffuseLight(m) => mean_color(&m.tex, caches),
+        _ => ZERO_VECTOR,
+    };
+
+    LightRef {
+        prim: (prim_type << PRIM_TYPE_SHIFT) | prim_index,
+        select_pdf: (std::f64::consts::PI * area * luminance(radiance)) as f32,
+        alias_prob: 0.,
+        alias_index: 0,
+    }
+}
+
+/// Rec. 709 luma: a light's colour reduced to the one number its selection
+/// probability ranks it by.
+fn luminance(c: Vec3) -> f64 {
+    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+}
+
+/// The average colour a texture emits.
+///
+/// `add_material` flattens a texture to the single texel at UV (0, 0) for the
+/// GPU's `emission` slot, and ranking a textured emitter by a corner pixel is
+/// the kind of silent wrongness that never shows up as a crash -- so an image
+/// is averaged over every texel instead, sRGB-decoded per texel to match
+/// `ImageMap::color`.
+fn mean_color(tex: &Textures, caches: &mut FlattenCaches) -> Vec3 {
+    let Textures::ImageMap(im) = tex else {
+        return sample_texture(tex);
+    };
+
+    let image = im.get_image();
+    let key = Arc::as_ptr(&image) as usize;
+    if let Some(&mean) = caches.texture_means.get(&key) {
+        return mean;
+    }
+
+    let texels = (image.width() * image.height()).max(1) as f64;
+    let mean = image
+        .pixels()
+        .fold(ZERO_VECTOR, |acc, p| acc + srgb_to_vec3(p))
+        / texels;
+    caches.texture_means.insert(key, mean);
+    mean
+}
+
+/// Turns the raw powers sitting in `select_pdf` into the normalised selection
+/// distribution and Vose's alias table over it, in O(L).
+///
+/// The alias table is what keeps selection at one 1D draw as the light count
+/// grows: `sample_light` scales its draw by `L`, takes the integer part as a
+/// slot and the fraction as the coin that decides between that slot and its
+/// alias. A linear CDF scan would cost the dimension budget nothing either, but
+/// it costs O(L) per bounce, which is the thing an emissive mesh makes matter.
+///
+/// Falls back to uniform when nothing emits -- a `DiffuseLight` may be black,
+/// and is still a light as far as `is_light` is concerned. A distribution of
+/// zeroes has no normalisation, and every direction to such a light carries no
+/// radiance anyway.
+fn build_alias_table(lights: &mut [LightRef]) {
+    let n = lights.len();
+    if n == 0 {
+        return;
+    }
+
+    let total: f64 = lights.iter().map(|l| l.select_pdf as f64).sum();
+    let uniform = !total.is_finite() || total <= 0.;
+
+    // Probabilities scaled by `n`, so a slot is under- or over-full against 1
+    // rather than against 1/n. This is the array Vose consumes.
+    let mut scaled: Vec<f64> = if uniform {
+        vec![1.; n]
+    } else {
+        lights
+            .iter()
+            .map(|l| l.select_pdf as f64 / total * n as f64)
+            .collect()
+    };
+
+    // Defaults first: every slot keeps itself. Vose's leftovers -- slots whose
+    // scaled probability is 1 up to rounding -- are meant to end up exactly
+    // here, so the loop below simply never touches them.
+    for (i, light) in lights.iter_mut().enumerate() {
+        light.select_pdf = (scaled[i] / n as f64) as f32;
+        light.alias_prob = 1.;
+        light.alias_index = i as u32;
+    }
+
+    let (mut small, mut large): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| scaled[i] < 1.);
+
+    while let (Some(&s), Some(&l)) = (small.last(), large.last()) {
+        small.pop();
+        large.pop();
+
+        lights[s].alias_prob = scaled[s] as f32;
+        lights[s].alias_index = l as u32;
+
+        // `l` donated what `s` was short of, and goes back on whichever list it
+        // now belongs to.
+        scaled[l] -= 1. - scaled[s];
+        if scaled[l] < 1. {
+            small.push(l);
+        } else {
+            large.push(l);
+        }
+    }
 }
 
 /// Packs an inline leaf the same way the builder does.
@@ -372,10 +495,9 @@ fn add_primitive(
                 _padding: [0; 3],
             });
             if s.mat.is_light() {
-                data.lights.push(LightRef {
-                    prim_type: PRIM_TYPE_SPHERE,
-                    prim_index: index,
-                });
+                let area = 4. * std::f64::consts::PI * s.radius * s.radius;
+                data.lights
+                    .push(light_ref(PRIM_TYPE_SPHERE, index, &s.mat, area, caches));
             }
             (index, PRIM_TYPE_SPHERE)
         }
@@ -406,10 +528,8 @@ fn add_primitive(
                 n2_oct: pack_oct(t.n2),
             });
             if t.mat.is_light() {
-                data.lights.push(LightRef {
-                    prim_type: PRIM_TYPE_TRIANGLE,
-                    prim_index: index,
-                });
+                data.lights
+                    .push(light_ref(PRIM_TYPE_TRIANGLE, index, &t.mat, t.area, caches));
             }
             (index, PRIM_TYPE_TRIANGLE)
         }
@@ -435,10 +555,8 @@ fn add_primitive(
                 material_index: mat_idx,
             });
             if q.mat.is_light() {
-                data.lights.push(LightRef {
-                    prim_type: PRIM_TYPE_QUAD,
-                    prim_index: index,
-                });
+                data.lights
+                    .push(light_ref(PRIM_TYPE_QUAD, index, &q.mat, q.area, caches));
             }
             (index, PRIM_TYPE_QUAD)
         }
@@ -658,7 +776,8 @@ mod tests {
     use crate::hittable::{Bvh, Hittables, Sphere};
     use crate::material::texture::SolidColor;
     use crate::material::{Lambertian, Materials};
-    use crate::renderer::scene_flattener::{flatten_scene, pack_oct};
+    use crate::renderer::gpu_data::LightRef;
+    use crate::renderer::scene_flattener::{build_alias_table, flatten_scene, pack_oct};
     use crate::renderer::{RenderConfig, Scene};
 
     /// WGSL `unpack2x16snorm` then `oct_decode`, in Rust. Only the encoder
@@ -722,6 +841,111 @@ mod tests {
                 round_tripped
             );
         }
+    }
+
+    /// Draws a light the way `sample_light` does: one uniform scalar, split
+    /// into a slot and the coin that decides between that slot and its alias.
+    ///
+    /// A transcription of the shader, which is the point -- the GPU side is
+    /// three lines and untestable without a device, so the thing worth pinning
+    /// is that the table those three lines read produces the distribution the
+    /// MIS weight is told it produces.
+    fn alias_draw(lights: &[LightRef], x: f64) -> usize {
+        let scaled = x * lights.len() as f64;
+        let slot = (scaled as usize).min(lights.len() - 1);
+        if scaled - slot as f64 >= lights[slot].alias_prob as f64 {
+            lights[slot].alias_index as usize
+        } else {
+            slot
+        }
+    }
+
+    fn lights_with_powers(powers: &[f32]) -> Vec<LightRef> {
+        powers
+            .iter()
+            .enumerate()
+            .map(|(i, &power)| LightRef {
+                prim: i as u32,
+                select_pdf: power,
+                alias_prob: 0.,
+                alias_index: 0,
+            })
+            .collect()
+    }
+
+    /// The alias table against the `select_pdf` the tracer weights by.
+    ///
+    /// These two are the whole bias risk in power-proportional selection: the
+    /// sampler draws from the table, while the PDF it is divided by is
+    /// `select_pdf` times the density of the point on the light. A Vose bug
+    /// that leaves the two disagreeing is an image that is quietly wrong rather
+    /// than one that crashes, and nothing on the GPU can see it -- a wrong
+    /// distribution and a wrong weight make a plausible picture together.
+    #[test]
+    fn alias_table_matches_its_pdf() {
+        // Three orders of magnitude, the range an emissive mesh spans, with the
+        // bright light first so most slots are under-full and the table's
+        // donation loop actually runs.
+        let powers = [1000., 0.5, 12., 3., 200., 1., 0.25, 40.];
+        let mut lights = lights_with_powers(&powers);
+        build_alias_table(&mut lights);
+
+        let total: f64 = powers.iter().map(|&p| p as f64).sum();
+        let sum: f64 = lights.iter().map(|l| l.select_pdf as f64).sum();
+        assert!(
+            (sum - 1.).abs() < 1e-6,
+            "select_pdf sums to {} rather than 1",
+            sum
+        );
+        for (i, light) in lights.iter().enumerate() {
+            let expected = powers[i] as f64 / total;
+            assert!(
+                (light.select_pdf as f64 - expected).abs() < 1e-6,
+                "light {} has select_pdf {} against a power share of {}",
+                i,
+                light.select_pdf,
+                expected
+            );
+        }
+
+        const DRAWS: usize = 1_000_000;
+        let mut counts = vec![0usize; lights.len()];
+        let mut state: u32 = 0x9E37_79B9;
+        for _ in 0..DRAWS {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let x = (state >> 8) as f64 / 16777216.;
+            counts[alias_draw(&lights, x)] += 1;
+        }
+
+        for (i, &count) in counts.iter().enumerate() {
+            let p = lights[i].select_pdf as f64;
+            let mean = DRAWS as f64 * p;
+            let sigma = (DRAWS as f64 * p * (1. - p)).sqrt();
+            assert!(
+                (count as f64 - mean).abs() <= 3. * sigma,
+                "light {} was drawn {} times against an expected {} +/- {} (3 sigma)",
+                i,
+                count,
+                mean,
+                3. * sigma
+            );
+        }
+    }
+
+    /// A `DiffuseLight` may be black, and `is_light` still calls it a light.
+    /// Power-proportional selection has nothing to divide by then, so the table
+    /// has to come out uniform rather than NaN.
+    #[test]
+    fn alias_table_falls_back_to_uniform_when_nothing_emits() {
+        let mut lights = lights_with_powers(&[0., 0., 0., 0.]);
+        build_alias_table(&mut lights);
+
+        let mut counts = vec![0usize; lights.len()];
+        for (i, light) in lights.iter().enumerate() {
+            assert_eq!(light.select_pdf, 0.25, "light {} is not uniform", i);
+            counts[alias_draw(&lights, (i as f64 + 0.5) / lights.len() as f64)] += 1;
+        }
+        assert_eq!(counts, vec![1; lights.len()], "a slot is unreachable");
     }
 
     #[test]

@@ -234,9 +234,19 @@ struct RenderConfig {
     restart_index: u32,
 }
 
+// An emitter, plus its share of the scene's emitted power. `sample_light` and
+// light_hit_pdf both take the pick probability from `select_pdf` -- the same
+// field of the same entry -- so there is no second expression for the two to
+// disagree on. See `LightRef` and `build_alias_table` in the flattener.
 struct LightRef {
-    prim_type: u32,
-    prim_index: u32,
+    // (prim_type << PRIM_TYPE_SHIFT) | prim_index, the packing prim_refs uses.
+    prim: u32,
+    // Probability that sample_light picks this light.
+    select_pdf: f32,
+    // Vose's alias table over select_pdf: the chance of keeping this slot,
+    // and the slot to jump to otherwise.
+    alias_prob: f32,
+    alias_index: u32,
 }
 
 // What traversal actually tracks: enough to identify the winning primitive and
@@ -347,8 +357,8 @@ var<storage, read_write> gbuffer: array<vec4<u32>>;
 override width: u32 = 1u;
 override height: u32 = 1u;
 
-// Emitters in the scene, so the uniform 1/light_count pick probability is a
-// constant multiply and prim_is_light's binary search has a constant bound.
+// Emitters in the scene, so the alias table's scale is a constant multiply and
+// find_light's binary search has a constant bound.
 override light_count: u32 = 0u;
 
 // Which primitive types the scene contains. Each `false` strips one arm from
@@ -722,7 +732,12 @@ fn light_prim_pdf(
     return (distance * distance) / (abs(dot(direction, normal)) * area);
 }
 
-// Whether a primitive is one of the emitters sample_light draws from.
+// Which entry of `lights` a primitive is, or `light_count` if it is not an
+// emitter sample_light draws from.
+//
+// The index rather than a yes/no, because the caller needs the entry's
+// `select_pdf` -- reading the pick probability off the same record the sampler
+// picked by is what keeps the two sides of the MIS weight in step.
 //
 // `lights` is sorted by the packed `(prim_type, prim_index)` key that
 // `prim_refs` already uses, so this is a binary search: three iterations at
@@ -730,22 +745,20 @@ fn light_prim_pdf(
 // the primitive -- founders on QuadAttr being exactly 32 bytes with no slack,
 // and growing it by half to save three iterations is not worth it. It is the
 // escape hatch if a profile ever shows this search.
-fn prim_is_light(prim_type: u32, prim_index: u32) -> bool {
+fn find_light(prim_type: u32, prim_index: u32) -> u32 {
     let key = (prim_type << PRIM_TYPE_SHIFT) | prim_index;
     var lo = 0u;
     var hi = light_count;
     while (lo < hi) {
         let mid = (lo + hi) >> 1u;
-        let light = lights[mid];
-        if (((light.prim_type << PRIM_TYPE_SHIFT) | light.prim_index) < key) {
+        if (lights[mid].prim < key) {
             lo = mid + 1u;
         } else {
             hi = mid;
         }
     }
-    if (lo >= light_count) { return false; }
-    let light = lights[lo];
-    return ((light.prim_type << PRIM_TYPE_SHIFT) | light.prim_index) == key;
+    if (lo >= light_count || lights[lo].prim != key) { return light_count; }
+    return lo;
 }
 
 // The light strategy's density for a direction a BSDF path followed to an
@@ -769,13 +782,16 @@ fn light_hit_pdf(
     distance: f32,
     normal: vec3<f32>,
 ) -> f32 {
-    if (light_count == 0u || !prim_is_light(prim_type, prim_index)) { return 0.0; }
+    if (light_count == 0u) { return 0.0; }
+    let idx = find_light(prim_type, prim_index);
+    if (idx >= light_count) { return 0.0; }
     return light_prim_pdf(prim_type, prim_index, origin, direction, distance, normal)
-        / f32(light_count);
+        * lights[idx].select_pdf;
 }
 
-// One sample of the direct-lighting strategy: pick a light uniformly, sample a
-// point on it, and report what a shadow ray would need to reach it.
+// One sample of the direct-lighting strategy: pick a light in proportion to
+// its emitted power, sample a point on it, and report what a shadow ray would
+// need to reach it.
 struct LightSample {
     // Unit vector from the shading point toward the sampled point.
     direction: vec3<f32>,
@@ -793,6 +809,13 @@ struct LightSample {
 
 // `pick` selects the light, `u` the point on it. Two slots rather than one
 // stream, so a scene with one light draws the same pair as a scene with ten.
+//
+// Selection is power-proportional and costs that one scalar draw: `pick * L`
+// splits into a slot and a coin, and the alias table turns the pair into a
+// draw from the light distribution. Uniform selection is the special case where
+// every `alias_prob` is 1 and every `select_pdf` is `1 / L` -- what one light
+// gives trivially, and what the flattener falls back to when nothing in the
+// scene emits -- so a single-light scene traces what it always did.
 fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     var ls: LightSample;
     ls.direction = vec3<f32>(0.0, 1.0, 0.0);
@@ -804,16 +827,25 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
 
     if (light_count == 0u) { return ls; }
 
-    let idx = min(u32(pick * f32(light_count)), light_count - 1u);
-    let light = lights[idx];
+    // Integer part picks the slot, fractional part is the alias coin. The two
+    // are independent for a uniform `pick`, which is what makes one draw enough.
+    let scaled = pick * f32(light_count);
+    let slot = min(u32(scaled), light_count - 1u);
+    var light = lights[slot];
+    if (scaled - f32(slot) >= light.alias_prob) {
+        light = lights[light.alias_index];
+    }
+
+    let prim_type = light.prim >> PRIM_TYPE_SHIFT;
+    let prim_index = light.prim & PRIM_INDEX_MASK;
 
     var to_light = vec3<f32>(0.0);
-    if (has_spheres && light.prim_type == PRIM_TYPE_SPHERE) {
-        to_light = sphere_random_direction(spheres[light.prim_index], origin, u);
-    } else if (has_quads && light.prim_type == PRIM_TYPE_QUAD) {
-        to_light = quad_random_direction(quad_pos[light.prim_index], origin, u);
+    if (has_spheres && prim_type == PRIM_TYPE_SPHERE) {
+        to_light = sphere_random_direction(spheres[prim_index], origin, u);
+    } else if (has_quads && prim_type == PRIM_TYPE_QUAD) {
+        to_light = quad_random_direction(quad_pos[prim_index], origin, u);
     } else {
-        to_light = triangle_random_direction(triangle_pos[light.prim_index], origin, u);
+        to_light = triangle_random_direction(triangle_pos[prim_index], origin, u);
     }
 
     let len_sq = dot(to_light, to_light);
@@ -829,18 +861,18 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     var normal = vec3<f32>(0.0);
     var mat_idx = 0u;
 
-    if (has_spheres && light.prim_type == PRIM_TYPE_SPHERE) {
-        if (!hit_sphere_t(probe, spheres[light.prim_index], RAY_EPS, 1e20, &t_hit)) { return ls; }
-        let sph = spheres[light.prim_index];
+    if (has_spheres && prim_type == PRIM_TYPE_SPHERE) {
+        if (!hit_sphere_t(probe, spheres[prim_index], RAY_EPS, 1e20, &t_hit)) { return ls; }
+        let sph = spheres[prim_index];
         normal = (ray_at(probe, t_hit) - sph.center_and_radius.xyz) / sph.center_and_radius.w;
         mat_idx = sph.material_index;
-    } else if (has_quads && light.prim_type == PRIM_TYPE_QUAD) {
-        if (!hit_quad_t(probe, quad_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
-        normal = quad_pos[light.prim_index].normal;
-        mat_idx = quad_attr[light.prim_index].material_index;
+    } else if (has_quads && prim_type == PRIM_TYPE_QUAD) {
+        if (!hit_quad_t(probe, quad_pos[prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
+        normal = quad_pos[prim_index].normal;
+        mat_idx = quad_attr[prim_index].material_index;
     } else {
-        if (!hit_triangle_t(probe, triangle_pos[light.prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
-        let attr = triangle_attr[light.prim_index];
+        if (!hit_triangle_t(probe, triangle_pos[prim_index], RAY_EPS, 1e20, &t_hit, &bary)) { return ls; }
+        let attr = triangle_attr[prim_index];
         normal = attr.normal;
         mat_idx = attr.material_index;
     }
@@ -855,8 +887,8 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
 
     ls.direction = dir;
     ls.distance = t_hit;
-    ls.pdf = light_prim_pdf(light.prim_type, light.prim_index, origin, dir, t_hit, normal)
-        / f32(light_count);
+    ls.pdf = light_prim_pdf(prim_type, prim_index, origin, dir, t_hit, normal)
+        * light.select_pdf;
     ls.emission = emission;
     ls.attenuation_factor = material.attenuation_factor;
     ls.valid = true;
