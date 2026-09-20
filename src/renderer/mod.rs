@@ -11,8 +11,8 @@ use crate::camera::{Camera, CameraConfig};
 use crate::geo::vec3::Vec3;
 use crate::hittable::Hittables;
 use crate::post::PostProcessors;
-use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
-use crate::renderer::scene_flattener::flatten_scene;
+use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig, MAT_BLEND, MAT_DIELECTRIC, MAT_METAL};
+use crate::renderer::scene_flattener::{SceneData, flatten_scene};
 use crate::util::gpu_timing::{GpuTimer, report_dispatch};
 use crate::util::wgpu_util::{
     add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
@@ -26,6 +26,109 @@ pub mod gpu_data;
 #[cfg(test)]
 mod sampler_test;
 pub mod scene_flattener;
+#[cfg(test)]
+mod specialisation_test;
+
+/// Whether the tracer estimates direct lighting with an explicit shadow ray and
+/// weights it against the BSDF sample, or lets the BSDF sample find the lights
+/// on its own.
+///
+/// A constant rather than a [`RenderConfig`] field: it does not change what the
+/// image converges to, only how fast, so it is not a knob a caller should be
+/// reaching for. It is here so that next-event estimation can be measured
+/// against plain BSDF sampling without editing the shader -- see issue #47.
+const NEE_ENABLED: bool = true;
+
+/// What the tracer is compiled against for one scene.
+///
+/// Every field is a fact that holds for the life of a [`Renderer`], so it
+/// reaches the shader as an override constant rather than as a uniform: naga
+/// substitutes overrides before it emits SPIR-V, so a `false` here deletes the
+/// branch it guards instead of merely making it predictable. `Renderer::new`
+/// already builds the module and its one pipeline per render, so the only cost
+/// is a shader-cache miss the first time a given combination is seen.
+///
+/// Each flag removes a branch the scene could never have taken, which is why
+/// none of them changes a single sample -- the invariant `specialisation_test`
+/// holds the whole thing to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Specialisation {
+    has_spheres: bool,
+    has_quads: bool,
+    /// See [`SceneData::prim_refs_are_identity`], which this is taken from.
+    identity_prim_refs: bool,
+    has_blends: bool,
+    has_metal: bool,
+    has_dielectrics: bool,
+    has_textures: bool,
+    has_normal_maps: bool,
+    light_count: u32,
+}
+
+impl Specialisation {
+    fn from_scene_data(data: &SceneData) -> Self {
+        // Blend children are flattened into `materials` by `add_material`, so
+        // one pass over it sees the materials inside a blend as well as the
+        // ones a primitive names directly.
+        let any = |f: fn(&gpu_data::Material) -> bool| data.materials.iter().any(f);
+
+        Specialisation {
+            has_spheres: !data.spheres.is_empty(),
+            has_quads: !data.quad_pos.is_empty(),
+            identity_prim_refs: data.prim_refs_are_identity,
+            has_blends: any(|m| m.mat_type == MAT_BLEND),
+            has_metal: any(|m| m.mat_type == MAT_METAL),
+            has_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC),
+            has_textures: any(|m| m.texture_index >= 0),
+            has_normal_maps: any(|m| m.normal_texture_index >= 0),
+            light_count: data.lights.len() as u32,
+        }
+    }
+
+    /// The tracer with nothing stripped: every branch left in, which is what
+    /// the defaults in `ray_trace.wgsl` already are.
+    #[cfg(test)]
+    fn unspecialised(light_count: u32) -> Self {
+        Specialisation {
+            has_spheres: true,
+            has_quads: true,
+            identity_prim_refs: false,
+            has_blends: true,
+            has_metal: true,
+            has_dielectrics: true,
+            has_textures: true,
+            has_normal_maps: true,
+            light_count,
+        }
+    }
+
+    /// The override constants `ray_trace.wgsl` declares, in the form
+    /// `PipelineCompilationOptions` wants them. A `bool` override takes any
+    /// non-zero value as true.
+    fn constants(
+        &self,
+        width: u32,
+        height: u32,
+        low_discrepancy: bool,
+    ) -> Vec<(&'static str, f64)> {
+        let flag = |b: bool| if b { 1. } else { 0. };
+        vec![
+            ("width", width as f64),
+            ("height", height as f64),
+            ("light_count", self.light_count as f64),
+            ("has_spheres", flag(self.has_spheres)),
+            ("has_quads", flag(self.has_quads)),
+            ("identity_prim_refs", flag(self.identity_prim_refs)),
+            ("has_blends", flag(self.has_blends)),
+            ("has_metal", flag(self.has_metal)),
+            ("has_dielectrics", flag(self.has_dielectrics)),
+            ("has_textures", flag(self.has_textures)),
+            ("has_normal_maps", flag(self.has_normal_maps)),
+            ("nee_enabled", flag(NEE_ENABLED)),
+            ("low_discrepancy", flag(low_discrepancy)),
+        ]
+    }
+}
 
 ///Input to the ray tracer for how the image should be rendered
 #[derive(Clone)]
@@ -442,6 +545,19 @@ impl<'a> Renderer<'a> {
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::with_specialisation(scene, device, queue, None)
+    }
+
+    /// As [`Renderer::new`], but able to compile the tracer against something
+    /// other than what the scene says. `None` -- what every caller but
+    /// `specialisation_test` passes -- derives it from the scene; see
+    /// [`Specialisation`].
+    fn with_specialisation(
+        scene: Scene,
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        specialisation: Option<Specialisation>,
+    ) -> Result<Self, Box<dyn Error>> {
         // A scene lit only by its background is a scene -- a uniform
         // environment is what a furnace test is made of, and next-event
         // estimation simply has nothing to sample there. What is rejected is a
@@ -609,20 +725,18 @@ impl<'a> Renderer<'a> {
         );
 
         let render_config = GpuRenderConfig {
-            width,
-            height,
             sample_count: 0,
             max_depth: scene.render_config.max_depth.max(1),
+            samples_per_batch: scene.render_config.samples_per_batch.max(1),
+            min_samples_per_pixel: scene.render_config.min_samples_per_pixel,
             background_color: [
                 scene.background_color.x as f32,
                 scene.background_color.y as f32,
                 scene.background_color.z as f32,
             ],
-            light_count: scene_data.lights.len() as u32,
-            samples_per_batch: scene.render_config.samples_per_batch.max(1),
-            min_samples_per_pixel: scene.render_config.min_samples_per_pixel,
             variance_threshold: scene.render_config.variance_threshold,
             restart_index: scene.render_config.seed,
+            _padding: [0; 3],
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -654,20 +768,16 @@ impl<'a> Renderer<'a> {
             ],
         );
 
-        // An override rather than a uniform: the sampler's backing is decided
-        // once, here, instead of branching on every draw.
+        // Everything the tracer is specialised on. See [`Specialisation`] for
+        // why these are overrides and not uniforms, and `ray_trace.wgsl` for
+        // what each one strips.
+        let specialisation =
+            specialisation.unwrap_or_else(|| Specialisation::from_scene_data(&scene_data));
         let pipeline = compute_pipeline(
             device,
             &bind_group_layout,
             &module,
-            &[(
-                "low_discrepancy",
-                if scene.render_config.low_discrepancy {
-                    1.
-                } else {
-                    0.
-                },
-            )],
+            &specialisation.constants(width, height, scene.render_config.low_discrepancy),
         );
 
         let size = (width * height * 16) as u64; // vec3 is 16 bytes aligned (as vec4 effectively)

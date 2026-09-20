@@ -8,8 +8,9 @@ use crate::material::texture::{Texture, Textures};
 use crate::material::{Material, Materials};
 use crate::renderer::Scene;
 use crate::renderer::gpu_data::{
-    BvhNode as GpuBvhNode, LightRef, Material as GpuMaterial, PRIM_TYPE_SHIFT, QuadAttr, QuadPos,
-    Sphere as GpuSphere, TriangleAttr, TrianglePos,
+    BvhNode as GpuBvhNode, LightRef, MAT_BLEND, MAT_DIELECTRIC, MAT_DIFFUSE_LIGHT, MAT_LAMBERTIAN,
+    MAT_METAL, Material as GpuMaterial, PRIM_TYPE_QUAD, PRIM_TYPE_SHIFT, PRIM_TYPE_SPHERE,
+    PRIM_TYPE_TRIANGLE, QuadAttr, QuadPos, Sphere as GpuSphere, TriangleAttr, TrianglePos,
 };
 use crate::util::texture_processing::{AtlasLayout, TexturePacker};
 use image::RgbImage;
@@ -112,6 +113,15 @@ pub struct SceneData {
     pub atlas_layout: Option<AtlasLayout>,
     /// Light sources
     pub lights: Vec<LightRef>,
+    /// Whether `prim_refs[k]` is `(PRIM_TYPE_TRIANGLE << 30) | k` at every `k`.
+    ///
+    /// True exactly when the scene is nothing but triangles: every primitive
+    /// contributes one reference and one entry to its own type's array, and
+    /// both are appended in the same pass, so equal lengths leave no room for a
+    /// sphere or a quad. The tracer is compiled against this, and then the
+    /// innermost traversal loop reads the triangle's address straight out of
+    /// the leaf slot instead of chasing a reference to it.
+    pub prim_refs_are_identity: bool,
 }
 
 /// Flattens the scene into linear buffers
@@ -128,6 +138,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         textures: Vec::new(),
         atlas_layout: None,
         lights: Vec::new(),
+        prim_refs_are_identity: false,
     };
 
     let mut caches = FlattenCaches::default();
@@ -189,6 +200,17 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
     // it used to deep-copy every decoded image and re-run the identical packing.
     data.textures = atlas_textures;
     data.atlas_layout = atlas_layout;
+
+    data.prim_refs_are_identity = data.triangle_pos.len() == data.prim_refs.len();
+    debug_assert!(
+        !data.prim_refs_are_identity
+            || data
+                .prim_refs
+                .iter()
+                .enumerate()
+                .all(|(k, &r)| r == (PRIM_TYPE_TRIANGLE << PRIM_TYPE_SHIFT) | k as u32),
+        "prim_refs was reported as the identity map but is not"
+    );
 
     data
 }
@@ -338,11 +360,11 @@ fn add_primitive(
             });
             if s.mat.is_light() {
                 data.lights.push(LightRef {
-                    prim_type: 0,
+                    prim_type: PRIM_TYPE_SPHERE,
                     prim_index: index,
                 });
             }
-            (index, 0) // Type 0 = Sphere
+            (index, PRIM_TYPE_SPHERE)
         }
         Hittables::Triangle(t) => {
             let index = data.triangle_pos.len() as u32;
@@ -372,11 +394,11 @@ fn add_primitive(
             });
             if t.mat.is_light() {
                 data.lights.push(LightRef {
-                    prim_type: 1,
+                    prim_type: PRIM_TYPE_TRIANGLE,
                     prim_index: index,
                 });
             }
-            (index, 1) // Type 1 = Triangle
+            (index, PRIM_TYPE_TRIANGLE)
         }
         Hittables::Quad(q) => {
             let index = data.quad_pos.len() as u32;
@@ -401,13 +423,13 @@ fn add_primitive(
             });
             if q.mat.is_light() {
                 data.lights.push(LightRef {
-                    prim_type: 2,
+                    prim_type: PRIM_TYPE_QUAD,
                     prim_index: index,
                 });
             }
-            (index, 2) // Type 2 = Quad
+            (index, PRIM_TYPE_QUAD)
         }
-        Hittables::Bvh(_) => (0xFFFFFFFF, 0),
+        Hittables::Bvh(_) => (0xFFFFFFFF, PRIM_TYPE_SPHERE),
     }
 }
 
@@ -435,7 +457,7 @@ fn add_material(
             m.normal.as_ref(),
             0.0,
             0.0,
-            0,
+            MAT_LAMBERTIAN,
             0.0,
             [0, 0],
             0.0,
@@ -446,7 +468,7 @@ fn add_material(
             m.normal.as_ref(),
             m.fuzz as f32,
             0.0,
-            1,
+            MAT_METAL,
             0.0,
             [0, 0],
             0.0,
@@ -457,7 +479,7 @@ fn add_material(
             m.normal.as_ref(),
             0.0,
             m.index_of_refraction as f32,
-            2,
+            MAT_DIELECTRIC,
             0.0,
             [0, 0],
             0.0,
@@ -468,7 +490,7 @@ fn add_material(
             None,
             0.0,
             0.0,
-            3,
+            MAT_DIFFUSE_LIGHT,
             m.attenuation_factor.unwrap_or(0.0) as f32,
             [0, 0],
             0.0,
@@ -482,7 +504,7 @@ fn add_material(
                 None,
                 0.0,
                 0.0,
-                4,
+                MAT_BLEND,
                 0.0,
                 [idx1, idx2],
                 b.blend_factor as f32,
