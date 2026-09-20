@@ -136,6 +136,8 @@ impl Specialisation {
         height: u32,
         low_discrepancy: bool,
         estimator: Estimator,
+        // The perceptual roughness floor from RenderConfig, not yet squared.
+        regularisation: f64,
     ) -> Vec<(&'static str, f64)> {
         let flag = |b: bool| if b { 1. } else { 0. };
         vec![
@@ -148,12 +150,25 @@ impl Specialisation {
             ("has_blends", flag(self.has_blends)),
             ("has_metal", flag(self.has_metal)),
             ("has_dielectrics", flag(self.has_dielectrics)),
-            ("has_rough_dielectrics", flag(self.has_rough_dielectrics)),
+            // Regularisation widens a smooth dielectric's lobe at depth, so a
+            // scene that has it on needs the microfacet arm compiled in even
+            // though every dielectric in it is roughness 0. This is the one
+            // constant here that is not a fact about the scene alone, which is
+            // why it is resolved where the config is in hand rather than in
+            // `from_scene_data`.
+            (
+                "has_rough_dielectrics",
+                flag(self.has_rough_dielectrics || regularisation > 0.),
+            ),
             ("has_textures", flag(self.has_textures)),
             ("has_normal_maps", flag(self.has_normal_maps)),
             ("nee_enabled", flag(estimator.nee_enabled)),
             ("clamping_threshold", estimator.clamping_threshold as f64),
             ("low_discrepancy", flag(low_discrepancy)),
+            // Squared here rather than in the shader, so the constant the
+            // shader sees is an alpha like every other roughness that reaches
+            // it and the `roughness -> alpha` convention lives in one place.
+            ("regularisation_alpha", regularisation * regularisation),
         ]
     }
 }
@@ -232,6 +247,30 @@ pub struct RenderConfig {
     /// adaptive sampling overstates the variance of the mean and retires each
     /// pixel a little later than it needs to.
     pub low_discrepancy: bool,
+    /// Floor on the GGX roughness of every lobe a path meets after it has
+    /// already scattered off one that was not a Dirac delta. Off at 0, which
+    /// is the default.
+    ///
+    /// Path regularisation: what it buys is a caustic. The path that carries
+    /// one runs camera -> floor -> glass(enter) -> glass(exit) -> light, and
+    /// every vertex of it but the first is specular, so nothing along it can
+    /// take a shadow ray and the whole caustic is left to chance. Widening
+    /// those lobes gives them a density, and a density is what next-event
+    /// estimation needs.
+    ///
+    /// Only paths that have *already* lost their coherence are touched: the
+    /// floor comes first in that chain, so the glass is widened by the time
+    /// the path reaches it. Glass the camera looks at directly is at depth 0
+    /// with nothing before it, so it stays perfectly sharp, and so does
+    /// everything seen through it.
+    ///
+    /// Biased by construction -- a widened lobe is not the lobe the scene
+    /// describes -- which is why it is off unless asked for. In the same
+    /// perceptual units as [`Metal::new`]'s `fuzz`: the alpha the shader
+    /// floors against is `regularisation * regularisation`.
+    ///
+    /// [`Metal::new`]: crate::material::Metal::new
+    pub regularisation: f64,
     /// Distinguishes two otherwise identical renders of the same scene.
     ///
     /// Feeds the initial `restart_index`, which is mixed into every pixel's
@@ -259,6 +298,7 @@ impl Default for RenderConfig {
             min_samples_per_pixel: 32,
             variance_threshold: 0.01,
             low_discrepancy: true,
+            regularisation: 0.,
             seed: 0,
             post_processors: vec![],
         }
@@ -852,6 +892,7 @@ impl<'a> Renderer<'a> {
                 height,
                 scene.render_config.low_discrepancy,
                 estimator,
+                scene.render_config.regularisation,
             ),
         );
 

@@ -137,11 +137,14 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
   vertex so far was specular" instead of `depth == 0` would exempt it, but it
   would equally exempt fuzzy-metal paths onto small lights, which are genuine
-  fireflies.
+  fireflies. `create_caustic_scene` is the scene this was waiting on, and it
+  says the exemption is still not worth taking: that scene's light is dim
+  enough that the threshold is never reached, so the caustic it shows is
+  unclamped already.
 
-  It buys close to nothing on the scenes in the golden suite, whose lights are
-  dim enough that the threshold of 10 is never reached. It is not free on a
-  scene with a bright pinpoint: a 300-radiance emitter seen straight through a
+  It buys close to nothing on the scenes in the golden suite either, whose
+  lights are likewise dim. It is not free on a scene with a bright pinpoint: a
+  300-radiance emitter seen straight through a
   glass ball arrives at very nearly its own radiance, is cut to 10, and the
   converged image then sits 5% below an unclamped reference — 17% on
   `create_rough_metal_scene`, whose mirror sphere does the same thing. That is
@@ -190,7 +193,39 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   half-space beyond it is unobstructed. At the *entry* interface of a closed
   object the object's own far side blocks every shadow ray, so only the exit
   interface can take one; a rough glass ball is lit by direct light on the way
-  out, not on the way in.
+  out, not on the way in. `RenderConfig::regularisation` is what reaches the
+  caustic, and it reaches it through that exit interface rather than the entry
+  one — see below.
+- **Path regularisation is biased by construction, and off by default.**
+  `RenderConfig::regularisation` floors the GGX alpha of every lobe a path
+  meets after it has already scattered off one with width. What it buys is the
+  caustic: camera → floor → glass(enter) → glass(exit) → light is specular at
+  every vertex but the first, so nothing along it can take a shadow ray and the
+  whole caustic is left to chance. What it costs is that the widened lobes are
+  not the lobes the scene describes. Measured on `create_caustic_scene` at
+  300x200:
+
+  ```text
+  regularisation            0      0.15    0.3     0.5     0.8
+  noise, 64 spp           1.290   1.311   0.811   0.311   0.137
+  bias, caustic patch     -0.3%   -1.4%   -4.5%   -7.9%  -13.3%
+  bias, whole frame       -0.0%   -0.3%   -1.0%   -2.3%   -4.1%
+  error vs. the truth     1.290   1.259   1.304   1.847   2.341
+  ```
+
+  The noise column is two independent renders of the same arm, which cancels
+  whatever bias that arm has; the bias rows are converged means against an
+  unregularised reference. The last row is the sum of the two, and it is the
+  reason there is no default to recommend yet: below 0.3 the noise does not
+  move, above it the blur costs more than the noise it removes, and 0.3 is
+  roughly where the trade is even. A caustic that has to survive being looked
+  at closely wants a low value and more samples; one in the corner of a
+  viewport frame wants a high one.
+
+  Part of that bias is not the blur. A widened lobe invokes the single-scatter
+  energy loss above, which smooth glass never pays — which is why the
+  whole-frame row is not zero, and why compensating the dielectric would pay
+  off here as well as on rough glass.
 - **Rough glass loses energy, and no correction puts it back.** The dielectric
   is single-scatter GGX, as the conductor was before Turquin's factor: every
   ray a microfacet sends onto another microfacet is dropped. Measured in a
