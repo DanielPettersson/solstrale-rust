@@ -26,9 +26,9 @@ use solstrale::util::rgb_color::linear_to_srgb;
 use crate::scenes::{
     FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, ROUGH_METAL_FUZZ, ROUGH_METAL_RADIUS,
     create_blend_material_scene, create_cornell_scene, create_cornell_stacked_lights_scene,
-    create_furnace_scene, create_light_attenuation_scene, create_many_lights_scene,
-    create_normal_mapping_scene, create_normal_mapping_sphere_scene, create_obj_scene,
-    create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
+    create_furnace_scene, create_glass_slab_scene, create_light_attenuation_scene,
+    create_many_lights_scene, create_normal_mapping_scene, create_normal_mapping_sphere_scene,
+    create_obj_scene, create_obj_with_box, create_obj_with_triangle, create_quad_rotation_scene,
     create_rough_metal_scene, create_simple_test_scene, create_smooth_vs_flat_scene,
     create_specular_scene, create_srgb_decode_scene, create_test_scene,
     create_texture_mapping_scene, create_uv_scene, create_wide_light_scene,
@@ -3079,3 +3079,82 @@ fn test_wide_quad_light_is_solid_angle_sampled() {
 /// measures 0.0283; sampling it by area measures 0.0444, which is what the
 /// bound is really placed against.
 const WIDE_LIGHT_RMSE_BOUND: f64 = 0.035;
+
+/// Beer-Lambert absorption inside a dielectric, measured as channel ratios
+/// rather than as brightness.
+///
+/// A glass slab of known thickness in front of a unit emitter, with the
+/// albedo's red channel at 1 so red is the unattenuated control. Dividing green
+/// and blue by red cancels both Fresnel interfaces, both refractions and any
+/// residual throughput scaling, leaving `albedo^thickness` as the only term the
+/// ratio can still see.
+///
+/// The obvious metric lies. "The image got darker" passes for a wrong sign, a
+/// wrong exponent, absorption applied on entry instead of on exit, or applied
+/// once per bounce instead of per unit length -- every one of those merely
+/// dims. None of them survives a ratio.
+///
+/// Two thicknesses, and neither of them 1: at unit thickness `a^t` and a flat
+/// `a` per traversal are the same number, so a single slab cannot tell an
+/// exponential from a constant.
+///
+/// With the albedo ignored, as it was, both ratios read 1.
+#[test]
+fn test_beer_lambert_absorption_follows_the_exponential() {
+    let (device, queue) = get_wgpu_device_and_queue();
+
+    const SIZE: usize = 200;
+    const HALF: usize = 5;
+    let config = RenderConfig {
+        width: SIZE,
+        height: SIZE,
+        samples_per_pixel: 64,
+        // Off: a retired pixel holds whatever mean it had when it retired, and
+        // this is a measurement of the mean.
+        min_samples_per_pixel: u32::MAX,
+        ..Default::default()
+    };
+    let albedo = Vec3::new(1., 0.5, 0.25);
+
+    for thickness in [0.5, 2.] {
+        let pixels = render_linear(
+            create_glass_slab_scene(config.clone(), thickness, albedo),
+            device,
+            queue,
+        );
+
+        // The central 11x11, which is where the slab is crossed at normal
+        // incidence and the path through it really is `thickness` long.
+        let mut sum = [0f64; 3];
+        for y in SIZE / 2 - HALF..=SIZE / 2 + HALF {
+            for x in SIZE / 2 - HALF..=SIZE / 2 + HALF {
+                let p = pixels[y * SIZE + x];
+                (0..3).for_each(|c| sum[c] += p[c] as f64);
+            }
+        }
+        let n = ((2 * HALF + 1) * (2 * HALF + 1)) as f64;
+        let (r, g, b) = (sum[0] / n, sum[1] / n, sum[2] / n);
+        println!("glass slab {thickness} units: r {r:.4} g {g:.4} b {b:.4}");
+
+        // Catches the harness rather than the absorption: two normal-incidence
+        // interfaces pass 92% of the emitter, and a red channel far off that
+        // means the centre rays are not going through the slab at all.
+        assert!(
+            (r - 0.923).abs() < 0.02,
+            "red should be the unattenuated control at 0.923, not {r:.4}"
+        );
+
+        for (name, measured, expected) in [
+            ("green", g / r, 0.5f64.powf(thickness)),
+            ("blue", b / r, 0.25f64.powf(thickness)),
+        ] {
+            let relative = (measured / expected - 1.).abs();
+            assert!(
+                relative < 0.02,
+                "{name} over red through {thickness} units of glass is {measured:.4}, \
+                 against the {expected:.4} that albedo^thickness asks for -- {:.1}% off",
+                relative * 100.
+            );
+        }
+    }
+}
