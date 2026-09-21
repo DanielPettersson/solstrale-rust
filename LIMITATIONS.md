@@ -206,26 +206,47 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   300x200:
 
   ```text
-  regularisation            0      0.15    0.3     0.5     0.8
-  noise, 64 spp           1.290   1.311   0.811   0.311   0.137
-  bias, caustic patch     -0.3%   -1.4%   -4.5%   -7.9%  -13.3%
-  bias, whole frame       -0.0%   -0.3%   -1.0%   -2.3%   -4.1%
-  error vs. the truth     1.290   1.259   1.304   1.847   2.341
+  regularisation       0     0.15    0.2    0.25    0.3     0.4     0.5
+  noise, 64 spp      1.213  1.196  1.088  0.938  0.793   0.533   0.389
+  bias, patch        +0.1%  -1.1%  -1.9%  -2.8%  -3.1%   -2.6%   -0.8%
+  error vs. truth    1.214  1.208  1.188  1.141  1.189   1.448   1.705
   ```
 
-  The noise column is two independent renders of the same arm, which cancels
-  whatever bias that arm has; the bias rows are converged means against an
-  unregularised reference. The last row is the sum of the two, and it is the
-  reason there is no default to recommend yet: below 0.3 the noise does not
-  move, above it the blur costs more than the noise it removes, and 0.3 is
-  roughly where the trade is even. A caustic that has to survive being looked
-  at closely wants a low value and more samples; one in the corner of a
-  viewport frame wants a high one.
+  The noise row is four seed-pairs of the same arm averaged, which cancels
+  whatever bias that arm has; the bias row is a converged mean against an
+  unregularised reference. The last row is the sum of the two, and it has a
+  minimum: at 0.25 the technique is worth 6% of the total error on the scene
+  built to show it off. Below 0.2 the noise barely moves and above 0.3 the blur
+  costs more than the noise it removes.
 
-  Part of that bias is not the blur. A widened lobe invokes the single-scatter
-  energy loss above, which smooth glass never pays — which is why the
-  whole-frame row is not zero, and why compensating the dielectric would pay
-  off here as well as on rough glass.
+  **It is still not worth turning on by default, and the reason is the clock
+  rather than the bias.** Three measurements decide it.
+
+  It does nothing on an ordinary scene. `create_specular_scene` and
+  `create_test_scene` — a mirror sphere, a glass sphere, a textured floor —
+  move by 2% of their noise and under 0.2% of their mean at 0.3. Those scenes
+  have no caustic worth the name, so there is nothing for it to find.
+
+  It costs 20% to 40% of the render, on every scene containing glass:
+  `test_scene` 0.502 s → 0.633 s, `create_specular_scene` 0.380 s → 0.456 s,
+  `create_caustic_scene` 0.221 s → 0.311 s at 800x600, 64 spp. Most of that is
+  not the technique. At `regularisation = 0.01` the floor is below
+  `GGX_ALPHA_MIN`, so every lobe stays exactly as Dirac as it was and the image
+  is unchanged — and `test_scene` still costs 0.608 s. 21 of the 26 points are
+  the microfacet dielectric arm being compiled in, which
+  `has_rough_dielectrics` otherwise keeps out; only 5 are the shadow rays the
+  widened lobes actually cast.
+
+  And the same wall clock buys more, spent on samples. On the caustic patch at
+  64 spp the error is 1.214 plain and 1.141 regularised at 0.25, for ~40% more
+  time. Ninety samples per pixel — the same ~40% — gives 1.019. More samples
+  wins on the scene regularisation was built for, and it wins without the bias.
+
+  So it stays a knob. What would change the answer is making it cheap: the
+  21-point compile-time cost is paid by every glass scene whether or not the
+  value is large enough to do anything, and a specialisation that knew the
+  floor was below `GGX_ALPHA_MIN` would drop it to the 5 points the technique
+  actually needs.
 - **The dielectric's multiple scattering is a table, not a fit.** Single-
   scatter GGX drops every ray a microfacet sends onto another microfacet, and
   uncompensated a white 1.5 ball read 1.0000 / 0.9942 / 0.8502 / 0.5805 /

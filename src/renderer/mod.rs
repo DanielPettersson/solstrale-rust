@@ -157,9 +157,16 @@ impl Specialisation {
             // constant here that is not a fact about the scene alone, which is
             // why it is resolved where the config is in hand rather than in
             // `from_scene_data`.
+            //
+            // Still `&& has_dielectrics`, though: regularisation cannot widen a
+            // dielectric a scene does not contain, and the arm is expensive
+            // enough that handing it to a scene made of metal would be a
+            // measurable loss for nothing. Compiling it in costs `test_scene`
+            // 21% of its render time, which is most of what turning
+            // regularisation on costs at all.
             (
                 "has_rough_dielectrics",
-                flag(self.has_rough_dielectrics || regularisation > 0.),
+                flag(self.has_rough_dielectrics || (regularisation > 0. && self.has_dielectrics)),
             ),
             ("has_textures", flag(self.has_textures)),
             ("has_normal_maps", flag(self.has_normal_maps)),
