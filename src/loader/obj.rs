@@ -614,7 +614,7 @@ mod tests {
 
         assert_eq!(1368, bvh.prims.len());
         assert_eq!(4, distinct_albedo_images(&bvh));
-        assert_eq!(0x3dbd_c185_013f_ed05, geometry_checksum(&bvh));
+        assert_eq!(0x7c5a_647c_6fcc_9999, geometry_checksum(&bvh));
     }
 
     #[test]
@@ -628,8 +628,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(1368, bvh.prims.len());
-        assert_eq!(0xd439_8fec_0262_fe56, geometry_checksum(&bvh));
-        assert_eq!(0x8fc3_bc2d_b210_63bd, shading_checksum(&bvh));
+        assert_eq!(0x2f0c_b703_7f6c_30a2, geometry_checksum(&bvh));
+        assert_eq!(0x0063_80cc_a792_03f9, shading_checksum(&bvh));
     }
 
     #[test]
@@ -639,7 +639,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(12, bvh.prims.len());
-        assert_eq!(0xe45a_ef74_7f0c_bc65, geometry_checksum(&bvh));
+        assert_eq!(0x0cf6_1486_0adc_e665, geometry_checksum(&bvh));
     }
 
     #[test]
@@ -691,7 +691,7 @@ mod tests {
             }
         }
 
-        assert_eq!(0x50e7_a653_f15e_e1b2, shading_checksum(&bvh));
+        assert_eq!(0xdb5a_d8e7_e2be_37fa, shading_checksum(&bvh));
     }
 
     #[test]
@@ -772,8 +772,8 @@ mod tests {
         }
 
         // Shading is all that moves, at either setting.
-        assert_eq!(0xe45a_ef74_7f0c_bc65, geometry_checksum(&creased));
-        assert_eq!(0xe45a_ef74_7f0c_bc65, geometry_checksum(&smoothed));
+        assert_eq!(0x0cf6_1486_0adc_e665, geometry_checksum(&creased));
+        assert_eq!(0x0cf6_1486_0adc_e665, geometry_checksum(&smoothed));
     }
 
     #[test]

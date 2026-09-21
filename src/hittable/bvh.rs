@@ -54,11 +54,14 @@ const _: () = assert!(MAX_LEAF_PRIMS as u32 <= LEAF_COUNT_MASK);
 /// true by construction -- `split` can legitimately return a 1/N-1 split.
 ///
 /// 32 is kept because the measured excess over a balanced tree is what scales,
-/// not the depth itself. The `bvh_build` cloud reaches 14 / 17 / 22 at
-/// 10k / 100k / 1M, two to four levels over balanced; clustered real geometry
-/// is worse, with the 1370-triangle spider mesh at 14 against a balanced 9.
-/// Five levels of slack over a balanced [`MAX_PRIMITIVES`] tree is 27, so this
-/// is headroom rather than waste and shrinking it is not free.
+/// not the depth itself -- but the slack is thinner than the synthetic cloud
+/// suggests, and shrinking it is not free. The `bvh_build` cloud reaches
+/// 14 / 17 / 21 at 10k / 100k / 1M, two to three levels over balanced.
+/// Clustered real geometry is what actually sets the bound: measured with
+/// `bvh_tree_quality`, sponza (262k triangles) reaches **27**, conference 25
+/// and a 1M-triangle gallery scene 24, against a balanced 18-20. Four or five
+/// levels is all the margin there is, so a change that deepens the tree has to
+/// be checked against real meshes and not against the cloud.
 pub const MAX_TRAVERSAL_DEPTH: u32 = 32;
 
 /// Packs an inline leaf: `count` primitives starting at `offset`.
@@ -383,10 +386,18 @@ fn build_serial(
     (my, 1 + left_depth.max(right_depth))
 }
 
-/// Chooses a split point with a binned SAH sweep over the widest centroid axis.
+/// Chooses a split point with a binned SAH sweep over all three centroid axes.
 ///
 /// Returns an index into `indices`, which is partitioned in place. Always
 /// returns a value in `1..indices.len()` so neither side is empty.
+///
+/// Sweeping all three rather than only the widest is the textbook improvement:
+/// the widest *centroid* axis is a proxy for the axis that best separates the
+/// primitives' boxes, and a plate or a shell spread along a wide axis is where
+/// the proxy is wrong. The three axes are binned in one pass rather than three
+/// because that pass is a gather through `centroids` and `boxes`, which is what
+/// the build's time actually goes on -- the two extra bucket updates per
+/// primitive run on data already in registers.
 fn split(indices: &mut [u32], boxes: &[Aabb32], centroids: &[[f32; 3]]) -> usize {
     let n = indices.len();
 
@@ -400,31 +411,76 @@ fn split(indices: &mut [u32], boxes: &[Aabb32], centroids: &[[f32; 3]]) -> usize
         }
     }
 
-    let mut axis = 0;
-    for a in 1..3 {
-        if c_max[a] - c_min[a] > c_max[axis] - c_min[axis] {
-            axis = a;
+    let mut scale = [0f32; 3];
+    let mut any_axis = false;
+    for a in 0..3 {
+        let extent = c_max[a] - c_min[a];
+        // An axis with no extent keeps scale 0, so every primitive lands in its
+        // bucket 0 and its sweep finds no plane with both sides non-empty. That
+        // is cheaper than branching on it once per primitive below.
+        if extent.is_nan() || extent <= 0.0 {
+            continue;
         }
+        scale[a] = SAH_BUCKETS as f32 / extent;
+        any_axis = true;
     }
-    let extent = c_max[axis] - c_min[axis];
-    if extent.is_nan() || extent <= 0.0 {
+    if !any_axis {
         // All centroids coincide on every axis; nothing to separate spatially.
         return n / 2;
     }
 
-    let scale = SAH_BUCKETS as f32 / extent;
-    let bucket_of = |i: u32| -> usize {
-        (((centroids[i as usize][axis] - c_min[axis]) * scale) as usize).min(SAH_BUCKETS - 1)
-    };
-
-    let mut bucket_box = [Aabb32::EMPTY; SAH_BUCKETS];
-    let mut bucket_count = [0u32; SAH_BUCKETS];
+    let mut bucket_box = [[Aabb32::EMPTY; SAH_BUCKETS]; 3];
+    let mut bucket_count = [[0u32; SAH_BUCKETS]; 3];
     for &i in indices.iter() {
-        let b = bucket_of(i);
-        bucket_count[b] += 1;
-        bucket_box[b] = bucket_box[b].union(&boxes[i as usize]);
+        let b = &boxes[i as usize];
+        let c = centroids[i as usize];
+        for a in 0..3 {
+            let k = bucket_of(c[a], c_min[a], scale[a]);
+            bucket_count[a][k] += 1;
+            bucket_box[a][k] = bucket_box[a][k].union(b);
+        }
     }
 
+    let mut best_cost = f32::INFINITY;
+    let mut best_axis = usize::MAX;
+    let mut best_k = usize::MAX;
+    for a in 0..3 {
+        if let Some((cost, k)) = sweep(&bucket_box[a], &bucket_count[a])
+            && cost < best_cost
+        {
+            best_cost = cost;
+            best_axis = a;
+            best_k = k;
+        }
+    }
+
+    if best_axis == usize::MAX {
+        return n / 2;
+    }
+
+    // Partition in place on the same bucket assignment the sweep used, so the
+    // split matches the cost that was evaluated. This replaces a full
+    // `sort_unstable_by` per level -- O(N) instead of O(N log N).
+    let mid = partition(indices, |i| {
+        bucket_of(
+            centroids[i as usize][best_axis],
+            c_min[best_axis],
+            scale[best_axis],
+        ) < best_k
+    });
+    if mid == 0 || mid == n { n / 2 } else { mid }
+}
+
+/// Sweeps one axis's buckets and returns its cheapest plane as
+/// `(cost, bucket)`, or `None` when no plane leaves both sides non-empty.
+///
+/// The cost is the unnormalised `A_L * N_L + A_R * N_R`. A parent-area
+/// divisor and a traversal constant are the same for every candidate plane on
+/// every axis, so neither could move the argmin.
+fn sweep(
+    bucket_box: &[Aabb32; SAH_BUCKETS],
+    bucket_count: &[u32; SAH_BUCKETS],
+) -> Option<(f32, usize)> {
     // Forward sweep: cost of everything left of each split plane.
     let mut left_area = [0f32; SAH_BUCKETS];
     let mut left_count = [0u32; SAH_BUCKETS];
@@ -438,8 +494,8 @@ fn split(indices: &mut [u32], boxes: &[Aabb32], centroids: &[[f32; 3]]) -> usize
     }
 
     // Backward sweep, picking the cheapest plane.
+    let mut best = None;
     let mut best_cost = f32::INFINITY;
-    let mut best_k = usize::MAX;
     let mut acc = Aabb32::EMPTY;
     let mut right_count = 0u32;
     for k in (1..SAH_BUCKETS).rev() {
@@ -452,19 +508,15 @@ fn split(indices: &mut [u32], boxes: &[Aabb32], centroids: &[[f32; 3]]) -> usize
         let cost = left_area[k - 1] * lc as f32 + acc.half_area() * right_count as f32;
         if cost < best_cost {
             best_cost = cost;
-            best_k = k;
+            best = Some((cost, k));
         }
     }
+    best
+}
 
-    if best_k == usize::MAX {
-        return n / 2;
-    }
-
-    // Partition in place on the same bucket assignment the sweep used, so the
-    // split matches the cost that was evaluated. This replaces a full
-    // `sort_unstable_by` per level -- O(N) instead of O(N log N).
-    let mid = partition(indices, |i| bucket_of(i) < best_k);
-    if mid == 0 || mid == n { n / 2 } else { mid }
+/// Which bucket a centroid coordinate falls in.
+fn bucket_of(c: f32, c_min: f32, scale: f32) -> usize {
+    (((c - c_min) * scale) as usize).min(SAH_BUCKETS - 1)
 }
 
 /// Stable-enough in-place partition; returns the length of the true-side prefix.
@@ -832,5 +884,49 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
         println!("spider {:>6}  {}", spider.prims.len(), tree_stats(&spider));
+    }
+
+    /// A unit-extent triangle in the plane `z`, at `x` along the row.
+    fn row_tri(x: f64, z: f64) -> Hittables {
+        let mat = Lambertian::new(SolidColor::new(1., 1., 1.).into(), None);
+        Triangle::new(
+            Vec3::new(x, 0., z),
+            Vec3::new(x + 0.1, 0., z),
+            Vec3::new(x, 0.1, z),
+            mat.into(),
+            &NopTransformer(),
+        )
+        .into()
+    }
+
+    /// The widest centroid axis is only a proxy for the axis that separates the
+    /// boxes, and this is a shape where the proxy is wrong: two thin rows of
+    /// triangles spread along x but separated along z. Splitting on x -- the
+    /// widest centroid axis, extent 7 against z's 4 -- cuts both rows and
+    /// leaves both children spanning the whole z gap, at a swept cost of ~243.
+    /// Splitting on z separates the rows into two flat plates, at ~11. Only a
+    /// sweep that tries all three axes finds it, so this is the test that fails
+    /// if `split` goes back to the widest axis alone.
+    #[test]
+    fn split_picks_the_cheapest_axis_not_the_widest() {
+        let prims: Vec<Hittables> = (0..8)
+            .flat_map(|i| [row_tri(i as f64, 0.), row_tri(i as f64, 4.)])
+            .collect();
+        let boxes: Vec<Aabb32> = prims
+            .iter()
+            .map(|p| Aabb32::from(p.bounding_box()))
+            .collect();
+        let centroids: Vec<[f32; 3]> = boxes.iter().map(|b| b.center()).collect();
+        let mut indices: Vec<u32> = (0..prims.len() as u32).collect();
+
+        let mid = split(&mut indices, &boxes, &centroids);
+
+        let rows = |slice: &[u32]| -> Vec<f32> {
+            let mut z: Vec<f32> = slice.iter().map(|&i| centroids[i as usize][2]).collect();
+            z.dedup();
+            z
+        };
+        assert_eq!(vec![0.], rows(&indices[..mid]));
+        assert_eq!(vec![4.], rows(&indices[mid..]));
     }
 }
