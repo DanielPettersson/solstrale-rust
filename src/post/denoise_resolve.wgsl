@@ -71,10 +71,6 @@ var<storage, read> pooled_variance: array<f32>;
 @group(0) @binding(4)
 var<storage, read> local_level: array<f32>;
 
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
 // Linear radiance as the image will finally be written: through the tone curve,
 // then the sRGB OETF, on the 0-255 scale. The curve is spliced in ahead of this
 // file by DenoisePostProcessor::initialize; the transfer function, the 0.999

@@ -4,7 +4,7 @@ use crate::post::{PIXEL_SIZE, PostProcessContext, PostProcessor};
 use crate::util::tone_map::ToneMapper;
 use crate::util::wgpu_util::{
     add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline,
-    compute_pipeline_with_entry, storage_binding,
+    compute_pipeline_with_entry, shader_module_with_luminance, storage_binding,
 };
 use std::error::Error;
 use wgpu::BufferUsages;
@@ -250,9 +250,16 @@ impl DenoisePostProcessor {
             ));
         }
 
-        let prepare_module =
-            device.create_shader_module(wgpu::include_wgsl!("denoise_prepare.wgsl"));
-        let atrous_module = device.create_shader_module(wgpu::include_wgsl!("denoise_atrous.wgsl"));
+        let prepare_module = shader_module_with_luminance(
+            device,
+            "denoise_prepare.wgsl",
+            include_str!("denoise_prepare.wgsl"),
+        );
+        let atrous_module = shader_module_with_luminance(
+            device,
+            "denoise_atrous.wgsl",
+            include_str!("denoise_atrous.wgsl"),
+        );
 
         let prepare_bind_group_layout = bind_group_layout(
             device,
@@ -431,19 +438,15 @@ impl PostProcessor for DenoisePostProcessor {
         // in the module. `ToneMapper::wgsl` emits one free function named
         // `solstrale_tone_map` with no bindings or entry point, which is what
         // makes it safe to concatenate.
-        let resolve_module = self.resolve_module.insert(
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("denoise_resolve.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!(
-                        "{}\n{}",
-                        self.tone_mapper.wgsl(),
-                        include_str!("denoise_resolve.wgsl")
-                    )
-                    .into(),
-                ),
-            }),
-        );
+        let resolve_module = self.resolve_module.insert(shader_module_with_luminance(
+            device,
+            "denoise_resolve.wgsl",
+            &format!(
+                "{}\n{}",
+                self.tone_mapper.wgsl(),
+                include_str!("denoise_resolve.wgsl")
+            ),
+        ));
 
         // Passed as the reciprocal so that a strength of 0 is exactly 0 rather
         // than an infinity narrowed through an f64 -> f32 override, which makes

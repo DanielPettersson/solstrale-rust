@@ -27,10 +27,6 @@ var<storage, read> working: array<vec4<f32>>;
 @group(0) @binding(3)
 var<storage, read_write> dst: array<vec4<f32>>;
 
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
 // Variance of the neighbourhood's luminance. At n == 1 each pixel is a single
 // sample, so the spread across neighbours is a direct estimate of the spread
 // this pixel's own sample would have had.

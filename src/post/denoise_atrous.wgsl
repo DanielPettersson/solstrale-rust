@@ -156,10 +156,6 @@ fn load_guide(index: u32) -> Guide {
     return out;
 }
 
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
 // How much a neighbouring pixel looks like it belongs to the same surface,
 // judged on geometry and material rather than on the noisy radiance.
 fn guide_weight(centre: Guide, tap: Guide, spacing: f32) -> f32 {
