@@ -116,7 +116,8 @@ struct Material {
     fuzz: f32,
     refraction_index: f32,
     mat_type: u32,
-    _padding3: u32,
+    // Start of this material's pair of energy grids in `dielectric_energy`.
+    energy_offset: u32,
     texture_index: i32,
     normal_texture_index: i32,
     blend_indices: vec2<u32>,
@@ -185,12 +186,23 @@ const PAIR_BOUNCE_BASE = 2u;
 const PAIRS_PER_BOUNCE = 3u;
 // Offsets within a bounce's three pairs. The point sampled on the light, the
 // BSDF direction, and a shared pair whose .x carries the bounce's one scalar
-// draw -- light selection on a diffuse surface, the Fresnel coin on a
-// dielectric, the fuzz radius on metal, which are mutually exclusive -- and
-// whose .y carries Russian roulette.
+// draw -- light selection wherever the lobe has a density, the Fresnel coin on
+// smooth glass, which are mutually exclusive because smooth glass samples no
+// light -- and whose .y carries Russian roulette.
 const PAIR_LIGHT_POINT = 0u;
 const PAIR_BSDF = 1u;
 const PAIR_SCALARS = 2u;
+
+// The rough dielectric's reflect-or-refract coin, one pair per bounce, indexed
+// as `PAIR_GLASS_COIN_BASE + bounce_pair`.
+//
+// Outside the budget above, because at a rough dielectric the shared scalar's
+// `.x` is already the light pick: the lobe gained a width, so it takes a shadow
+// ray, so the two draws stopped being mutually exclusive. A base far past
+// `2 + 3 * max_depth` keeps every existing scene's stream exactly where it was
+// -- a pair index only ever seeds a hash, so there is no array for a disjoint
+// range to overflow.
+const PAIR_GLASS_COIN_BASE = 4096u;
 
 // Keeps sampler_extra's stream clear of the budgeted pairs'.
 const EXTRA_TAG_SALT = 0x51633e2du;
@@ -334,6 +346,16 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
 
+// Single-scatter directional albedo of the rough dielectric, one 16x16 grid per
+// side per index of refraction, concatenated. See renderer/dielectric_energy.rs
+// for how it is built and why it is a table rather than a fit; `Material`'s
+// `energy_offset` says where a material's pair of grids starts.
+//
+// Empty and never read unless `has_rough_dielectrics`, which is the same
+// condition that compiles out the arm that reads it.
+@group(0) @binding(16)
+var<storage, read> dielectric_energy: array<f32>;
+
 // ---------------------------------------------------------------------------
 // Pipeline specialisation
 //
@@ -382,6 +404,16 @@ override identity_prim_refs: bool = false;
 override has_blends: bool = true;
 override has_metal: bool = true;
 override has_dielectrics: bool = true;
+
+// Whether any dielectric in the scene has a roughness above zero. Separate from
+// `has_dielectrics` because the microfacet arm is the larger half of the
+// material code by some way -- two lobes, a transmission Jacobian and an
+// evaluation arm for next-event estimation -- while every scene that predates
+// it uses smooth glass and takes the Dirac path. Measured on `test_scene`,
+// leaving it in costs the tracer 128 -> 168 VGPRs and drops occupancy from 8
+// subgroups per SIMD to 6, for code that scene could never reach. A scene that
+// does use rough glass pays that 6, which is what the arm actually costs.
+override has_rough_dielectrics: bool = true;
 
 // Whether any material samples the atlas, for albedo and for normals. Strips
 // the textureSampleLevel branches from surface_at.
@@ -1074,10 +1106,38 @@ fn refract(uv: vec3<f32>, n: vec3<f32>, etai_over_etat: f32) -> vec3<f32> {
     return r_out_perp + r_out_parallel;
 }
 
-fn reflectance(cosine: f32, ref_idx: f32) -> f32 {
-    var r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
-    r0 = r0 * r0;
-    return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
+// Fresnel reflectance at a dielectric interface, for unpolarised light: the
+// mean of the two polarisations, exactly, and 1 past the critical angle.
+//
+// `eta_it` is `Bsdf.ior`, the near medium's index over the far one's, and the
+// term-for-term counterpart of PBRT-v4's `FrDielectric` written with that
+// reciprocal.
+//
+// Schlick's approximation used to stand here, and it is wrong in the one place
+// a dielectric spends most of its bounces. Looking *out* from inside 1.5 glass
+// the exact term reaches 1 at the critical angle, 41.8 degrees; Schlick is
+// 0.041 there and only approaches 1 at a grazing 90. Between those it reports
+// a few per cent where the truth is most of the light, so the reflected and
+// transmitted lobes are mixed wrongly across the whole band that total internal
+// reflection dominates -- and a glass object's interior is nothing but that
+// band. Going out is what costs: from the *outside* the two agree to 0.006
+// everywhere, which is why the smooth goldens barely move.
+//
+// It costs a sqrt and two divides against Schlick's fifth power: 23 more
+// instructions out of 6266 on `test_scene`, with occupancy unchanged at 8
+// subgroups per SIMD. What it actually costs is sampling, not arithmetic --
+// see LIMITATIONS.md.
+fn fresnel_dielectric(cos_i: f32, eta_it: f32) -> f32 {
+    let c = clamp(cos_i, 0.0, 1.0);
+    let sin2_t = eta_it * eta_it * (1.0 - c * c);
+    // Total internal reflection: no transmitted direction exists, so all of it
+    // comes back.
+    if (sin2_t >= 1.0) { return 1.0; }
+    let cos_t = sqrt(1.0 - sin2_t);
+
+    let r_parallel = (c - eta_it * cos_t) / (c + eta_it * cos_t);
+    let r_perpendicular = (eta_it * c - cos_t) / (eta_it * c + cos_t);
+    return 0.5 * (r_parallel * r_parallel + r_perpendicular * r_perpendicular);
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1246,79 @@ fn sample_ggx_vndf(wo: vec3<f32>, alpha: f32, u: vec2<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(h_std.xy * alpha, h_std.z));
 }
 
+// ---------------------------------------------------------------------------
+// GGX microfacet dielectric
+//
+// Walter et al. 2007, "Microfacet Models for Refraction through Rough
+// Surfaces", sampled with the same Dupuy & Benyoub visible-normal routine the
+// conductor uses. Everything above is shared: `ggx_d`, `smith_lambda`,
+// `sample_ggx_vndf`, `GGX_ALPHA_MIN` and `fresnel_dielectric`.
+//
+// Two things separate it from the conductor. The lobe has a transmission half,
+// which carries its own Jacobian, and the half vector may be on either side of
+// the shading normal -- so the arms below work in a frame flipped so that `wo`
+// is up, and flip the sampled direction back.
+//
+// The relative index is written as `eta_ti`, the ratio of the far medium's
+// index to the near one's, which is PBRT-v4's `etap`: the transmission algebra
+// below then matches that reference term for term. `Bsdf.ior` is its
+// reciprocal, `eta_i / eta_t`, because that is what `refract` wants.
+// ---------------------------------------------------------------------------
+
+// The half vector a transmitted pair implies, unnormalised: Walter's
+// generalised half vector, scaled by the near medium's index so only the ratio
+// appears. Faced toward +z by the caller, as the reflection half vector already
+// is.
+fn dielectric_half_transmit(wo: vec3<f32>, wi: vec3<f32>, eta_ti: f32) -> vec3<f32> {
+    return wi * eta_ti + wo;
+}
+
+// Grid shape, mirroring `ENERGY_COS_STEPS` and `ENERGY_ALPHA_STEPS`.
+const ENERGY_COS_STEPS = 16u;
+const ENERGY_ALPHA_STEPS = 16u;
+const ENERGY_SIDE_STRIDE = ENERGY_COS_STEPS * ENERGY_ALPHA_STEPS;
+
+// Turquin 2019's compensation for the dielectric: the single-scatter lobe drops
+// every ray a microfacet sends onto another microfacet, and dividing `f` by the
+// energy it *does* return puts that back.
+//
+// Two differences from the conductor's. There is no `f0` weighting -- light
+// that bounces twice between microfacets is tinted twice on a metal, and a
+// dielectric interface tints nothing -- so the factor is a plain `1 / E`. And
+// `E` comes from a bilinear table rather than a polynomial, because it depends
+// on the index of refraction through the critical angle, which is a kink no
+// polynomial follows; making the index a per-material table removes it from the
+// fit entirely.
+//
+// Multiplies `f` alone. The sampling density is untouched, so MIS is untouched,
+// and both estimators of a vertex get the same factor.
+fn dielectric_multiscatter(offset: u32, cos_o: f32, alpha: f32) -> f32 {
+    let x = clamp(cos_o, 0.0, 1.0) * f32(ENERGY_COS_STEPS - 1u);
+    let y = clamp(sqrt(alpha), 0.0, 1.0) * f32(ENERGY_ALPHA_STEPS - 1u);
+    let x0 = min(u32(x), ENERGY_COS_STEPS - 2u);
+    let y0 = min(u32(y), ENERGY_ALPHA_STEPS - 2u);
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+
+    let row0 = offset + y0 * ENERGY_COS_STEPS + x0;
+    let row1 = row0 + ENERGY_COS_STEPS;
+    let lo = mix(dielectric_energy[row0], dielectric_energy[row0 + 1u], fx);
+    let hi = mix(dielectric_energy[row1], dielectric_energy[row1 + 1u], fx);
+    // Floored for the same reason the conductor's fit is clamped: nothing here
+    // may turn into a division by zero at the rough, grazing corner.
+    return 1.0 / max(mix(lo, hi, fy), 0.05);
+}
+
+// d(w_h) / d(w_i) for the transmission lobe. The one factor in this whole
+// section that is easy to write upside down, which is why
+// `test_bsdf_only_sampling_converges_to_the_same_image` carries a rough glass
+// scene: a Jacobian wrong by any constant moves the BSDF-only mean and nothing
+// else in the suite.
+fn dielectric_dwh_dwi(cos_ih: f32, cos_oh: f32, eta_ti: f32) -> f32 {
+    let d = cos_ih + cos_oh / eta_ti;
+    return abs(cos_ih) / max(d * d, 1e-12);
+}
+
 // What the pixel is looking at, before any light transport: the first surface
 // along the view ray that is not a mirror or a lens. Filled by trace_guide and
 // used only to guide the denoiser's edge-stopping functions -- it is a guide,
@@ -1262,6 +1395,9 @@ struct Surface {
     fuzz: f32,
     refraction_index: f32,
     mat_type: u32,
+    // Carried straight from the material; `bsdf_from_surface` picks the half
+    // that matches the side the ray is on.
+    energy_offset: u32,
 }
 
 // The blend walk nests to a data-dependent depth, so its coin flips go to
@@ -1329,6 +1465,7 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     surface.attenuation_factor = material.attenuation_factor;
     surface.fuzz = material.fuzz;
     surface.refraction_index = material.refraction_index;
+    surface.energy_offset = material.energy_offset;
 
     surface.albedo = material.albedo;
     if (has_textures && material.texture_index >= 0) {
@@ -1410,6 +1547,9 @@ struct Bsdf {
     // Relative index of refraction, already resolved against which side of the
     // surface the ray is on.
     ior: f32,
+    // Start of the energy grid for *this side* of this material, resolved the
+    // same way `ior` is, so nothing below has to know which side it is on.
+    energy_offset: u32,
     kind: u32,
 }
 
@@ -1444,6 +1584,8 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
     // fuzz above 1 where GGX stops being meaningful.
     b.alpha = clamp(surface.fuzz * surface.fuzz, 0.0, 1.0);
     b.ior = select(surface.refraction_index, 1.0 / surface.refraction_index, front_face);
+    // Entering is the first half of the table, leaving the second.
+    b.energy_offset = surface.energy_offset + select(ENERGY_SIDE_STRIDE, 0u, front_face);
 
     if (surface.mat_type == MAT_LAMBERTIAN) {
         b.kind = BSDF_DIFFUSE;
@@ -1465,6 +1607,20 @@ fn bsdf_is_specular(b: Bsdf) -> bool {
         // A rough conductor has a density for a light sample to land on, so it
         // gets next-event estimation like any other spread lobe. Only the
         // mirror end of the range is a delta.
+        return b.alpha < GGX_ALPHA_MIN;
+    }
+    // `has_rough_dielectrics` is in the condition rather than in the body, and
+    // deliberately: naga folds an override out of an `if` condition and deletes
+    // the arm, but leaves `!has_rough_dielectrics || ...` in the body as real
+    // code. Measured on `test_scene`, the difference between the two spellings
+    // of this one line is 8 subgroups per SIMD against 6. Without the flag a
+    // dielectric falls through to the `!= BSDF_DIFFUSE` below, which is the
+    // `true` it always returned.
+    if (has_dielectrics && has_rough_dielectrics && b.kind == BSDF_DIELECTRIC) {
+        // Same shape as the conductor's, same reason. Smooth glass stays a
+        // Dirac delta and always will be: a shadow ray has zero probability of
+        // landing on it, which is why roughness had to exist before next-event
+        // estimation could reach glass at all.
         return b.alpha < GGX_ALPHA_MIN;
     }
     return b.kind != BSDF_DIFFUSE;
@@ -1509,6 +1665,78 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         // the MIS denominator needs: the pdf this lobe *would* have had for the
         // light's direction.
         e.pdf = d / ((1.0 + lambda_o) * 4.0 * wo_l.z);
+    } else if (has_dielectrics && has_rough_dielectrics && b.kind == BSDF_DIELECTRIC) {
+        // Smooth glass is a delta, as above.
+        if (b.alpha < GGX_ALPHA_MIN) { return e; }
+
+        // Into the frame where wo is up, so the microfacet normal the pair
+        // implies is the one `bsdf_sample` would have drawn. The frame change
+        // is linear, so flipping before it costs nothing and keeps the
+        // unflipped pair from staying live.
+        let cos_no = dot(wo, b.frame.w);
+        if (abs(cos_no) < 1e-6) { return e; }
+        let flip = select(-1.0, 1.0, cos_no > 0.0);
+        let wo_f = onb_from_world(b.frame, wo * flip);
+        let wi_f = onb_from_world(b.frame, wi * flip);
+        if (abs(wi_f.z) < 1e-6) { return e; }
+        let is_reflect = wi_f.z > 0.0;
+
+        // Sided, unlike the conductor's: refraction is supposed to cross the
+        // surface, so what the geometric normal rules out is a direction on the
+        // wrong side *for the lobe half it claims to be*. `dot(b.ng, wo)` is
+        // positive at every hit -- resolve_hit faces the geometric normal at
+        // the ray -- so the two halves split on the sign alone.
+        let cos_ng = dot(b.ng, wi);
+        if (is_reflect != (cos_ng > 0.0)) { return e; }
+
+        let eta_ti = 1.0 / b.ior;
+        var h = select(
+            dielectric_half_transmit(wo_f, wi_f, eta_ti),
+            wo_f + wi_f,
+            is_reflect,
+        );
+        let h_len = length(h);
+        if (h_len < 1e-6) { return e; }
+        h = h / h_len;
+        // Faced toward +z, matching the sampled half vector, which comes out of
+        // the VNDF routine in the upper hemisphere.
+        h = select(-h, h, h.z > 0.0);
+
+        let cos_oh = dot(wo_f, h);
+        let cos_ih = dot(wi_f, h);
+        // A microfacet that faces away from either direction contributes
+        // nothing: it is a solution of the half-vector equation the surface
+        // cannot actually present.
+        if (cos_oh <= 0.0 || cos_ih * wi_f.z <= 0.0) { return e; }
+
+        let f = fresnel_dielectric(cos_oh, b.ior);
+        let d = ggx_d(h.z, b.alpha);
+        let lambda_o = smith_lambda(wo_f.z, b.alpha);
+        let lambda_i = smith_lambda(wi_f.z, b.alpha);
+        let g2 = 1.0 / (1.0 + lambda_o + lambda_i);
+        // G1(wo) * D(h) * |wo.h| / |cos_o|, the visible-normal density, which
+        // both halves scale by their own Jacobian and lobe-selection chance.
+        let d_vis = d * cos_oh / ((1.0 + lambda_o) * wo_f.z);
+
+        // Both halves are compensated by the same factor: what multiple
+        // scattering returns is energy, and which lobe it comes back through is
+        // not something the single-scatter model can say.
+        let comp = dielectric_multiscatter(b.energy_offset, wo_f.z, b.alpha);
+
+        if (is_reflect) {
+            // f * |cos_i| with the BSDF's own 1 / |cos_i| already cancelled.
+            e.f_cos = vec3<f32>(comp * f * d * g2 / (4.0 * wo_f.z));
+            e.pdf = f * d_vis / (4.0 * cos_oh);
+        } else {
+            let t = 1.0 - f;
+            if (t <= 0.0) { return e; }
+            let jacobian = dielectric_dwh_dwi(cos_ih, cos_oh, eta_ti);
+            // No eta^2 radiance factor, here or in bsdf_sample: it cancels over
+            // a closed object, the smooth arm omits it, and what MIS requires
+            // is that the two estimators agree with each other.
+            e.f_cos = vec3<f32>(comp * t * d * g2 * cos_oh * jacobian / wo_f.z);
+            e.pdf = t * d_vis * jacobian;
+        }
     }
 
     return e;
@@ -1585,25 +1813,95 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             s.valid = true;
         }
     } else if (has_dielectrics && b.kind == BSDF_DIELECTRIC) {
-        let cos_theta = min(dot(wo, b.frame.w), 1.0);
-        let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+        // Rough first, so the flag sits in a condition naga folds -- the
+        // same spelling `bsdf_is_specular` needs, for the same reason.
+        if (has_rough_dielectrics && b.alpha >= GGX_ALPHA_MIN) {
+            // Sample in the frame where wo is up, then flip the result back.
+            // Unlike the conductor there is no hemisphere to reject against --
+            // half the lobe is supposed to end up behind the surface -- so a
+            // shading normal the view ray is behind is a frame to turn over
+            // rather than a sample to drop.
+            let cos_no = dot(wo, b.frame.w);
+            if (abs(cos_no) < 1e-6) { return s; }
+            let flip = select(-1.0, 1.0, cos_no > 0.0);
+            let wo_f = onb_from_world(b.frame, wo * flip);
 
-        var direction: vec3<f32>;
-        // Short-circuit: total internal reflection never makes the draw, and
-        // because the slot is fixed nothing after it moves.
-        if (b.ior * sin_theta > 1.0
-            || reflectance(cos_theta, b.ior) > sampler_1d(smp, dim_x(scalars))) {
-            direction = reflect(-wo, b.frame.w);
+            let h = sample_ggx_vndf(wo_f, b.alpha, sampler_2d(smp, bounce_pair + PAIR_BSDF));
+            let cos_oh = dot(wo_f, h);
+            if (cos_oh <= 0.0) { return s; }
+
+            let f = fresnel_dielectric(cos_oh, b.ior);
+
+            // Its own slot rather than the bounce's shared scalar: a rough
+            // dielectric takes a shadow ray, and `dim_x(scalars)` is already
+            // the light pick at that vertex. The two were mutually exclusive
+            // only while glass had no lobe to sample a light against.
+            let coin = sampler_1d(smp, dim_x(PAIR_GLASS_COIN_BASE + bounce_pair));
+
+            var wi_f: vec3<f32>;
+            var is_reflect = true;
+            if (coin < f) {
+                wi_f = reflect(-wo_f, h);
+                if (wi_f.z <= 0.0) { return s; }
+            } else {
+                wi_f = refract(-wo_f, h, b.ior);
+                is_reflect = false;
+                // `refract` returns a mirror direction past the critical angle,
+                // but `fresnel_dielectric` is 1 there and this branch is then
+                // unreachable. The test stands as the guard for a half vector
+                // that lands just inside it.
+                if (wi_f.z >= 0.0) { return s; }
+            }
+
+            let direction = onb_local(b.frame, wi_f * flip);
+            // Sided, as in bsdf_eval and for the same reason.
+            if (is_reflect != (dot(b.ng, direction) > 0.0)) { return s; }
+
+            let lambda_o = smith_lambda(wo_f.z, b.alpha);
+            let lambda_i = smith_lambda(wi_f.z, b.alpha);
+
+            s.wi = normalize(direction);
+            // The VNDF cancellation, exactly the conductor's minus the Fresnel
+            // term -- which cancels here against the chance of having picked
+            // this half of the lobe. Both halves collapse to the same G2 / G1,
+            // times the multiple-scattering factor `bsdf_eval` also applies.
+            s.weight = vec3<f32>(
+                dielectric_multiscatter(b.energy_offset, wo_f.z, b.alpha)
+                    * (1.0 + lambda_o) / (1.0 + lambda_o + lambda_i)
+            );
+            let d_vis = ggx_d(h.z, b.alpha) * cos_oh / ((1.0 + lambda_o) * wo_f.z);
+            if (is_reflect) {
+                s.pdf = f * d_vis / (4.0 * cos_oh);
+            } else {
+                s.pdf = (1.0 - f) * d_vis
+                    * dielectric_dwh_dwi(dot(wi_f, h), cos_oh, 1.0 / b.ior);
+            }
+            s.specular = false;
+            s.valid = true;
         } else {
-            direction = refract(-wo, b.frame.w, b.ior);
-        }
+            // Smooth glass: the Dirac path, unchanged and drawing from the same
+            // slot it always did, which is what keeps every existing dielectric
+            // bit-identical.
+            let cos_theta = min(dot(wo, b.frame.w), 1.0);
+            let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 
-        s.wi = normalize(direction);
-        // The interface itself tints nothing: a dielectric's albedo is an
-        // interior absorption, applied per unit travelled by the transport
-        // loop, not a reflectance this lobe can fold in.
-        s.weight = vec3<f32>(1.0);
-        s.valid = true;
+            var direction: vec3<f32>;
+            // Short-circuit: total internal reflection never makes the draw, and
+            // because the slot is fixed nothing after it moves.
+            if (b.ior * sin_theta > 1.0
+                || fresnel_dielectric(cos_theta, b.ior) > sampler_1d(smp, dim_x(scalars))) {
+                direction = reflect(-wo, b.frame.w);
+            } else {
+                direction = refract(-wo, b.frame.w, b.ior);
+            }
+
+            s.wi = normalize(direction);
+            // The interface itself tints nothing: a dielectric's albedo is an
+            // interior absorption, applied per unit travelled by the transport
+            // loop, not a reflectance this lobe can fold in.
+            s.weight = vec3<f32>(1.0);
+            s.valid = true;
+        }
     }
 
     return s;
@@ -2100,13 +2398,15 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
             tint *= dielectric_transmittance(surface.albedo, rec.t);
         }
 
-        // A *rough* metal ends the chain rather than continuing it. What it
-        // reflects is not a sharp image, so following it would make
-        // neighbouring pixels record unrelated guides -- the one thing an edge
-        // stop cannot survive, and the same reason the Fresnel coin flip below
-        // is resolved deterministically.
-        let specular = (has_metal && surface.mat_type == MAT_METAL && surface.fuzz < FUZZ_SPECULAR_THRESHOLD)
+        // A *rough* metal or a *rough* glass ends the chain rather than
+        // continuing it. What either one passes on is not a sharp image, so
+        // following it would make neighbouring pixels record unrelated guides
+        // -- the one thing an edge stop cannot survive, and the same reason the
+        // Fresnel coin flip below is resolved deterministically. One test for
+        // both, since `fuzz` carries the roughness of either.
+        let refractive_or_reflective = (has_metal && surface.mat_type == MAT_METAL)
             || (has_dielectrics && surface.mat_type == MAT_DIELECTRIC);
+        let specular = refractive_or_reflective && surface.fuzz < FUZZ_SPECULAR_THRESHOLD;
         if (!specular || bounce == GUIDE_MAX_SPECULAR) {
             // The first surface that scatters -- or, once the budget is spent,
             // whatever specular surface the chain stalled on, which is the old
@@ -2138,7 +2438,7 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
             // than not: refraction everywhere but total internal reflection and
             // the grazing rim.
             if (refraction_ratio * sin_theta > 1.0
-                || reflectance(cos_theta, refraction_ratio) > 0.5) {
+                || fresnel_dielectric(cos_theta, refraction_ratio) > 0.5) {
                 direction = reflect(unit_direction, surface.normal);
             } else {
                 direction = refract(unit_direction, surface.normal, refraction_ratio);

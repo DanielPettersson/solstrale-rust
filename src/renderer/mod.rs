@@ -22,6 +22,7 @@ use image::{DynamicImage, Rgb, RgbImage};
 use simple_error::SimpleError;
 use wgpu::BufferUsages;
 
+pub mod dielectric_energy;
 pub mod gpu_data;
 #[cfg(test)]
 mod sampler_test;
@@ -76,6 +77,9 @@ struct Specialisation {
     has_blends: bool,
     has_metal: bool,
     has_dielectrics: bool,
+    /// Whether any dielectric is rough, which is what the microfacet arm costs
+    /// its occupancy for. See the override's note in `ray_trace.wgsl`.
+    has_rough_dielectrics: bool,
     has_textures: bool,
     has_normal_maps: bool,
     light_count: u32,
@@ -95,6 +99,11 @@ impl Specialisation {
             has_blends: any(|m| m.mat_type == MAT_BLEND),
             has_metal: any(|m| m.mat_type == MAT_METAL),
             has_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC),
+            // Any roughness at all, not a threshold: the shader still routes a
+            // roughness below `GGX_ALPHA_MIN` down the Dirac path, so this only
+            // has to be conservative, and a duplicated cutoff on this side is a
+            // thing to keep in step for no gain.
+            has_rough_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC && m.fuzz > 0.),
             has_textures: any(|m| m.texture_index >= 0),
             has_normal_maps: any(|m| m.normal_texture_index >= 0),
             light_count: data.lights.len() as u32,
@@ -112,6 +121,7 @@ impl Specialisation {
             has_blends: true,
             has_metal: true,
             has_dielectrics: true,
+            has_rough_dielectrics: true,
             has_textures: true,
             has_normal_maps: true,
             light_count,
@@ -139,6 +149,7 @@ impl Specialisation {
             ("has_blends", flag(self.has_blends)),
             ("has_metal", flag(self.has_metal)),
             ("has_dielectrics", flag(self.has_dielectrics)),
+            ("has_rough_dielectrics", flag(self.has_rough_dielectrics)),
             ("has_textures", flag(self.has_textures)),
             ("has_normal_maps", flag(self.has_normal_maps)),
             ("nee_enabled", flag(estimator.nee_enabled)),
@@ -679,6 +690,17 @@ impl<'a> Renderer<'a> {
             &scene_data.quad_pos,
             BufferUsages::STORAGE,
         );
+        // Empty unless the scene can present a rough dielectric, in which case
+        // it is one 512-entry table per distinct index of refraction.
+        // `create_and_upload_buffer` pads an empty slice up to a valid binding.
+        let dielectric_energy_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Dielectric Energy Buffer",
+            &scene_data.dielectric_energy,
+            BufferUsages::STORAGE,
+        );
+
         let quad_attr_buffer = create_and_upload_buffer(
             device,
             queue,
@@ -825,6 +847,7 @@ impl<'a> Renderer<'a> {
                 storage_binding(true, 0),  // 13: quad attributes
                 storage_binding(false, 0), // 14: per-pixel sample count
                 storage_binding(false, 0), // 15: guide (denoiser G-buffer)
+                storage_binding(true, 0),  // 16: dielectric energy tables
             ],
         );
 
@@ -895,6 +918,7 @@ impl<'a> Renderer<'a> {
                 wgpu::BindingResource::Buffer(quad_attr_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(sample_count_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(gbuffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(dielectric_energy_buffer.as_entire_buffer_binding()),
             ],
         );
 

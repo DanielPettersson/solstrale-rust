@@ -228,8 +228,13 @@ pub struct Material {
     pub refraction_index: f32,
     /// Material type identifier
     pub mat_type: u32,
-    /// Padding
-    pub _padding3: u32,
+    /// Where this material's single-scatter albedo table starts in
+    /// `dielectric_energy`, entering half first. Only a dielectric that can be
+    /// rough has one; everything else leaves it 0 and never reads it.
+    ///
+    /// Reuses what was padding, so the struct is the same 96 bytes it was and
+    /// the byte-image interning in `add_material` still works unchanged.
+    pub energy_offset: u32,
     /// Texture index (-1 for none)
     pub texture_index: i32,
     /// Normal map texture index (-1 for none)

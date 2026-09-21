@@ -109,6 +109,7 @@ pub struct Dielectric {
     pub(crate) albedo: Textures,
     pub(crate) normal: Option<Textures>,
     pub(crate) index_of_refraction: f64,
+    pub(crate) roughness: f64,
 }
 
 impl Dielectric {
@@ -127,11 +128,24 @@ impl Dielectric {
     ///
     /// Entry and exit are assumed to be the same material, so nested or
     /// intersecting glass is not described.
-    pub fn new(albedo: Textures, normal: Option<Textures>, index_of_refraction: f64) -> Self {
+    ///
+    /// `roughness` is the same perceptual roughness [`Metal::new`] takes, in
+    /// `[0, 1]` and used as the GGX roughness `alpha = roughness * roughness`.
+    /// `0` is exact smooth glass, and takes a Dirac path that no rough-glass
+    /// arithmetic touches. Above it both interfaces are microfacet lobes with a
+    /// density, so a frosted surface takes a shadow ray like any other spread
+    /// lobe.
+    pub fn new(
+        albedo: Textures,
+        normal: Option<Textures>,
+        index_of_refraction: f64,
+        roughness: f64,
+    ) -> Self {
         Dielectric {
             albedo,
             normal,
             index_of_refraction,
+            roughness,
         }
     }
 }

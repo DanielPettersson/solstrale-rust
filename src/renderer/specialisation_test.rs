@@ -78,7 +78,16 @@ fn every_feature_scene() -> Scene {
         Sphere::new(
             Vec3::new(0.8, 0.6, 0.),
             0.6,
-            Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5).into(),
+            Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.).into(),
+        )
+        .into(),
+        // Rough glass as well as smooth, so the bit-identical invariant covers
+        // the microfacet dielectric arm and not only the Dirac one -- they are
+        // separate branches with separate sampler draws.
+        Sphere::new(
+            Vec3::new(1.9, 0.45, 0.6),
+            0.45,
+            Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.35).into(),
         )
         .into(),
         Triangle::new(
@@ -177,6 +186,7 @@ fn an_all_triangle_scene_strips_the_other_primitives() {
     assert!(!specialisation.has_blends);
     assert!(!specialisation.has_metal);
     assert!(!specialisation.has_dielectrics);
+    assert!(!specialisation.has_rough_dielectrics);
     assert!(!specialisation.has_textures);
     assert!(!specialisation.has_normal_maps);
     assert_eq!(1, specialisation.light_count);

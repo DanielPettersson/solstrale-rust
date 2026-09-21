@@ -40,7 +40,7 @@ pub fn create_specular_scene(render_config: RenderConfig) -> Scene {
     let image_tex = ImageMap::load("resources/textures/tex.jpg").unwrap();
     let floor_material = Lambertian::new(image_tex.into(), None);
     let mirror_mat = Metal::new(SolidColor::new(0.9, 0.9, 0.9).into(), None, 0.);
-    let glass_mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5);
+    let glass_mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.);
     let red_mat = Lambertian::new(SolidColor::new(0.8, 0.1, 0.1).into(), None);
     let light_mat = DiffuseLight::new(10., 10., 10., None);
 
@@ -106,7 +106,7 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
     let image_tex = ImageMap::load("resources/textures/tex.jpg").unwrap();
 
     let ground_material = Lambertian::new(image_tex.into(), None);
-    let glass_mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5);
+    let glass_mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.);
     let light_mat = DiffuseLight::new(10., 10., 10., None);
     let red_mat = Lambertian::new(SolidColor::new(1., 0., 0.).into(), None);
 
@@ -637,7 +637,7 @@ pub fn create_light_attenuation_scene(
     let blue = Lambertian::new(SolidColor::new(0., 0., 1.).into(), None);
     // Clear, not the 0.8 grey it used to be: that value was silently ignored
     // and is now load-bearing, and this scene has never been about absorption.
-    let glass = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5);
+    let glass = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.);
 
     world.push(Sphere::new(Vec3::new(0., 0.2, 0.), 0.03, light.into()).into());
     world.push(Sphere::new(Vec3::new(0.25, 0.1, 0.25), 0.1, green.into()).into());
@@ -1204,6 +1204,131 @@ pub fn rough_metal_sphere_center(i: usize) -> Vec3 {
     Vec3::new(-2.8 + 1.4 * i as f64, ROUGH_METAL_RADIUS, 0.)
 }
 
+/// [`create_rough_metal_scene`] in glass: five dielectric spheres across the
+/// roughness range, over the same textured floor, lit by one small quad light
+/// high above them.
+///
+/// The configuration a rough dielectric with no pdf renders as pure noise, and
+/// the reason it is worth having at all -- before `Dielectric` carried a
+/// roughness there was no frosted glass in the renderer, so nothing in the
+/// suite could exercise the transmission lobe or its Jacobian. The only glass
+/// anywhere else is three smooth 1.5 spheres.
+///
+/// Same shape as its metal twin, except for the one thing glass changes: the
+/// light is 60x dimmer, and the background with it. A 300-radiance pinpoint is
+/// seen *straight through* a glass ball at very nearly its own radiance, so
+/// every one of those samples meets the firefly clamp and is cut from 300 to
+/// 10. That makes the clamp the dominant variance reducer in the frame -- it
+/// hides what next-event estimation buys, and it converges 5% away from an
+/// unclamped reference, which is 17% on the metal scene and the reason that one
+/// is not in the BSDF-only table either. At radiance 5 nothing a path carries
+/// reaches the threshold, so the measurement is of the estimator rather than
+/// of the clamp. Scaling the background alongside keeps the light delivering
+/// the same 98% of what lights the spheres; the whole image is simply darker,
+/// and every measurement taken on it is relative.
+#[allow(dead_code)]
+pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
+    // 60x dimmer than the metal twin's 300, background included.
+    rough_glass_scene(render_config, Vec3::new(-0.3, 4.5, 0.7), 0.6, 5., 60.)
+}
+
+/// The same five spheres under a wide dim light instead of a small bright one.
+///
+/// Built for `test_bsdf_only_sampling_converges_to_the_same_image`, which its
+/// twin above cannot serve. That test gates on a *whole-image mean* agreeing to
+/// half a per cent, and a pinpoint seen through glass does not deliver a mean
+/// that steady: with exact Fresnel the reflect-or-transmit choice is a real
+/// coin across the whole band around the critical angle, so the frame is
+/// firefly-driven and its 2000 spp mean wanders between -0.4% and +1.4% from
+/// one seed to the next. The gate would be measuring its own noise.
+///
+/// A wide light removes the fireflies without removing the lobe: every path
+/// still crosses two microfacet dielectric interfaces and every transmission
+/// still carries the Jacobian this test exists to check -- across far more of
+/// the lobe than a pinpoint reaches, in fact. Radiance 3 keeps the firefly
+/// clamp inert, which is the other thing that test needs.
+#[allow(dead_code)]
+pub fn create_soft_lit_rough_glass_scene(render_config: RenderConfig) -> Scene {
+    rough_glass_scene(render_config, Vec3::new(-4., 6., -3.), 8., 3., 1.)
+}
+
+/// The geometry both rough-glass scenes share: floor, five spheres, and one
+/// axis-aligned square light of the given corner, side and radiance. `dim`
+/// divides the background, so a scene can scale it with its light.
+#[allow(dead_code)]
+fn rough_glass_scene(
+    render_config: RenderConfig,
+    light_corner: Vec3,
+    light_side: f64,
+    light_radiance: f64,
+    dim: f64,
+) -> Scene {
+    let camera = CameraConfig {
+        vertical_fov_degrees: 34.,
+        aperture_size: 0.,
+        look_from: Vec3::new(0., 1.8, 8.),
+        look_at: Vec3::new(0., 0.75, 0.),
+        up: Vec3::new(0., 1., 0.),
+    };
+
+    let image_tex = ImageMap::load("resources/textures/tex.jpg").unwrap();
+    let floor_material = Lambertian::new(image_tex.into(), None);
+    let light_mat = DiffuseLight::new(light_radiance, light_radiance, light_radiance, None);
+
+    let nop = NopTransformer();
+    let mut world: Vec<Hittables> = Vec::new();
+
+    world.push(
+        Quad::new(
+            Vec3::new(-10., 0., -8.),
+            Vec3::new(20., 0., 0.),
+            Vec3::new(0., 0., 16.),
+            floor_material.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    // Clear glass, so what varies across the row is the roughness alone and
+    // Beer-Lambert absorption is exactly a no-op.
+    for (i, roughness) in ROUGH_GLASS_ROUGHNESS.iter().enumerate() {
+        let mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, *roughness);
+        world
+            .push(Sphere::new(rough_glass_sphere_center(i), ROUGH_GLASS_RADIUS, mat.into()).into());
+    }
+
+    world.push(
+        Quad::new(
+            light_corner,
+            Vec3::new(light_side, 0., 0.),
+            Vec3::new(0., 0., light_side),
+            light_mat.into(),
+            &nop,
+        )
+        .into(),
+    );
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera,
+        // Dim, so the light is what the spheres are lit by. A bright
+        // environment would flood the lobe and hide the thing being measured.
+        background_color: Vec3::new(0.02, 0.03, 0.05) / dim,
+        render_config,
+    }
+}
+
+/// The spheres [`create_rough_glass_scene`] lays out, so a test can restrict a
+/// measurement to them without re-deriving where they are.
+#[allow(dead_code)]
+pub const ROUGH_GLASS_ROUGHNESS: [f64; 5] = [0., 0.15, 0.3, 0.5, 0.8];
+#[allow(dead_code)]
+pub const ROUGH_GLASS_RADIUS: f64 = 0.7;
+#[allow(dead_code)]
+pub fn rough_glass_sphere_center(i: usize) -> Vec3 {
+    Vec3::new(-2.8 + 1.4 * i as f64, ROUGH_GLASS_RADIUS, 0.)
+}
+
 /// One sphere of the given material under a uniform unit environment, with
 /// nothing else in the scene.
 ///
@@ -1322,6 +1447,7 @@ pub fn create_glass_slab_scene(
         .into(),
         None,
         1.5,
+        0.,
     );
 
     let mut world = Quad::new_box(

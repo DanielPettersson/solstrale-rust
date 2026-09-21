@@ -7,6 +7,7 @@ use crate::hittable::{Bvh, Hittable, Hittables, LEAF_FLAG};
 use crate::material::texture::{Texture, Textures};
 use crate::material::{Material, Materials};
 use crate::renderer::Scene;
+use crate::renderer::dielectric_energy::build_table;
 use crate::renderer::gpu_data::{
     BvhNode as GpuBvhNode, LightRef, MAT_BLEND, MAT_DIELECTRIC, MAT_DIFFUSE_LIGHT, MAT_LAMBERTIAN,
     MAT_METAL, Material as GpuMaterial, PRIM_TYPE_QUAD, PRIM_TYPE_SHIFT, PRIM_TYPE_SPHERE,
@@ -35,6 +36,12 @@ struct FlattenCaches {
     /// emitters that carry an image. An emissive mesh shares one texture across
     /// hundreds of triangles, and scanning it per triangle is not affordable.
     texture_means: HashMap<usize, Vec3, BuildHasherDefault<FxHasher>>,
+    /// An index of refraction's bit pattern -> where its energy table starts.
+    ///
+    /// Keyed on the index alone because that is all the table depends on:
+    /// roughness and angle are its two axes, so five glass spheres across the
+    /// roughness range at 1.5 share one table and build it once.
+    energy_offsets: HashMap<u64, u32, BuildHasherDefault<FxHasher>>,
 }
 
 /// The multiply-xor hash rustc uses internally, over 64-bit words.
@@ -120,6 +127,10 @@ pub struct SceneData {
     /// binary-search a primitive back to the lights array, and carrying the
     /// power-proportional selection distribution `build_alias_table` computed.
     pub lights: Vec<LightRef>,
+    /// Single-scatter albedo tables for the scene's dielectrics, concatenated
+    /// and indexed by `Material::energy_offset`. Empty when nothing in the
+    /// scene can present a rough dielectric.
+    pub dielectric_energy: Vec<f32>,
     /// Whether `prim_refs[k]` is `(PRIM_TYPE_TRIANGLE << 30) | k` at every `k`.
     ///
     /// True exactly when the scene is nothing but triangles: every primitive
@@ -145,6 +156,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         textures: Vec::new(),
         atlas_layout: None,
         lights: Vec::new(),
+        dielectric_energy: Vec::new(),
         prim_refs_are_identity: false,
     };
 
@@ -608,7 +620,7 @@ fn add_material(
             Some(&m.albedo),
             None,
             m.normal.as_ref(),
-            0.0,
+            m.roughness as f32,
             m.index_of_refraction as f32,
             MAT_DIELECTRIC,
             0.0,
@@ -655,6 +667,24 @@ fn add_material(
         .map(|t| get_texture_info(t, unique_textures, atlas_layout, caches))
         .unwrap_or((-1, [0.0; 2], [1.0; 2]));
 
+    // Built once per distinct index of refraction, and only when something can
+    // make the lobe rough. Interned before the material is, so two dielectrics
+    // of the same index stay one material as well as one table.
+    let energy_offset = if mat_type == MAT_DIELECTRIC && fuzz > 0. {
+        let key = (ref_idx as f64).to_bits();
+        match caches.energy_offsets.get(&key) {
+            Some(&offset) => offset,
+            None => {
+                let offset = data.dielectric_energy.len() as u32;
+                data.dielectric_energy.extend(build_table(ref_idx as f64));
+                caches.energy_offsets.insert(key, offset);
+                offset
+            }
+        }
+    } else {
+        0
+    };
+
     let gpu_material = GpuMaterial {
         albedo: to_array(albedo),
         attenuation_factor,
@@ -663,7 +693,7 @@ fn add_material(
         fuzz,
         refraction_index: ref_idx,
         mat_type,
-        _padding3: 0,
+        energy_offset,
         texture_index,
         normal_texture_index,
         blend_indices,
@@ -775,9 +805,10 @@ mod tests {
     use crate::hittable::LEAF_FLAG;
     use crate::hittable::{Bvh, Hittables, Sphere};
     use crate::material::texture::SolidColor;
-    use crate::material::{Lambertian, Materials};
+    use crate::material::{Dielectric, Lambertian, Materials};
+    use crate::renderer::dielectric_energy::ENERGY_TABLE_LEN;
     use crate::renderer::gpu_data::LightRef;
-    use crate::renderer::scene_flattener::{build_alias_table, flatten_scene, pack_oct};
+    use crate::renderer::scene_flattener::{SceneData, build_alias_table, flatten_scene, pack_oct};
     use crate::renderer::{RenderConfig, Scene};
 
     /// WGSL `unpack2x16snorm` then `oct_decode`, in Rust. Only the encoder
@@ -800,6 +831,86 @@ mod tests {
             y = (1.0 - ax) * sy;
         }
         Vec3::new(x as f64, y as f64, z as f64).unit()
+    }
+
+    /// A scene of glass spheres, one per (index, roughness) pair, over nothing
+    /// else. Only the material table is of interest here.
+    fn flatten_glass(roughness: f64) -> SceneData {
+        flatten_glass_spheres(&[(1.5, roughness)])
+    }
+
+    fn flatten_glass_pair(n1: f64, r1: f64, n2: f64, r2: f64) -> SceneData {
+        flatten_glass_spheres(&[(n1, r1), (n2, r2)])
+    }
+
+    fn flatten_glass_spheres(glass: &[(f64, f64)]) -> SceneData {
+        let world: Vec<Hittables> = glass
+            .iter()
+            .enumerate()
+            .map(|(i, &(ior, roughness))| {
+                Sphere::new(
+                    Vec3::new(i as f64 * 3., 0., 0.),
+                    1.,
+                    Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, ior, roughness)
+                        .into(),
+                )
+                .into()
+            })
+            .collect();
+
+        flatten_scene(&Scene {
+            world: Bvh::new(world).into(),
+            camera: crate::camera::CameraConfig {
+                vertical_fov_degrees: 40.,
+                aperture_size: 0.,
+                look_from: Vec3::new(0., 0., 6.),
+                look_at: Vec3::new(0., 0., 0.),
+                up: Vec3::new(0., 1., 0.),
+            },
+            background_color: Vec3::new(1., 1., 1.),
+            render_config: RenderConfig::default(),
+        })
+    }
+
+    /// Who gets an energy table and who does not.
+    ///
+    /// Building one is the most expensive thing the flattener does per
+    /// material -- half a million evaluations of the microfacet model -- and it
+    /// is wasted on a scene whose glass is smooth, which is every scene that
+    /// predates the microfacet dielectric. The shader agrees:
+    /// `has_rough_dielectrics` is false under the same condition and compiles
+    /// out the arm that would read it.
+    #[test]
+    fn a_table_is_built_only_for_a_rough_dielectric() {
+        assert!(
+            flatten_glass(0.).dielectric_energy.is_empty(),
+            "smooth glass built a table it can never read"
+        );
+        assert_eq!(
+            ENERGY_TABLE_LEN,
+            flatten_glass(0.3).dielectric_energy.len(),
+            "a rough dielectric needs both halves of one table"
+        );
+    }
+
+    /// Two dielectrics of the same index share one table, whatever their
+    /// roughness: roughness is an *axis* of the table rather than a parameter
+    /// of it, which is what keeps a five-sphere roughness sweep to one build.
+    #[test]
+    fn one_table_per_index_of_refraction() {
+        assert_eq!(
+            ENERGY_TABLE_LEN,
+            flatten_glass_pair(1.5, 0.2, 1.5, 0.8)
+                .dielectric_energy
+                .len()
+        );
+        assert_eq!(
+            2 * ENERGY_TABLE_LEN,
+            flatten_glass_pair(1.5, 0.2, 1.8, 0.2)
+                .dielectric_energy
+                .len(),
+            "two indices of refraction are two different tables"
+        );
     }
 
     #[test]
