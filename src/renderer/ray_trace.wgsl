@@ -337,7 +337,8 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 
 // Albedo, shading normal and camera distance of the first surface along the
 // view ray that is not a mirror or a lens, packed into 16 bytes. Written once
-// per accumulation run by trace_guide and read only by the denoiser, which
+// per accumulation run by trace_guide, and only when `writes_guide` says
+// something in the chain will read it. Read only by the denoiser, which
 // fetches it 125 times per pixel -- which is why it is packed rather than
 // stored as two plain vec4<f32>. See pack_guide below; the denoise shaders
 // carry a matching oct_decode that must stay in step with oct_encode here.
@@ -430,6 +431,18 @@ override nee_enabled: bool = true;
 // resolved at pipeline creation, where a uniform would cost a branch on every
 // single draw.
 override low_discrepancy: f32 = 1.0;
+
+// Whether the G-buffer is filled at all. Nothing but a denoising post-processor
+// reads it, so a chain without one pays a whole extra ray per pixel per
+// accumulation run for a buffer no one opens. Off strips trace_guide,
+// pack_guide, oct_encode and resolve_material_index_dominant from the module
+// entirely.
+//
+// Costs nothing worth measuring on a long render -- one restart against
+// thousands of sample paths, under 0.2% -- and 9% of a frame during a camera
+// drag, where every frame is a restart at one sample per pixel. See
+// `interactive_restart_frame_cost`, which is the only thing that measures it.
+override writes_guide: bool = true;
 
 fn pcg_hash(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
@@ -2350,7 +2363,10 @@ const GUIDE_MAX_SPECULAR = 6u;
 // rather than a coin flip.
 //
 // Costs one ray per pixel, and only on a restart dispatch, against
-// samples_per_pixel rays for the render itself.
+// samples_per_pixel rays for the render itself -- which is nothing on a long
+// render and about a tenth of a frame during a camera drag, where every frame
+// is a restart at one sample. Hence `writes_guide`, which compiles this whole
+// function out when no post-processor reads what it writes.
 fn trace_guide(pixel: vec2<u32>) -> GuideSample {
     var out: GuideSample;
     out.specular_depth = 0u;
@@ -2632,8 +2648,14 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // One guide ray per accumulation run, before the adaptive early-out below
     // can return, so every pixel gets exactly one and the guide can never go
     // stale: a camera change restarts the accumulation and rewrites the guide
-    // in the same dispatch that resets the accumulator.
-    if (restart) {
+    // in the same dispatch that resets the accumulator. And only when something
+    // in the chain will read it.
+    //
+    // `writes_guide` leads the condition rather than sitting in the body, and
+    // deliberately: naga folds an override out of an `if` condition and deletes
+    // the arm, which is what takes trace_guide and its helpers out of the
+    // module. See the note on `has_rough_dielectrics` in bsdf_is_specular.
+    if (writes_guide && restart) {
         gbuffer[index] = pack_guide(trace_guide(pixel));
     }
 

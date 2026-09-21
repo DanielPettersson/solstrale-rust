@@ -75,6 +75,30 @@ pub trait PostProcessor {
 
     /// Execute final postprocessing of the rendered image
     fn post_process(&self, ctx: &mut PostProcessContext) -> Result<(), Box<dyn Error>>;
+
+    /// Whether this processor also runs on the unfinished image a live viewer
+    /// is watching, rather than only on the last batch.
+    ///
+    /// Only consulted when [`RenderConfig::preview`] is on. Costs a full run of
+    /// the processor per batch, so it is for the ones whose absence makes the
+    /// preview misleading rather than merely unstyled -- and the denoiser is
+    /// the case the flag exists for: a camera drag restarts the accumulation
+    /// every frame, so without this the one regime a denoiser is built for is
+    /// the one regime it never ran in.
+    ///
+    /// [`RenderConfig::preview`]: crate::renderer::RenderConfig::preview
+    fn preview(&self) -> bool {
+        false
+    }
+
+    /// Whether this processor reads [`PostProcessContext::gbuffer`].
+    ///
+    /// The tracer is compiled without `trace_guide` when nothing in the chain
+    /// says yes here, so a processor that reads the guide and forgets to say so
+    /// reads zeroes.
+    fn needs_guide(&self) -> bool {
+        false
+    }
 }
 
 #[enum_dispatch(PostProcessor)]

@@ -2570,9 +2570,9 @@ fn gpu_pass_timings() {
 
     let (device, queue) = get_wgpu_device_and_queue();
 
-    let arms: Vec<(u32, &str, Vec<PostProcessors>)> = vec![
-        (64, "none", vec![]),
-        (16, "none", vec![]),
+    let arms: Vec<(u32, &str, Vec<PostProcessors>, bool)> = vec![
+        (64, "none", vec![], false),
+        (16, "none", vec![], false),
         (
             16,
             "bloom_0.1",
@@ -2581,6 +2581,7 @@ fn gpu_pass_timings() {
                     .unwrap()
                     .into(),
             ],
+            false,
         ),
         (
             16,
@@ -2590,11 +2591,13 @@ fn gpu_pass_timings() {
                     .unwrap()
                     .into(),
             ],
+            false,
         ),
         (
             16,
             "saturation",
             vec![SaturationPostProcessor::new(-0.7, device).unwrap().into()],
+            false,
         ),
         (
             16,
@@ -2604,15 +2607,29 @@ fn gpu_pass_timings() {
                     .unwrap()
                     .into(),
             ],
+            false,
+        ),
+        // The same chain a live viewer gets: the filter on every batch rather
+        // than on the last one. The `passes` column is what changes.
+        (
+            16,
+            "denoise_preview",
+            vec![
+                DenoisePostProcessor::new(1., Some(5), None, device)
+                    .unwrap()
+                    .into(),
+            ],
+            true,
         ),
     ];
 
-    for (spp, name, post_processors) in arms {
+    for (spp, name, post_processors, preview) in arms {
         let scene = create_test_scene(RenderConfig {
             width: 800,
             height: 600,
             samples_per_pixel: spp,
             post_processors,
+            preview,
             ..Default::default()
         });
 

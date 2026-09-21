@@ -71,12 +71,15 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
     // Timestamp queries are a diagnostic, asked for only when the adapter has
     // them: `GpuTimer` gates itself on the environment variable as well, so a
     // device without the feature loses nothing but the instrument. The base
-    // feature is all of it -- `ComputePassTimestampWrites` on a pass descriptor
-    // is covered here, and `TIMESTAMP_QUERY_INSIDE_ENCODERS` only buys
-    // `CommandEncoder::write_timestamp`, which nothing calls.
+    // feature covers `ComputePassTimestampWrites` on a pass descriptor;
+    // `TIMESTAMP_QUERY_INSIDE_ENCODERS` buys `CommandEncoder::write_timestamp`,
+    // which is the only way to time the one piece of GPU work in the render
+    // loop that is not a compute pass -- the copy into the post buffer. Asked
+    // for separately, because an adapter may have the first without the second.
     let mut required_features = wgpu::Features::TEXTURE_BINDING_ARRAY
         | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-    required_features |= adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+    required_features |= adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,

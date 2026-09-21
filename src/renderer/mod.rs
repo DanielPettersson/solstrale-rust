@@ -137,6 +137,7 @@ impl Specialisation {
         height: u32,
         low_discrepancy: bool,
         estimator: Estimator,
+        writes_guide: bool,
     ) -> Vec<(&'static str, f64)> {
         let flag = |b: bool| if b { 1. } else { 0. };
         vec![
@@ -155,6 +156,7 @@ impl Specialisation {
             ("nee_enabled", flag(estimator.nee_enabled)),
             ("clamping_threshold", estimator.clamping_threshold as f64),
             ("low_discrepancy", flag(low_discrepancy)),
+            ("writes_guide", flag(writes_guide)),
         ]
     }
 }
@@ -247,6 +249,30 @@ pub struct RenderConfig {
     pub seed: u32,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
+    /// Whether the post-processors that declare themselves preview processors
+    /// run on every batch, or only on the last one.
+    ///
+    /// On, the default: the image published on [`RenderProgress`] is a
+    /// processed image at every batch rather than only at the end. The case
+    /// this exists for is a camera drag, which restarts the accumulation on
+    /// every frame and so never reaches a last batch at all -- the one regime
+    /// a denoiser is built for was the one regime it never ran in.
+    ///
+    /// Off: the chain runs once, on the final batch, as it always did. The
+    /// published buffer still follows the accumulation, it is just raw until
+    /// the end. That is for a batch render with nobody watching, and what it
+    /// saves is one run of the preview processors per batch. The only expensive
+    /// one is the denoiser, measured on a Radeon RX 5700 XT at 800x600 as 1.8
+    /// ms of GPU time per batch against the 12 ms a batch of samples is sized
+    /// to fill -- so a denoised batch render pays something like a sixth of its
+    /// time for previews nobody reads.
+    ///
+    /// Which processors those are is [`crate::post::PostProcessor::preview`]:
+    /// the denoiser and the saturation grade, not bloom. Nothing about the
+    /// final image depends on this. The chain always runs on a fresh copy of
+    /// the accumulator, so running it four times over a render and running it
+    /// once produce the same last batch.
+    pub preview: bool,
 }
 
 impl Default for RenderConfig {
@@ -262,6 +288,7 @@ impl Default for RenderConfig {
             low_discrepancy: true,
             seed: 0,
             post_processors: vec![],
+            preview: true,
         }
     }
 }
@@ -529,6 +556,8 @@ pub struct Renderer<'a> {
     /// Scratch copy the post-processing chain runs on, so the accumulator is
     /// never written by a post-processor. `None` when there is no chain.
     post_buffer: Option<wgpu::Buffer>,
+    /// See [`RenderConfig::preview`].
+    preview: bool,
     bind_group: wgpu::BindGroup,
     #[allow(dead_code)]
     nodes_buffer: wgpu::Buffer,
@@ -857,6 +886,16 @@ impl<'a> Renderer<'a> {
         // what each one strips.
         let specialisation =
             specialisation.unwrap_or_else(|| Specialisation::from_scene_data(&scene_data));
+        // Nothing but a denoising post-processor opens the G-buffer, so a chain
+        // without one is a whole extra ray per pixel per accumulation run spent
+        // on a buffer that is never read. Asked of the chain rather than
+        // inferred from it, so a post-processor added later cannot silently get
+        // zeroes.
+        let writes_guide = scene
+            .render_config
+            .post_processors
+            .iter()
+            .any(|p| p.needs_guide());
         let pipeline = compute_pipeline(
             device,
             &bind_group_layout,
@@ -866,6 +905,7 @@ impl<'a> Renderer<'a> {
                 height,
                 scene.render_config.low_discrepancy,
                 estimator,
+                writes_guide,
             ),
         );
 
@@ -955,6 +995,7 @@ impl<'a> Renderer<'a> {
             sample_count_buffer,
             gbuffer,
             post_buffer,
+            preview: scene.render_config.preview,
             bind_group,
             nodes_buffer,
             spheres_buffer,
@@ -1080,26 +1121,41 @@ impl<'a> Renderer<'a> {
                 "trace",
             );
 
-            // Refreshed every batch, not just the one the chain runs on: the
-            // post buffer is what gets published on RenderProgress, so a caller
-            // watching an unfinished render has to see the accumulated image
-            // there rather than whatever the allocation came with.
+            let last_batch = completed + batch >= samples_per_pixel;
+
+            // Refreshed every batch, not just the one the whole chain runs on:
+            // the post buffer is what gets published on RenderProgress, so a
+            // caller watching an unfinished render has to see the accumulated
+            // image there rather than whatever the allocation came with. It is
+            // cheap enough not to be worth a way out -- 0.05 ms of a 10 ms
+            // dispatch at 800x600, which is what `post_copy` is timed for.
             if let Some(post_buffer) = &self.post_buffer {
                 let size = (self.width * self.height) as u64 * crate::post::PIXEL_SIZE;
-                encoder.copy_buffer_to_buffer(&self.output_buffer, 0, post_buffer, 0, size);
+                let src = &self.output_buffer;
+                let copy = |encoder: &mut wgpu::CommandEncoder| {
+                    encoder.copy_buffer_to_buffer(src, 0, post_buffer, 0, size);
+                };
+                match self.timer.as_mut() {
+                    Some(timer) => timer.encoder_scope(&mut encoder, "post_copy", copy),
+                    None => copy(&mut encoder),
+                }
 
-                if completed + batch >= samples_per_pixel {
-                    let mut ctx = crate::post::PostProcessContext {
-                        encoder: &mut encoder,
-                        buffer: post_buffer,
-                        accumulator: &self.output_buffer,
-                        sample_count_buffer: &self.sample_count_buffer,
-                        gbuffer: &self.gbuffer,
-                        samples_completed: completed,
-                        device: self.device,
-                        timer: self.timer.as_mut(),
-                    };
-                    for p in &self.post_processors {
+                let mut ctx = crate::post::PostProcessContext {
+                    encoder: &mut encoder,
+                    buffer: post_buffer,
+                    accumulator: &self.output_buffer,
+                    sample_count_buffer: &self.sample_count_buffer,
+                    gbuffer: &self.gbuffer,
+                    samples_completed: completed,
+                    device: self.device,
+                    timer: self.timer.as_mut(),
+                };
+                // On any batch but the last, only the processors that say
+                // they belong in a preview. A drag never reaches a last batch:
+                // every frame of one restarts the accumulation, so this is the
+                // only path on which a moving camera is ever filtered at all.
+                for p in &self.post_processors {
+                    if last_batch || (self.preview && p.preview()) {
                         p.post_process(&mut ctx)?;
                     }
                 }
@@ -1498,6 +1554,16 @@ mod test {
         f32::from_bits((sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13))
     }
 
+    /// A chain that reads the guide, which is what makes the tracer fill it.
+    /// The filter's own output is beside the point here -- both G-buffer tests
+    /// read `Renderer::gbuffer` directly -- but `writes_guide` is compiled from
+    /// what the chain declares, so without one there is nothing to read.
+    fn guide_reader(device: &wgpu::Device) -> crate::post::PostProcessors {
+        crate::post::DenoisePostProcessor::new(1., None, None, device)
+            .unwrap()
+            .into()
+    }
+
     /// Inverse of `oct_encode` in ray_trace.wgsl. Must stay in step with it.
     fn oct_decode(e: [f32; 2]) -> [f32; 3] {
         let mut v = [e[0], e[1], 1.0 - e[0].abs() - e[1].abs()];
@@ -1537,6 +1603,10 @@ mod test {
             width: SIZE as usize,
             height: SIZE as usize,
             samples_per_pixel: 1,
+            // The tracer only fills the G-buffer when something in the chain
+            // reads it, so a test that reads it has to ask for it the way a
+            // caller would rather than through a back door.
+            post_processors: vec![guide_reader(device)],
             ..Default::default()
         };
 
@@ -1640,6 +1710,123 @@ mod test {
         );
     }
 
+    /// The other half of the same contract: with nothing in the chain reading
+    /// the guide, the tracer must not trace it.
+    ///
+    /// A guide ray is a whole extra ray per pixel, and a specular one is up to
+    /// seven. On a long render that is one restart against thousands of sample
+    /// paths and no benchmark will ever see it; during a camera drag every
+    /// frame is a restart at one sample per pixel, and it measures 9% of a
+    /// frame on `create_test_scene` at 800x600.
+    /// `interactive_restart_frame_cost` is where that number comes from; this
+    /// pins the mechanism, which is that the override takes `trace_guide` out
+    /// of the module rather than merely skipping a store.
+    ///
+    /// `ColorOnly` is in here too because it is the trap: it is a denoiser, it
+    /// is bound to the G-buffer, and it reads nothing from it.
+    #[test]
+    fn test_guide_is_not_written_without_a_reader() {
+        use crate::camera::CameraConfig;
+        use crate::geo::transformation::NopTransformer;
+        use crate::geo::vec3::Vec3;
+        use crate::hittable::{Bvh, Hittables, Sphere};
+        use crate::material::texture::SolidColor;
+        use crate::material::{DiffuseLight, Lambertian};
+        use crate::post::{DenoiseGuide, DenoisePostProcessor, PostProcessors};
+        use crate::renderer::{RenderConfig, Renderer, Scene};
+        use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
+        use std::sync::mpsc::channel;
+
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        const SIZE: u32 = 41;
+
+        let guide_for = |post_processors: Vec<PostProcessors>| {
+            let world: Vec<Hittables> = vec![
+                Sphere::new(
+                    Vec3::new(0., 0., 0.),
+                    0.5,
+                    Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into(),
+                    &NopTransformer(),
+                )
+                .into(),
+                Sphere::new(
+                    Vec3::new(0., 100., 0.),
+                    20.,
+                    DiffuseLight::new(10., 10., 10., None).into(),
+                    &NopTransformer(),
+                )
+                .into(),
+            ];
+            let scene = Scene {
+                world: Bvh::new(world).into(),
+                camera: CameraConfig {
+                    vertical_fov_degrees: 20.,
+                    aperture_size: 0.,
+                    look_from: Vec3::new(0., 0., 4.),
+                    look_at: Vec3::new(0., 0., 0.),
+                    up: Vec3::new(0., 1., 0.),
+                },
+                background_color: Vec3::new(0.2, 0.3, 0.5),
+                render_config: RenderConfig {
+                    width: SIZE as usize,
+                    height: SIZE as usize,
+                    samples_per_pixel: 1,
+                    post_processors,
+                    ..Default::default()
+                },
+            };
+
+            let mut renderer = Renderer::new(scene, device, queue).unwrap();
+            let (output_sender, output_receiver) = channel();
+            let (_camera_sender, camera_receiver) = channel();
+            let (_abort_sender, abort_receiver) = channel();
+            renderer
+                .render(&output_sender, &camera_receiver, &abort_receiver, false)
+                .unwrap();
+            drop(output_sender);
+            for _ in output_receiver {}
+
+            let size = (SIZE * SIZE * 16) as u64;
+            let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            encoder.copy_buffer_to_buffer(&renderer.gbuffer, 0, &staging_buffer, 0, size);
+            queue.submit(Some(encoder.finish()));
+            get_result_from_buffer::<[u32; 4]>(device, &staging_buffer)
+        };
+
+        let denoiser = |guide| {
+            let p: PostProcessors = DenoisePostProcessor::new(1., None, Some(guide), device)
+                .unwrap()
+                .into();
+            vec![p]
+        };
+
+        let written = guide_for(denoiser(DenoiseGuide::Full));
+        assert!(
+            written.iter().any(|g| g != &[0; 4]),
+            "a chain that reads the guide must get one"
+        );
+
+        for (name, chain) in [
+            ("no chain", vec![]),
+            ("colour-only denoiser", denoiser(DenoiseGuide::ColorOnly)),
+        ] {
+            let guide = guide_for(chain);
+            assert!(
+                guide.iter().all(|g| g == &[0; 4]),
+                "{} must leave the guide buffer untouched",
+                name
+            );
+        }
+    }
+
     /// The point of `trace_guide`: on a mirror the guide has to describe what is
     /// reflected, not the mirror. Same analytic approach as above, folded once
     /// through a mirror so every slot has a different right answer than the
@@ -1663,6 +1850,7 @@ mod test {
             width: SIZE as usize,
             height: SIZE as usize,
             samples_per_pixel: 1,
+            post_processors: vec![guide_reader(device)],
             ..Default::default()
         };
 
