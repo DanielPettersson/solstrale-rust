@@ -246,15 +246,32 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   absorption and a GGX microfacet lobe at both interfaces. Dispersion still
   needs per-wavelength transport, which breaks the `vec3 throughput` shortcut
   everywhere rather than just here, and nothing currently asks for it.
-- **The dielectric's Fresnel is Schlick's, including below the critical
-  angle.** `reflectance()` is the single Fresnel for both the conductor and the
-  dielectric, and it is at its worst on the inside of glass approaching total
-  internal reflection: at the 41.8° critical angle of a 1.5 interface the exact
-  term is 1 and Schlick's is 0.04. The reflected and transmitted lobes are
-  therefore mixed wrongly in a band just inside the critical angle. Adopting
-  exact Fresnel is more correct and moves every existing smooth-glass golden,
-  so it belongs in a commit of its own rather than riding along with the
-  microfacet lobe.
+- **Exact Fresnel made glass correct and noisier, and that is the trade.**
+  `fresnel_dielectric` is the unpolarised mean of the two polarisations rather
+  than Schlick's approximation, which was wrong in the one place a dielectric
+  spends most of its bounces: looking out from inside 1.5 glass, the exact term
+  reaches 1 at the 41.8° critical angle where Schlick reads 0.041. From the
+  outside the two agree to 0.006, which is why no golden moved.
+
+  What it costs is sampling. Schlick made the reflect-or-transmit choice nearly
+  deterministic from inside — transmit, almost always — where the truth is a
+  real coin across the whole band around the critical angle, and total internal
+  reflection above it. `create_rough_glass_scene` at 64 spp went from 0.877 to
+  between 1.04 and 1.72 depending on seed, and the frame stopped converging
+  tightly enough for a whole-image mean to gate on: the BSDF-only oracle wanders
+  ±1% there, against 0.03–0.10% under a wide light. Both tests moved to
+  configurations that measure the estimator rather than the scene's tail —
+  `create_soft_lit_rough_glass_scene` for the oracle, 256 spp for the
+  convergence bound — rather than the numbers being loosened.
+
+  This is not a defect of the Fresnel term. Glass with total internal
+  reflection is harder to sample than glass without it, and the renderer was
+  previously easy on it by being wrong. What would actually pay it back is the
+  one thing still missing from the dielectric: paths trapped by total internal
+  reflection keep throughput near 1 for their whole length, so Russian roulette
+  never fires on them and they run to `max_depth` — clear glass makes
+  Beer–Lambert an exact no-op, so #51 gave RR no handle on precisely the paths
+  that now matter most.
 - **No `eta^2` radiance factor on the transmission lobe.** PBRT's radiance-mode
   `1 / etap^2` is omitted, consistently in `bsdf_sample` and `bsdf_eval`. It
   cancels over any closed glass object — the entry and exit interfaces apply

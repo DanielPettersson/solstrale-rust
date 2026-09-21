@@ -1222,16 +1222,47 @@ pub fn rough_metal_sphere_center(i: usize) -> Vec3 {
 /// hides what next-event estimation buys, and it converges 5% away from an
 /// unclamped reference, which is 17% on the metal scene and the reason that one
 /// is not in the BSDF-only table either. At radiance 5 nothing a path carries
-/// reaches the threshold, so both measurements are of the estimator rather than
+/// reaches the threshold, so the measurement is of the estimator rather than
 /// of the clamp. Scaling the background alongside keeps the light delivering
 /// the same 98% of what lights the spheres; the whole image is simply darker,
 /// and every measurement taken on it is relative.
 #[allow(dead_code)]
 pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
-    const RADIANCE: f64 = 5.;
-    // What the metal twin's 300 was divided by, applied to the background too.
-    const DIM: f64 = 300. / RADIANCE;
+    // 60x dimmer than the metal twin's 300, background included.
+    rough_glass_scene(render_config, Vec3::new(-0.3, 4.5, 0.7), 0.6, 5., 60.)
+}
 
+/// The same five spheres under a wide dim light instead of a small bright one.
+///
+/// Built for `test_bsdf_only_sampling_converges_to_the_same_image`, which its
+/// twin above cannot serve. That test gates on a *whole-image mean* agreeing to
+/// half a per cent, and a pinpoint seen through glass does not deliver a mean
+/// that steady: with exact Fresnel the reflect-or-transmit choice is a real
+/// coin across the whole band around the critical angle, so the frame is
+/// firefly-driven and its 2000 spp mean wanders between -0.4% and +1.4% from
+/// one seed to the next. The gate would be measuring its own noise.
+///
+/// A wide light removes the fireflies without removing the lobe: every path
+/// still crosses two microfacet dielectric interfaces and every transmission
+/// still carries the Jacobian this test exists to check -- across far more of
+/// the lobe than a pinpoint reaches, in fact. Radiance 3 keeps the firefly
+/// clamp inert, which is the other thing that test needs.
+#[allow(dead_code)]
+pub fn create_soft_lit_rough_glass_scene(render_config: RenderConfig) -> Scene {
+    rough_glass_scene(render_config, Vec3::new(-4., 6., -3.), 8., 3., 1.)
+}
+
+/// The geometry both rough-glass scenes share: floor, five spheres, and one
+/// axis-aligned square light of the given corner, side and radiance. `dim`
+/// divides the background, so a scene can scale it with its light.
+#[allow(dead_code)]
+fn rough_glass_scene(
+    render_config: RenderConfig,
+    light_corner: Vec3,
+    light_side: f64,
+    light_radiance: f64,
+    dim: f64,
+) -> Scene {
     let camera = CameraConfig {
         vertical_fov_degrees: 34.,
         aperture_size: 0.,
@@ -1242,7 +1273,7 @@ pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
 
     let image_tex = ImageMap::load("resources/textures/tex.jpg").unwrap();
     let floor_material = Lambertian::new(image_tex.into(), None);
-    let light_mat = DiffuseLight::new(RADIANCE, RADIANCE, RADIANCE, None);
+    let light_mat = DiffuseLight::new(light_radiance, light_radiance, light_radiance, None);
 
     let nop = NopTransformer();
     let mut world: Vec<Hittables> = Vec::new();
@@ -1266,14 +1297,11 @@ pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
             .push(Sphere::new(rough_glass_sphere_center(i), ROUGH_GLASS_RADIUS, mat.into()).into());
     }
 
-    // One small light, high and slightly forward. Its solid angle from the
-    // spheres is a fraction of a degree, which is what a lobe with no pdf
-    // cannot find.
     world.push(
         Quad::new(
-            Vec3::new(-0.3, 4.5, 0.7),
-            Vec3::new(0.6, 0., 0.),
-            Vec3::new(0., 0., 0.6),
+            light_corner,
+            Vec3::new(light_side, 0., 0.),
+            Vec3::new(0., 0., light_side),
             light_mat.into(),
             &nop,
         )
@@ -1285,7 +1313,7 @@ pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
         camera,
         // Dim, so the light is what the spheres are lit by. A bright
         // environment would flood the lobe and hide the thing being measured.
-        background_color: Vec3::new(0.02, 0.03, 0.05) / DIM,
+        background_color: Vec3::new(0.02, 0.03, 0.05) / dim,
         render_config,
     }
 }

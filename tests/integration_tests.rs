@@ -32,8 +32,8 @@ use crate::scenes::{
     create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
     create_obj_with_triangle, create_quad_rotation_scene, create_rough_glass_scene,
     create_rough_metal_scene, create_simple_test_scene, create_smooth_vs_flat_scene,
-    create_specular_scene, create_srgb_decode_scene, create_test_scene,
-    create_texture_mapping_scene, create_uv_scene, create_wide_light_scene,
+    create_soft_lit_rough_glass_scene, create_specular_scene, create_srgb_decode_scene,
+    create_test_scene, create_texture_mapping_scene, create_uv_scene, create_wide_light_scene,
     rough_glass_sphere_center, rough_metal_sphere_center,
 };
 
@@ -849,10 +849,14 @@ fn test_adaptive_sampling_convergence() {
 /// suite -- `test_rough_glass_converges_with_nee` would still pass, because
 /// both of its arms would be wrong together.
 ///
-/// Its light is 60x dimmer than the metal twin's for a reason that belongs to
-/// this test: a bright pinpoint seen through glass is clamped in one arm and
-/// not the other, which reads as a 5% disagreement that has nothing to do with
-/// a pdf. `create_rough_glass_scene` records the rest.
+/// It is the *soft-lit* rough glass scene rather than the small-light one that
+/// `test_rough_glass_converges_with_nee` uses, and the reason belongs to this
+/// test. This is a gate on a whole-image mean at half a per cent, and a
+/// pinpoint seen through glass does not deliver a mean that steady: with exact
+/// Fresnel the frame is firefly-driven and its 2000 spp mean wanders between
+/// -0.4% and +1.4% from one seed to the next. Under the wide light the same
+/// figure is 0.03% to 0.10% over four seeds, and every path still crosses two
+/// microfacet interfaces on the way.
 ///
 /// The reference lifts the clamp because the shipped renderer's clamp is the
 /// one thing here that is deliberately biased, and on a BSDF-only path it bites
@@ -892,7 +896,7 @@ fn test_bsdf_only_sampling_converges_to_the_same_image() {
         ("specular", create_specular_scene),
         ("test_scene", create_test_scene),
         ("many_lights", create_many_lights_scene),
-        ("rough_glass", create_rough_glass_scene),
+        ("rough_glass", create_soft_lit_rough_glass_scene),
     ];
 
     for (name, build) in scenes {
@@ -3071,34 +3075,35 @@ const ROUGH_METAL_RMSE_BOUND: f64 = 0.35;
 // ---------------------------------------------------------------------------
 
 /// The same measurement as `test_rough_metal_converges_with_nee`, on the twin
-/// scene in glass: 64 spp against its own 1024 spp reference, over the rough
+/// scene in glass: 256 spp against its own 4096 spp reference, over the rough
 /// spheres.
 ///
 /// Relative to the reference's own mean rather than absolute, for the reason
 /// the metal test gives -- an absolute figure rewards an arm that is merely
 /// darker, and the single-scatter dielectric does darken as roughness rises.
 ///
-/// Measured here, against a build with `bsdf_is_specular` forced true for the
+/// Measured against a build with `bsdf_is_specular` forced true for the
 /// dielectric and its sampled pdf forced to 0 -- the lobe still has its width,
 /// it simply has no density for a light to land on, which is exactly what a
-/// rough dielectric bolted onto the old RTIOW arm would have been:
+/// rough dielectric bolted onto the old RTIOW arm would have been. Over four
+/// seeds:
 ///
 /// ```text
-/// roughness      0.15    0.3    0.5    0.8   all four
-/// width, no pdf  4.588  4.212  5.114  8.342    5.250
-/// with pdf       0.667  1.080  0.764  0.627    0.877
+/// width, no pdf   2.884  2.892  2.798  2.860
+/// with pdf        0.609  0.823  0.637  0.686
 /// ```
 ///
-/// Six times less error for the same 64 samples, and the gap widens with
-/// roughness, which is the shape the claim predicts: the wider the lobe, the
-/// smaller the chance of stumbling onto a light a fraction of a degree across.
+/// 256 spp rather than the metal test's 64, and against four times its
+/// reference, because a pinpoint light seen through glass is a firefly machine:
+/// at 64 spp the same figure wanders between 1.04 and 1.72 from one seed to the
+/// next, which is a gate measuring its own noise. Four times the samples costs
+/// a second and halves the spread.
 ///
 /// The smooth sphere is deliberately outside the mask. It is a Dirac lobe that
-/// this change does not touch -- it scores 4.036 before and 4.074 after, the
-/// same number twice -- and what it is noisy *about* is a caustic: a glass ball
-/// is a lens, and a lens focusing a pinpoint is the one thing next-event
-/// estimation cannot help with, because a shadow ray has no chance of landing
-/// on a delta. That is issue #82's second commit, not this one.
+/// this change does not touch, and what it is noisy *about* is a caustic: a
+/// glass ball is a lens, and a lens focusing a pinpoint is the one thing
+/// next-event estimation cannot help with, because a shadow ray has no chance
+/// of landing on a delta. `RenderConfig::regularisation` is what reaches that.
 ///
 /// **The golden harness cannot see this.** It downscales to 100x50 before
 /// comparing, which averages away exactly the defect being measured -- the
@@ -3120,7 +3125,7 @@ fn test_rough_glass_converges_with_nee() {
         ..Default::default()
     };
 
-    let scene = create_rough_glass_scene(config(64));
+    let scene = create_rough_glass_scene(config(256));
     // From 1: the roughness-0 sphere is the Dirac lobe this measurement is not
     // about. See the note above.
     let mask = mask_union(
@@ -3140,28 +3145,28 @@ fn test_rough_glass_converges_with_nee() {
 
     let noisy = render_linear(scene, device, queue);
     let reference = render_linear(
-        as_reference(create_rough_glass_scene(config(1024))),
+        as_reference(create_rough_glass_scene(config(4096))),
         device,
         queue,
     );
 
     let relative = masked_linear_rmse(&noisy, &reference, &mask) / masked_mean(&reference, &mask);
     println!(
-        "rough glass, 64 spp against 1024 spp, over the rough spheres: {relative:.4} of the mean"
+        "rough glass, 256 spp against 4096 spp, over the rough spheres: {relative:.4} of the mean"
     );
 
     assert!(
         relative < ROUGH_GLASS_RMSE_BOUND,
-        "64 spp of the rough glass scene is at {relative:.4} relative RMSE against its own \
-         1024 spp reference, past the pinned {ROUGH_GLASS_RMSE_BOUND}"
+        "256 spp of the rough glass scene is at {relative:.4} relative RMSE against its own \
+         4096 spp reference, past the pinned {ROUGH_GLASS_RMSE_BOUND}"
     );
 }
 
-/// Pinned above the 0.877 measured, with the same room for a different driver's
-/// arithmetic that `ROUGH_METAL_RMSE_BOUND` leaves. Far below the 5.250 the
-/// same scene scores with a lobe that has width but no density, which is the
-/// point of the bound rather than its exact value.
-const ROUGH_GLASS_RMSE_BOUND: f64 = 1.2;
+/// Pinned above the 0.823 worst of four seeds, with room for a different
+/// driver's arithmetic. Far below the 2.8 the same scene scores with a lobe
+/// that has width but no density, which is the point of the bound rather than
+/// its exact value.
+const ROUGH_GLASS_RMSE_BOUND: f64 = 1.3;
 
 /// The regression net under solid-angle sampling of a quad light, on the one
 /// scene in the suite whose light is large enough for it to matter.
