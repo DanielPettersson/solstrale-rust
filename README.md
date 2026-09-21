@@ -78,6 +78,7 @@ Add `solstrale` to your `Cargo.toml`. Below is a basic example of how to set up 
 use std::sync::mpsc::channel;
 use std::thread;
 use solstrale::camera::CameraConfig;
+use solstrale::geo::transformation::NopTransformer;
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Sphere};
 use solstrale::material::Lambertian;
@@ -94,7 +95,8 @@ fn main() {
             Sphere::new(
                 Vec3::new(0., 0., 0.), 
                 0.5, 
-                Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into()
+                Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into(),
+                &NopTransformer()
             ).into()
         ]).into(),
         camera: CameraConfig::default(),

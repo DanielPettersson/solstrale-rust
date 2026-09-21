@@ -1,4 +1,5 @@
 use solstrale::camera::CameraConfig;
+use solstrale::geo::transformation::NopTransformer;
 use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Sphere};
 use solstrale::material::DiffuseLight;
@@ -23,6 +24,7 @@ fn test_interactive_camera_restart() {
             Vec3::new(0., 10., 0.),
             1.,
             DiffuseLight::new(1., 1., 1., None).into(),
+            &NopTransformer(),
         )
         .into(),
     );

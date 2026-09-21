@@ -60,8 +60,8 @@ pub fn create_specular_scene(render_config: RenderConfig) -> Scene {
         .into(),
     );
 
-    world.push(Sphere::new(Vec3::new(1.5, 1.2, 0.), 1.2, mirror_mat.into()).into());
-    world.push(Sphere::new(Vec3::new(-1.5, 1., 0.3), 1., glass_mat.into()).into());
+    world.push(Sphere::new(Vec3::new(1.5, 1.2, 0.), 1.2, mirror_mat.into(), &nop).into());
+    world.push(Sphere::new(Vec3::new(-1.5, 1., 0.3), 1., glass_mat.into(), &nop).into());
 
     // Something with a recognisable shape and a colour of its own, to be seen
     // reflected in one sphere and refracted through the other.
@@ -120,7 +120,15 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
         )
         .into(),
     );
-    world.push(Sphere::new(Vec3::new(-1., 1., 0.), 1., glass_mat.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-1., 1., 0.),
+            1.,
+            glass_mat.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
     world.append(&mut Quad::new_box(
         Vec3::new(0., 0., -0.5),
         Vec3::new(1., 2., 0.5),
@@ -171,7 +179,15 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
 
     // Lights
 
-    world.push(Sphere::new(Vec3::new(10., 5., 10.), 10., light_mat.clone().into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(10., 5., 10.),
+            10.,
+            light_mat.clone().into(),
+            &nop_transformer,
+        )
+        .into(),
+    );
     world.push(
         Quad::new(
             Vec3::new(0., 0., 0.),
@@ -224,7 +240,7 @@ pub fn new_bvh_test_scene(render_config: RenderConfig, nested: bool, num_triangl
     let mut world: Vec<Hittables> = Vec::new();
     let yellow = Lambertian::new(SolidColor::new(1., 1., 0.).into(), None);
     let light = DiffuseLight::new(10., 10., 10., None);
-    world.push(Sphere::new(Vec3::new(0., 4., 10.), 4., light.into()).into());
+    world.push(Sphere::new(Vec3::new(0., 4., 10.), 4., light.into(), &NopTransformer()).into());
 
     let nop_transformer = NopTransformer();
     let mut triangles: Vec<Hittables> = Vec::new();
@@ -270,9 +286,17 @@ pub fn create_simple_test_scene(render_config: RenderConfig, add_light: bool) ->
     let yellow = Lambertian::new(SolidColor::new(1., 1., 0.).into(), None);
     let light = DiffuseLight::new(10., 10., 10., None);
     if add_light {
-        world.push(Sphere::new(Vec3::new(0., 100., 0.), 20., light.into()).into())
+        world.push(
+            Sphere::new(
+                Vec3::new(0., 100., 0.),
+                20.,
+                light.into(),
+                &NopTransformer(),
+            )
+            .into(),
+        )
     }
-    world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.5, yellow.into()).into());
+    world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.5, yellow.into(), &NopTransformer()).into());
 
     Scene {
         world: Bvh::new(world).into(),
@@ -295,7 +319,15 @@ pub fn create_uv_scene(render_config: RenderConfig) -> Scene {
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(10., 10., 10., None);
 
-    world.push(Sphere::new(Vec3::new(50., 50., 50.), 20., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(50., 50., 50.),
+            20.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let tex = ImageMap::load("resources/textures/checker.jpg").unwrap();
     let checker_mat = Lambertian::new(tex.into(), None);
@@ -339,7 +371,7 @@ pub fn create_normal_mapping_scene(
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
 
-    world.push(Sphere::new(light_pos, 5., light.into()).into());
+    world.push(Sphere::new(light_pos, 5., light.into(), &NopTransformer()).into());
 
     let normal_tex: Option<Textures> = if normal_mapping_enabled {
         Some(
@@ -392,7 +424,7 @@ pub fn create_normal_mapping_sphere_scene(render_config: RenderConfig, light_pos
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
 
-    world.push(Sphere::new(light_pos, 5., light.into()).into());
+    world.push(Sphere::new(light_pos, 5., light.into(), &NopTransformer()).into());
 
     let normal_tex = Some(
         load_normal_texture("resources/textures/earth_height.jpg")
@@ -401,7 +433,7 @@ pub fn create_normal_mapping_sphere_scene(render_config: RenderConfig, light_pos
     );
     let mat = Lambertian::new(SolidColor::new(0.8, 0.8, 0.8).into(), normal_tex);
 
-    world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.6, mat.into()).into());
+    world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.6, mat.into(), &NopTransformer()).into());
 
     Scene {
         world: Bvh::new(world).into(),
@@ -504,6 +536,7 @@ pub fn create_smooth_vs_flat_scene(render_config: RenderConfig) -> Scene {
             Vec3::new(-5., 3., 3.),
             1.,
             DiffuseLight::new(28., 28., 28., None).into(),
+            &NopTransformer(),
         )
         .into(),
     ];
@@ -531,7 +564,15 @@ pub fn create_obj_scene(render_config: RenderConfig) -> Scene {
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(15., 15., 15., None);
 
-    world.push(Sphere::new(Vec3::new(-100., 100., 40.), 35., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-100., 100., 40.),
+            35.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
     let model = Obj::new("resources/spider/", "spider.obj")
         .load(&NopTransformer(), None)
         .unwrap();
@@ -572,7 +613,15 @@ pub fn create_obj_with_box(render_config: RenderConfig, path: &str, filename: &s
     let light = DiffuseLight::new(15., 15., 15., None);
     let red = Lambertian::new(SolidColor::new(1., 0., 0.).into(), None);
 
-    world.push(Sphere::new(Vec3::new(-100., 100., 40.), 35., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-100., 100., 40.),
+            35.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
     world.push(
         Obj::new(path, filename)
             .load(&NopTransformer(), Some(red.into()))
@@ -601,7 +650,15 @@ pub fn create_obj_with_triangle(render_config: RenderConfig, path: &str, filenam
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(15., 15., 15., None);
 
-    world.push(Sphere::new(Vec3::new(100., 0., 100.), 35., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(100., 0., 100.),
+            35.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
     world.push(
         Obj::new(path, filename)
             .load(&NopTransformer(), None)
@@ -639,10 +696,42 @@ pub fn create_light_attenuation_scene(
     // and is now load-bearing, and this scene has never been about absorption.
     let glass = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.);
 
-    world.push(Sphere::new(Vec3::new(0., 0.2, 0.), 0.03, light.into()).into());
-    world.push(Sphere::new(Vec3::new(0.25, 0.1, 0.25), 0.1, green.into()).into());
-    world.push(Sphere::new(Vec3::new(0.25, 0.1, -0.5), 0.1, blue.into()).into());
-    world.push(Sphere::new(Vec3::new(-0.1, 0.1, -0.1), 0.1, glass.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(0., 0.2, 0.),
+            0.03,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+    world.push(
+        Sphere::new(
+            Vec3::new(0.25, 0.1, 0.25),
+            0.1,
+            green.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+    world.push(
+        Sphere::new(
+            Vec3::new(0.25, 0.1, -0.5),
+            0.1,
+            blue.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
+    world.push(
+        Sphere::new(
+            Vec3::new(-0.1, 0.1, -0.1),
+            0.1,
+            glass.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
     world.push(
         Quad::new(
             Vec3::new(-1., 0., -1.),
@@ -681,6 +770,7 @@ pub fn create_quad_rotation_scene(
                 Vec3::new(100., 300., -500.),
                 50.,
                 DiffuseLight::new(15., 15., 15., None).into(),
+                &NopTransformer(),
             )
             .into(),
         ])
@@ -722,6 +812,7 @@ pub fn create_blend_material_scene(render_config: RenderConfig, blend_factor: f6
                 Vec3::new(0., 500., -200.),
                 50.,
                 DiffuseLight::new(15., 15., 15., None).into(),
+                &NopTransformer(),
             )
             .into(),
         ])
@@ -758,6 +849,7 @@ pub fn create_texture_mapping_scene(render_config: RenderConfig) -> Scene {
                 Vec3::new(0., 500., -200.),
                 50.,
                 DiffuseLight::new(15., 15., 15., None).into(),
+                &NopTransformer(),
             )
             .into(),
         ])
@@ -1102,6 +1194,7 @@ pub fn create_srgb_decode_scene(
             Vec3::new(0., 1.5, -0.2),
             0.25,
             DiffuseLight::new(12., 12., 12., None).into(),
+            &nop,
         )
         .into(),
     ];
@@ -1166,8 +1259,15 @@ pub fn create_rough_metal_scene(render_config: RenderConfig) -> Scene {
     // visible on every one of them.
     for (i, fuzz) in ROUGH_METAL_FUZZ.iter().enumerate() {
         let mat = Metal::new(SolidColor::new(0.9, 0.7, 0.3).into(), None, *fuzz);
-        world
-            .push(Sphere::new(rough_metal_sphere_center(i), ROUGH_METAL_RADIUS, mat.into()).into());
+        world.push(
+            Sphere::new(
+                rough_metal_sphere_center(i),
+                ROUGH_METAL_RADIUS,
+                mat.into(),
+                &nop,
+            )
+            .into(),
+        );
     }
 
     // One small light, high and slightly forward. Its solid angle from the
@@ -1293,8 +1393,15 @@ fn rough_glass_scene(
     // Beer-Lambert absorption is exactly a no-op.
     for (i, roughness) in ROUGH_GLASS_ROUGHNESS.iter().enumerate() {
         let mat = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, *roughness);
-        world
-            .push(Sphere::new(rough_glass_sphere_center(i), ROUGH_GLASS_RADIUS, mat.into()).into());
+        world.push(
+            Sphere::new(
+                rough_glass_sphere_center(i),
+                ROUGH_GLASS_RADIUS,
+                mat.into(),
+                &nop,
+            )
+            .into(),
+        );
     }
 
     world.push(
@@ -1341,7 +1448,13 @@ pub fn rough_glass_sphere_center(i: usize) -> Vec3 {
 pub fn create_furnace_scene(render_config: RenderConfig, material: Materials) -> Scene {
     Scene {
         world: Bvh::new(vec![
-            Sphere::new(FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, material).into(),
+            Sphere::new(
+                FURNACE_SPHERE_CENTER,
+                FURNACE_SPHERE_RADIUS,
+                material,
+                &NopTransformer(),
+            )
+            .into(),
         ])
         .into(),
         camera: CameraConfig {

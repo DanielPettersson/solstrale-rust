@@ -1420,6 +1420,7 @@ mod test {
     #[test]
     fn test_update_camera() {
         use crate::camera::CameraConfig;
+        use crate::geo::transformation::NopTransformer;
         use crate::geo::vec3::Vec3;
         use crate::hittable::{Bvh, Sphere};
         use crate::material::DiffuseLight;
@@ -1439,6 +1440,7 @@ mod test {
                 Vec3::new(0., 10., 0.),
                 1.,
                 DiffuseLight::new(1., 1., 1., None).into(),
+                &NopTransformer(),
             )
             .into(),
         );
@@ -1517,6 +1519,7 @@ mod test {
     #[test]
     fn test_gbuffer_direct_hit() {
         use crate::camera::CameraConfig;
+        use crate::geo::transformation::NopTransformer;
         use crate::geo::vec3::Vec3;
         use crate::hittable::{Bvh, Hittables, Sphere};
         use crate::material::texture::SolidColor;
@@ -1545,6 +1548,7 @@ mod test {
                 Vec3::new(0., 0., 0.),
                 0.5,
                 Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into(),
+                &NopTransformer(),
             )
             .into(),
             // The renderer requires a light. Far outside the 20 degree frustum,
@@ -1553,6 +1557,7 @@ mod test {
                 Vec3::new(0., 100., 0.),
                 20.,
                 DiffuseLight::new(10., 10., 10., None).into(),
+                &NopTransformer(),
             )
             .into(),
         ];
@@ -1680,6 +1685,7 @@ mod test {
                 Vec3::new(0., 0., 8.),
                 0.5,
                 Lambertian::new(SolidColor::new(1., 1., 0.).into(), None).into(),
+                &NopTransformer(),
             )
             .into(),
             // Off to the side of both the view ray and its reflection.
@@ -1687,6 +1693,7 @@ mod test {
                 Vec3::new(0., 100., 0.),
                 20.,
                 DiffuseLight::new(10., 10., 10., None).into(),
+                &NopTransformer(),
             )
             .into(),
         ];

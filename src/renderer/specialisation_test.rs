@@ -73,12 +73,14 @@ fn every_feature_scene() -> Scene {
             Vec3::new(-0.8, 0.6, 0.),
             0.6,
             Metal::new(SolidColor::new(0.9, 0.8, 0.7).into(), None, 0.2).into(),
+            &nop,
         )
         .into(),
         Sphere::new(
             Vec3::new(0.8, 0.6, 0.),
             0.6,
             Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.).into(),
+            &nop,
         )
         .into(),
         // Rough glass as well as smooth, so the bit-identical invariant covers
@@ -88,6 +90,7 @@ fn every_feature_scene() -> Scene {
             Vec3::new(1.9, 0.45, 0.6),
             0.45,
             Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.35).into(),
+            &nop,
         )
         .into(),
         Triangle::new(

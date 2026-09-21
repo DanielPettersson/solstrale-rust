@@ -811,6 +811,7 @@ pub(crate) fn pack_oct(n: Vec3) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::geo::transformation::NopTransformer;
     use crate::geo::vec3::Vec3;
     use crate::hittable::LEAF_FLAG;
     use crate::hittable::{Bvh, Hittables, Sphere};
@@ -865,6 +866,7 @@ mod tests {
                     1.,
                     Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, ior, roughness)
                         .into(),
+                    &NopTransformer(),
                 )
                 .into()
             })
@@ -1075,7 +1077,7 @@ mod tests {
     fn test_flatten_scene_simple() {
         let mat =
             Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
-        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat);
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat, &NopTransformer());
         let scene = Scene {
             world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
             camera: Default::default(),
@@ -1109,7 +1111,7 @@ mod tests {
     fn test_flatten_scene_nested_bvh() {
         let mat =
             Materials::Lambertian(Lambertian::new(SolidColor::new(1.0, 0.0, 0.0).into(), None));
-        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat.clone());
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat.clone(), &NopTransformer());
 
         let mut sub_world: Vec<Hittables> = Vec::new();
         sub_world.push(Hittables::Sphere(sphere.clone()));
@@ -1141,7 +1143,7 @@ mod tests {
             Materials::Lambertian(Lambertian::new(SolidColor::new(0.0, 0.0, 1.0).into(), None));
         let blend_mat = Materials::Blend(Blend::new(mat1, mat2, 0.5));
 
-        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, blend_mat);
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, blend_mat, &NopTransformer());
         let scene = Scene {
             world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
             camera: Default::default(),
@@ -1190,7 +1192,7 @@ mod tests {
         let img = Arc::new(RgbImage::new(100, 100));
         let mat = Materials::Lambertian(Lambertian::new(ImageMap::new(img).into(), None));
 
-        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat);
+        let sphere = Sphere::new(Vec3::new(0., 0., -2.), 1.0, mat, &NopTransformer());
         let scene = Scene {
             world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(sphere)])),
             camera: Default::default(),
@@ -1226,6 +1228,7 @@ mod tests {
                 Vec3::new(0., 0., -2.),
                 1.0,
                 mat,
+                &NopTransformer(),
             ))])),
             camera: Default::default(),
             background_color: Default::default(),
@@ -1293,6 +1296,7 @@ mod tests {
                 Vec3::new(0., 0., -2.),
                 1.,
                 Lambertian::new(ImageMap::new(half_white_image()).into(), None).into(),
+                &NopTransformer(),
             )),
             Hittables::Sphere(Sphere::new(
                 Vec3::new(3., 0., -2.),
@@ -1302,6 +1306,7 @@ mod tests {
                     attenuation_factor: None,
                 }
                 .into(),
+                &NopTransformer(),
             )),
         ];
         let data = flatten_scene(&Scene {
