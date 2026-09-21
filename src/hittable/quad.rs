@@ -132,14 +132,6 @@ impl Hittable for Quad {
         &self.b_box
     }
 
-    fn get_lights(&self) -> Vec<Hittables> {
-        if self.mat.is_light() {
-            vec![self.clone().into()]
-        } else {
-            vec![]
-        }
-    }
-
     fn has_lights(&self) -> bool {
         self.mat.is_light()
     }

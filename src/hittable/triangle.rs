@@ -2,7 +2,7 @@ use crate::geo::Aabb;
 use crate::geo::Uv;
 use crate::geo::transformation::Transformer;
 use crate::geo::vec3::{UNIT_Y, Vec3};
-use crate::hittable::{Hittable, Hittables};
+use crate::hittable::Hittable;
 use crate::material::{Material, Materials};
 
 /// A triangle-shaped hittable object
@@ -171,14 +171,6 @@ impl Triangle {
 impl Hittable for Triangle {
     fn bounding_box(&self) -> &Aabb {
         &self.b_box
-    }
-
-    fn get_lights(&self) -> Vec<Hittables> {
-        if self.mat.is_light() {
-            vec![self.clone().into()]
-        } else {
-            vec![]
-        }
     }
 
     fn has_lights(&self) -> bool {

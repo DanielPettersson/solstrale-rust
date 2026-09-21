@@ -632,10 +632,6 @@ impl Hittable for Bvh {
         &self.b_box
     }
 
-    fn get_lights(&self) -> Vec<Hittables> {
-        self.prims.iter().flat_map(|p| p.get_lights()).collect()
-    }
-
     fn has_lights(&self) -> bool {
         self.prims.iter().any(|p| p.has_lights())
     }

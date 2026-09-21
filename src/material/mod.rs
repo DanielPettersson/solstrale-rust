@@ -19,6 +19,9 @@ pub trait Material {
 }
 
 #[derive(Default)]
+#[deprecated(
+    note = "Unused since attenuation moved into the shader, which applies it from GpuMaterial.attenuation_factor. Nothing in the crate constructs or reads this, and it will be removed."
+)]
 /// A color along with attenuation information
 pub struct AttenuatedColor {
     /// Color value before attenuation
@@ -29,6 +32,7 @@ pub struct AttenuatedColor {
     pub accumulated_ray_length: f64,
 }
 
+#[allow(deprecated)]
 impl AttenuatedColor {
     /// Calculate the actual color based on the original color
     /// and the attenuation information

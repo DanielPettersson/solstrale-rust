@@ -21,13 +21,11 @@ pub trait Hittable {
     /// Create a bounding box that contains the hittable
     fn bounding_box(&self) -> &Aabb;
 
-    /// Is the hittable a light? Or does it contain any lights?
-    fn get_lights(&self) -> Vec<Hittables>;
-
     /// Does this hittable contain at least one light?
     ///
-    /// Exists so callers that only need a yes/no answer do not have to build
-    /// (and deep-clone into) the whole `get_lights` vector to ask.
+    /// Asked once, by `Renderer::new`, to reject a scene that can only render
+    /// black. The lights themselves are collected per primitive by the
+    /// flattener, off `Material::is_light`.
     fn has_lights(&self) -> bool;
 }
 
