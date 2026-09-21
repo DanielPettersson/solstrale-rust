@@ -42,10 +42,6 @@ struct FlattenCaches {
     /// roughness and angle are its two axes, so five glass spheres across the
     /// roughness range at 1.5 share one table and build it once.
     energy_offsets: HashMap<u64, u32, BuildHasherDefault<FxHasher>>,
-    /// Whether path regularisation is on, which is the one way a dielectric
-    /// that calls itself smooth still needs an energy table: the transport loop
-    /// widens its lobe at depth.
-    regularisation_on: bool,
 }
 
 /// The multiply-xor hash rustc uses internally, over 64-bit words.
@@ -164,10 +160,7 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         prim_refs_are_identity: false,
     };
 
-    let mut caches = FlattenCaches {
-        regularisation_on: scene.render_config.regularisation > 0.,
-        ..Default::default()
-    };
+    let mut caches = FlattenCaches::default();
     let mut unique_textures: Vec<Arc<RgbImage>> = Vec::new();
     collect_unique_textures(&scene.world, &mut unique_textures);
 
@@ -677,7 +670,7 @@ fn add_material(
     // Built once per distinct index of refraction, and only when something can
     // make the lobe rough. Interned before the material is, so two dielectrics
     // of the same index stay one material as well as one table.
-    let energy_offset = if mat_type == MAT_DIELECTRIC && (fuzz > 0. || caches.regularisation_on) {
+    let energy_offset = if mat_type == MAT_DIELECTRIC && fuzz > 0. {
         let key = (ref_idx as f64).to_bits();
         match caches.energy_offsets.get(&key) {
             Some(&offset) => offset,
@@ -842,15 +835,15 @@ mod tests {
 
     /// A scene of glass spheres, one per (index, roughness) pair, over nothing
     /// else. Only the material table is of interest here.
-    fn flatten_glass(roughness: f64, regularisation: f64) -> SceneData {
-        flatten_glass_spheres(&[(1.5, roughness)], regularisation)
+    fn flatten_glass(roughness: f64) -> SceneData {
+        flatten_glass_spheres(&[(1.5, roughness)])
     }
 
     fn flatten_glass_pair(n1: f64, r1: f64, n2: f64, r2: f64) -> SceneData {
-        flatten_glass_spheres(&[(n1, r1), (n2, r2)], 0.)
+        flatten_glass_spheres(&[(n1, r1), (n2, r2)])
     }
 
-    fn flatten_glass_spheres(glass: &[(f64, f64)], regularisation: f64) -> SceneData {
+    fn flatten_glass_spheres(glass: &[(f64, f64)]) -> SceneData {
         let world: Vec<Hittables> = glass
             .iter()
             .enumerate()
@@ -875,10 +868,7 @@ mod tests {
                 up: Vec3::new(0., 1., 0.),
             },
             background_color: Vec3::new(1., 1., 1.),
-            render_config: RenderConfig {
-                regularisation,
-                ..Default::default()
-            },
+            render_config: RenderConfig::default(),
         })
     }
 
@@ -888,27 +878,18 @@ mod tests {
     /// material -- half a million evaluations of the microfacet model -- and it
     /// is wasted on a scene whose glass is smooth, which is every scene that
     /// predates the microfacet dielectric. The shader agrees:
-    /// `has_rough_dielectrics` is false under the same conditions and compiles
+    /// `has_rough_dielectrics` is false under the same condition and compiles
     /// out the arm that would read it.
-    ///
-    /// The three cases are the three ways the answer is reached: nothing to
-    /// build for, a material that asks, and regularisation asking on a
-    /// material's behalf.
     #[test]
-    fn a_table_is_built_only_when_a_dielectric_can_be_rough() {
+    fn a_table_is_built_only_for_a_rough_dielectric() {
         assert!(
-            flatten_glass(0., 0.).dielectric_energy.is_empty(),
-            "smooth glass with no regularisation built a table it can never read"
+            flatten_glass(0.).dielectric_energy.is_empty(),
+            "smooth glass built a table it can never read"
         );
         assert_eq!(
             ENERGY_TABLE_LEN,
-            flatten_glass(0.3, 0.).dielectric_energy.len(),
+            flatten_glass(0.3).dielectric_energy.len(),
             "a rough dielectric needs both halves of one table"
-        );
-        assert_eq!(
-            ENERGY_TABLE_LEN,
-            flatten_glass(0., 0.4).dielectric_energy.len(),
-            "regularisation widens smooth glass at depth, so it needs a table too"
         );
     }
 

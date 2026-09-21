@@ -425,18 +425,6 @@ override has_normal_maps: bool = true;
 // without editing this file.
 override nee_enabled: bool = true;
 
-// Path regularisation: the GGX alpha every lobe is floored at once the path
-// has scattered off something that was not a Dirac delta. `RenderConfig`
-// squares it out of a perceptual roughness before it gets here.
-//
-// An override rather than a uniform for the same reason `low_discrepancy` is:
-// at 0 -- the default, and what every scene that does not ask for it compiles
-// against -- the `max()` in the transport loop folds away entirely.
-//
-// It also decides `has_rough_dielectrics`, since what it widens first is
-// glass. See `Specialisation::constants`.
-override regularisation_alpha: f32 = 0.0;
-
 // Selects the sampler backing: 1 draws from an Owen-scrambled Sobol sequence,
 // 0 from white noise. An override rather than a uniform because an override is
 // resolved at pipeline creation, where a uniform would cost a branch on every
@@ -2508,12 +2496,6 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     var prev_specular = true;
     var prev_bsdf_pdf = 0.0;
 
-    // The roughness floor path regularisation imposes, zero until the path has
-    // scattered off a lobe that was not a delta. Zero at the camera is what
-    // keeps directly visible glass perfectly sharp, and everything seen
-    // through it with it.
-    var min_alpha = 0.0;
-
     for (var depth = 0u; depth < config.max_depth; depth++) {
         // This bounce's three pairs. Fixed slots, so a bounce that skips a draw
         // leaves a gap rather than shifting everything after it.
@@ -2567,22 +2549,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
             break;
         }
 
-        var b = bsdf_from_surface(surface, rec.front_face);
+        let b = bsdf_from_surface(surface, rec.front_face);
         if (b.kind == BSDF_NONE) { break; }
-        // Path regularisation, applied to the vertex rather than inside any
-        // lobe: `bsdf_is_specular`, `bsdf_eval` and `bsdf_sample` then agree
-        // about this vertex automatically, which is the whole reason the BSDF
-        // layer exists.
-        //
-        // What this reaches is the caustic, and not in the obvious way. The
-        // path is camera -> floor -> glass(enter) -> glass(exit) -> light. A
-        // shadow ray from the *entry* interface is blocked by the far side of
-        // the ball whatever its lobe looks like -- `leaf_occluded` treats glass
-        // as opaque -- so regularising that vertex buys nothing on its own. The
-        // path refracts through, and it is at the **exit** interface, where the
-        // widened lobe faces an unobstructed half-space, that the shadow ray
-        // finally finds the light. The obstacle was the occlusion, not the BSDF.
-        b.alpha = max(b.alpha, min_alpha);
         let wo = -normalize(r.direction);
 
         // --- Direct lighting (next-event estimation) ---
@@ -2625,10 +2593,6 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         throughput *= s.weight;
         prev_bsdf_pdf = s.pdf;
         prev_specular = s.specular;
-        // Once the path has left a lobe with width, it has lost the coherence
-        // that made a sharp image worth keeping, and every vertex after this
-        // one is regularised.
-        if (!s.specular) { min_alpha = max(min_alpha, regularisation_alpha); }
         r = Ray(rec.p, s.wi);
 
         let max_throughput = max(throughput.x, max(throughput.y, throughput.z));

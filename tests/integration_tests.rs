@@ -12,7 +12,7 @@ use solstrale::camera::CameraConfig;
 use solstrale::geo::transformation::{
     NopTransformer, RotationX, RotationY, RotationZ, Transformations, Transformer,
 };
-use solstrale::geo::vec3::{Vec3, ZERO_VECTOR};
+use solstrale::geo::vec3::Vec3;
 use solstrale::hittable::{Bvh, Hittables, Quad, Sphere, Triangle};
 use solstrale::material::texture::{ImageMap, SolidColor, Textures};
 use solstrale::material::{Dielectric, DiffuseLight, Lambertian, Metal};
@@ -24,9 +24,8 @@ use solstrale::renderer::{RenderConfig, Renderer, Scene};
 use solstrale::util::rgb_color::linear_to_srgb;
 
 use crate::scenes::{
-    CAUSTIC_SPHERE_CENTER, CAUSTIC_SPHERE_RADIUS, FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS,
-    ROUGH_GLASS_RADIUS, ROUGH_GLASS_ROUGHNESS, ROUGH_METAL_FUZZ, ROUGH_METAL_RADIUS,
-    create_blend_material_scene, create_caustic_scene, create_cornell_scene,
+    FURNACE_SPHERE_CENTER, FURNACE_SPHERE_RADIUS, ROUGH_GLASS_RADIUS, ROUGH_GLASS_ROUGHNESS,
+    ROUGH_METAL_FUZZ, ROUGH_METAL_RADIUS, create_blend_material_scene, create_cornell_scene,
     create_cornell_stacked_lights_scene, create_furnace_scene, create_glass_slab_scene,
     create_light_attenuation_scene, create_many_lights_scene, create_normal_mapping_scene,
     create_normal_mapping_sphere_scene, create_obj_scene, create_obj_with_box,
@@ -2827,35 +2826,6 @@ fn sphere_disc_mask(
         .collect()
 }
 
-/// The pixels whose centre ray reaches the horizontal plane through `center`
-/// within `radius` of it.
-///
-/// The floor counterpart of `sphere_disc_mask`: what a caustic lands on is a
-/// patch of ground, not an object, and a rectangle guessed from the image
-/// would move with the camera.
-fn floor_disc_mask(
-    camera: &CameraConfig,
-    width: usize,
-    height: usize,
-    center: Vec3,
-    radius: f64,
-) -> Vec<bool> {
-    center_rays(camera, width, height)
-        .iter()
-        .map(|d| {
-            // Only rays heading down at the plane can reach it.
-            if d.y >= -1e-6 {
-                return false;
-            }
-            let t = (center.y - camera.look_from.y) / d.y;
-            if t <= 0. {
-                return false;
-            }
-            (camera.look_from + *d * t - center).length() < radius
-        })
-        .collect()
-}
-
 fn mask_union(masks: &[Vec<bool>]) -> Vec<bool> {
     let mut out = vec![false; masks[0].len()];
     for mask in masks {
@@ -3103,7 +3073,8 @@ const ROUGH_METAL_RMSE_BOUND: f64 = 0.35;
 /// this change does not touch, and what it is noisy *about* is a caustic: a
 /// glass ball is a lens, and a lens focusing a pinpoint is the one thing
 /// next-event estimation cannot help with, because a shadow ray has no chance
-/// of landing on a delta. `RenderConfig::regularisation` is what reaches that.
+/// of landing on a delta -- the limitation LIMITATIONS.md records under
+/// "Dielectrics block NEE shadow rays".
 ///
 /// **The golden harness cannot see this.** It downscales to 100x50 before
 /// comparing, which averages away exactly the defect being measured -- the
@@ -3409,208 +3380,4 @@ fn test_beer_lambert_absorption_follows_the_exponential() {
             );
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// #82: path regularisation
-// ---------------------------------------------------------------------------
-
-/// The caustic patch of [`create_caustic_scene`], and the ball that throws it.
-///
-/// A floor disc minus the ball's own pixels: the disc is where the light the
-/// ball focuses lands, and a pixel looking at the ball would otherwise be
-/// counted as the floor behind it.
-fn caustic_masks(camera: &CameraConfig, width: usize, height: usize) -> (Vec<bool>, Vec<bool>) {
-    let ball = |shrink| {
-        sphere_disc_mask(
-            camera,
-            width,
-            height,
-            CAUSTIC_SPHERE_CENTER,
-            CAUSTIC_SPHERE_RADIUS,
-            shrink,
-        )
-    };
-    let floor = floor_disc_mask(camera, width, height, ZERO_VECTOR, 1.6);
-    let patch = floor
-        .iter()
-        .zip(ball(1.))
-        .map(|(f, b)| *f && !b)
-        .collect::<Vec<_>>();
-    (patch, ball(0.9))
-}
-
-/// What path regularisation buys, and what it costs, measured apart from each
-/// other.
-///
-/// Apart, because they do not show up in the same number. The issue this
-/// implements proposed one measurement -- error against an unregularised
-/// reference, which must fall -- and on this scene it does not fall at any
-/// level, because a widened lobe replaces the caustic's *noise* with the
-/// caustic's *blur* and an RMSE against the truth counts both. Measured at
-/// 300x200, 64 spp for the noise column and 2048 spp for the bias:
-///
-/// ```text
-/// regularisation            0      0.15    0.3     0.5     0.8
-/// noise, 64 spp           1.290   1.311   0.811   0.311   0.137
-/// bias, caustic patch     -0.3%   -1.4%   -4.5%   -7.9%  -13.3%
-/// bias, whole frame       -0.0%   -0.3%   -1.0%   -2.3%   -4.1%
-/// error vs. the truth     1.290   1.259   1.304   1.847   2.341
-/// ```
-///
-/// The mechanism works: at 0.5 the noise is a quarter of what it was, and the
-/// path it comes down is the one the shader comment describes -- the shadow ray
-/// that finds the light is cast from the *exit* interface, because the entry
-/// one is blocked by the ball's own far side. The last row is what that costs
-/// in the image, and it is why the default is 0 and why picking one is a
-/// separate decision: around 0.3 the trade is even, below it the noise does not
-/// move, above it the blur wins.
-///
-/// So the noise is measured as two independent 64 spp renders of the same arm,
-/// which share whatever bias that arm has and cancel it; the bias is measured
-/// separately as a converged mean against the unregularised reference. A test
-/// that only showed one of the two would pass for a change that merely blurred
-/// the image, which is the trap the issue correctly names.
-///
-/// Part of the bias is not the blur at all. A widened lobe invokes the
-/// single-scatter energy loss recorded in LIMITATIONS.md, which smooth glass
-/// never pays: a furnace at roughness 0.5 reads 0.8502. That is why the
-/// whole-frame row is not zero, and why Turquin compensation for the dielectric
-/// would pay off here as well as on rough glass.
-#[test]
-fn test_regularisation_cleans_the_caustic() {
-    let (device, queue) = get_wgpu_device_and_queue();
-
-    const WIDTH: usize = 300;
-    const HEIGHT: usize = 200;
-    let config = |samples_per_pixel, regularisation| RenderConfig {
-        width: WIDTH,
-        height: HEIGHT,
-        samples_per_pixel,
-        // Off: a retired pixel holds whatever mean it had when it retired, and
-        // both halves of this are measurements of noise or of a mean.
-        min_samples_per_pixel: u32::MAX,
-        regularisation,
-        ..Default::default()
-    };
-    let scene = |spp, reg| create_caustic_scene(config(spp, reg));
-
-    let (patch, _) = caustic_masks(&scene(1, 0.).camera, WIDTH, HEIGHT);
-    let reference = render_linear(as_reference(scene(4096, 0.)), device, queue);
-    let reference_mean = masked_mean(&reference, &patch);
-
-    // Two renders of the same arm, differing only in seed. Their RMSE is
-    // sqrt(2) times one render's own error against the arm's converged image,
-    // whatever that image is -- so it measures variance and nothing else.
-    let noise = |reg: f64| {
-        let a = render_linear(scene(64, reg), device, queue);
-        let b = render_linear(as_reference(scene(64, reg)), device, queue);
-        masked_linear_rmse(&a, &b, &patch) / (reference_mean * std::f64::consts::SQRT_2)
-    };
-
-    let off = noise(0.);
-    let on = noise(REGULARISATION_UNDER_TEST);
-    println!(
-        "caustic noise at 64 spp: {off:.4} unregularised, {on:.4} at {REGULARISATION_UNDER_TEST}"
-    );
-
-    assert!(
-        on * 3. < off,
-        "regularisation at {REGULARISATION_UNDER_TEST} left the caustic at {on:.4} of the \
-         unregularised {off:.4}, less than the threefold reduction it is here for"
-    );
-    assert!(
-        on < CAUSTIC_NOISE_BOUND,
-        "caustic noise at {REGULARISATION_UNDER_TEST} is {on:.4}, past the pinned \
-         {CAUSTIC_NOISE_BOUND}"
-    );
-
-    // The other half: what the widened lobe does to the converged image. 2048
-    // spp rather than 64, so this is the bias and not the noise above.
-    let converged = render_linear(scene(2048, REGULARISATION_UNDER_TEST), device, queue);
-    let bias = masked_mean(&converged, &patch) / reference_mean - 1.;
-    println!(
-        "caustic patch converges {:+.2}% from unregularised",
-        bias * 100.
-    );
-
-    assert!(
-        bias.abs() < CAUSTIC_BIAS_BOUND,
-        "regularisation at {REGULARISATION_UNDER_TEST} moves the converged caustic patch by \
-         {:+.2}%, past the pinned {:.0}%",
-        bias * 100.,
-        CAUSTIC_BIAS_BOUND * 100.
-    );
-}
-
-/// Not a recommended default -- there is none yet, and the config ships at 0.
-/// It is the level at which the effect is large enough for a bound to mean
-/// something: a quarter of the noise, for 8% of the patch's energy.
-const REGULARISATION_UNDER_TEST: f64 = 0.5;
-/// Pinned above the 0.311 measured, against the 1.290 the same scene scores
-/// unregularised.
-const CAUSTIC_NOISE_BOUND: f64 = 0.45;
-/// Pinned above the 7.9% measured. This is the bound on the bias, and it is the
-/// half of the test that stops a change which merely blurred the image from
-/// passing.
-const CAUSTIC_BIAS_BOUND: f64 = 0.12;
-
-/// Glass the camera looks at directly is left alone, however hard the rest of
-/// the frame is regularised.
-///
-/// `min_alpha` is 0 at depth 0 and rises only after a lobe that was not a
-/// delta, so the first glass interface -- and the second, and the floor seen
-/// through both -- stays exactly as sharp as it was. That is the property that
-/// makes the feature safe to turn on at all, and nothing else in the suite
-/// holds it: a `min_alpha` initialised to the configured level instead of to
-/// zero would frost every glass surface in the frame and every other test here
-/// would still pass.
-///
-/// Measured at 2048 spp against the unregularised image, at the strongest
-/// setting anyone would use: the ball's own pixels move -1.8%, while the
-/// caustic patch behind it moves -13.1%. The second assert is what stops the
-/// first from passing vacuously -- if regularisation did nothing at all, the
-/// ball would be unchanged for the wrong reason.
-#[test]
-fn test_regularisation_leaves_the_direct_view_sharp() {
-    let (device, queue) = get_wgpu_device_and_queue();
-
-    const WIDTH: usize = 300;
-    const HEIGHT: usize = 200;
-    let scene = |regularisation| {
-        create_caustic_scene(RenderConfig {
-            width: WIDTH,
-            height: HEIGHT,
-            samples_per_pixel: 2048,
-            min_samples_per_pixel: u32::MAX,
-            regularisation,
-            ..Default::default()
-        })
-    };
-
-    let (patch, ball) = caustic_masks(&scene(0.).camera, WIDTH, HEIGHT);
-    let off = render_linear(scene(0.), device, queue);
-    let on = render_linear(scene(0.8), device, queue);
-
-    let shift = |mask: &[bool]| masked_mean(&on, mask) / masked_mean(&off, mask) - 1.;
-    let ball_shift = shift(&ball);
-    let patch_shift = shift(&patch);
-    println!(
-        "regularisation 0.8 moves the ball {:+.2}% and the caustic patch {:+.2}%",
-        ball_shift * 100.,
-        patch_shift * 100.
-    );
-
-    assert!(
-        ball_shift.abs() < 0.04,
-        "regularisation moved the directly visible glass by {:+.2}%; depth 0 is supposed to be \
-         untouched",
-        ball_shift * 100.
-    );
-    assert!(
-        patch_shift.abs() > 0.08,
-        "the caustic patch moved only {:+.2}%, so the assert above passed because regularisation \
-         did nothing, not because depth 0 is exempt",
-        patch_shift * 100.
-    );
 }

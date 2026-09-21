@@ -193,60 +193,10 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   half-space beyond it is unobstructed. At the *entry* interface of a closed
   object the object's own far side blocks every shadow ray, so only the exit
   interface can take one; a rough glass ball is lit by direct light on the way
-  out, not on the way in. `RenderConfig::regularisation` is what reaches the
-  caustic, and it reaches it through that exit interface rather than the entry
-  one — see below.
-- **Path regularisation is biased by construction, and off by default.**
-  `RenderConfig::regularisation` floors the GGX alpha of every lobe a path
-  meets after it has already scattered off one with width. What it buys is the
-  caustic: camera → floor → glass(enter) → glass(exit) → light is specular at
-  every vertex but the first, so nothing along it can take a shadow ray and the
-  whole caustic is left to chance. What it costs is that the widened lobes are
-  not the lobes the scene describes. Measured on `create_caustic_scene` at
-  300x200:
-
-  ```text
-  regularisation       0     0.15    0.2    0.25    0.3     0.4     0.5
-  noise, 64 spp      1.213  1.196  1.088  0.938  0.793   0.533   0.389
-  bias, patch        +0.1%  -1.1%  -1.9%  -2.8%  -3.1%   -2.6%   -0.8%
-  error vs. truth    1.214  1.208  1.188  1.141  1.189   1.448   1.705
-  ```
-
-  The noise row is four seed-pairs of the same arm averaged, which cancels
-  whatever bias that arm has; the bias row is a converged mean against an
-  unregularised reference. The last row is the sum of the two, and it has a
-  minimum: at 0.25 the technique is worth 6% of the total error on the scene
-  built to show it off. Below 0.2 the noise barely moves and above 0.3 the blur
-  costs more than the noise it removes.
-
-  **It is still not worth turning on by default, and the reason is the clock
-  rather than the bias.** Three measurements decide it.
-
-  It does nothing on an ordinary scene. `create_specular_scene` and
-  `create_test_scene` — a mirror sphere, a glass sphere, a textured floor —
-  move by 2% of their noise and under 0.2% of their mean at 0.3. Those scenes
-  have no caustic worth the name, so there is nothing for it to find.
-
-  It costs 20% to 40% of the render, on every scene containing glass:
-  `test_scene` 0.502 s → 0.633 s, `create_specular_scene` 0.380 s → 0.456 s,
-  `create_caustic_scene` 0.221 s → 0.311 s at 800x600, 64 spp. Most of that is
-  not the technique. At `regularisation = 0.01` the floor is below
-  `GGX_ALPHA_MIN`, so every lobe stays exactly as Dirac as it was and the image
-  is unchanged — and `test_scene` still costs 0.608 s. 21 of the 26 points are
-  the microfacet dielectric arm being compiled in, which
-  `has_rough_dielectrics` otherwise keeps out; only 5 are the shadow rays the
-  widened lobes actually cast.
-
-  And the same wall clock buys more, spent on samples. On the caustic patch at
-  64 spp the error is 1.214 plain and 1.141 regularised at 0.25, for ~40% more
-  time. Ninety samples per pixel — the same ~40% — gives 1.019. More samples
-  wins on the scene regularisation was built for, and it wins without the bias.
-
-  So it stays a knob. What would change the answer is making it cheap: the
-  21-point compile-time cost is paid by every glass scene whether or not the
-  value is large enough to do anything, and a specialisation that knew the
-  floor was below `GGX_ALPHA_MIN` would drop it to the 5 points the technique
-  actually needs.
+  out, not on the way in. A caustic is therefore still carried entirely by
+  BSDF-sampled paths, and path regularisation — which would have given those
+  paths a density to aim with — was built, measured and removed; see
+  "Deliberately declined".
 - **The dielectric's multiple scattering is a table, not a fit.** Single-
   scatter GGX drops every ray a microfacet sends onto another microfacet, and
   uncompensated a white 1.5 ball read 1.0000 / 0.9942 / 0.8502 / 0.5805 /
@@ -433,6 +383,51 @@ Correct but imperfect; documented so they read as choices rather than bugs.
 ## Deliberately declined
 
 Recorded so they aren't reconsidered without new information.
+
+- **Path regularisation.** Built, measured and removed (the code is in git,
+  under "Path regularisation, so a caustic can take a shadow ray"). It floored
+  the GGX alpha of every lobe a path met after it had already scattered off one
+  with width, which gives a caustic's specular chain a density to aim a shadow
+  ray with. The mechanism worked, and through the route that is not the obvious
+  one: the shadow ray that finds the light is cast from the glass's *exit*
+  interface, because the entry one is blocked by the object's own far side.
+
+  On `create_caustic_scene` at 300x200, four seed-pairs averaged:
+
+  ```text
+  regularisation       0     0.15    0.2    0.25    0.3     0.4     0.5
+  noise, 64 spp      1.213  1.196  1.088  0.938  0.793   0.533   0.389
+  bias, patch        +0.1%  -1.1%  -1.9%  -2.8%  -3.1%   -2.6%   -0.8%
+  error vs. truth    1.214  1.208  1.188  1.141  1.189   1.448   1.705
+  ```
+
+  Total error has a minimum at 0.25, worth 6% on the scene built to show it off.
+  That was the best case, and it was not enough against three things.
+
+  It does nothing on an ordinary scene: `create_specular_scene` and
+  `create_test_scene` moved by 2% of their noise and under 0.2% of their mean
+  at 0.3.
+
+  It cost 20% to 40% of the render on every scene containing glass —
+  `test_scene` 0.502 s → 0.633 s, `create_specular_scene` 0.380 s → 0.456 s,
+  `create_caustic_scene` 0.221 s → 0.311 s at 800x600, 64 spp — and most of
+  that was not the technique. At `regularisation = 0.01` the floor sat below
+  `GGX_ALPHA_MIN`, so every lobe stayed exactly as Dirac as it was and the image
+  did not change, and `test_scene` still cost 0.608 s: 21 of the 26 points were
+  the microfacet dielectric arm being compiled in, which `has_rough_dielectrics`
+  otherwise keeps out, and only 5 were the shadow rays the widened lobes cast.
+
+  And the same wall clock bought more spent on samples. On the caustic patch at
+  64 spp the error was 1.214 plain and 1.141 regularised at 0.25, for ~40% more
+  time; 90 spp plain — the same ~40% — gave 1.019. More samples won on the
+  scene regularisation was built for, and won without the bias.
+
+  What would change the answer is making the 21 points go away: a
+  specialisation that noticed the floor was below `GGX_ALPHA_MIN` would leave
+  the arm out, and at 5% the samples comparison is close rather than lost. A
+  scene whose caustics genuinely dominate the frame would also argue
+  differently; `create_caustic_scene` was as favourable as one could be built
+  and it still lost.
 
 - **A second step-1 à-trous pass.** The obvious lever once the cascade's outer
   iterations were found to be idle, and unnecessary once they were not. Every
