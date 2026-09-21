@@ -496,14 +496,14 @@ pub fn adaptive_sampling_benchmark(c: &mut Criterion) {
 /// high spp. The `none` arm is what makes the numbers mean anything, since
 /// `render_and_sync` also times scene upload and readback.
 ///
-/// Every arm but `preview` runs with [`RenderConfig::preview`] off, so the
-/// chain runs once, on the last batch -- which is what "the cost of the chain"
-/// has always meant here. The `preview` arm is the same chain with it on: it
-/// then runs on every batch, and the difference between the two is what a batch
-/// renderer pays for previews nobody reads. The interactive side of the same
-/// trade is `interactive_restart_frame_cost` in `tests/interactive_test.rs`,
-/// which this benchmark cannot see -- it renders one accumulation to the end,
-/// and a drag never gets there.
+/// Every arm but `preview` runs the chain once, on the last batch, which is the
+/// default and what "the cost of the chain" has always meant here. The
+/// `preview` arm is the same chain with [`RenderConfig::preview`] on: it then
+/// runs on every batch, and the difference between the two is what a viewport
+/// pays to have every frame filtered. The interactive side of the same trade is
+/// `interactive_restart_frame_cost` in `tests/interactive_test.rs`, which this
+/// benchmark cannot see -- it renders one accumulation to the end, and a drag
+/// never gets there.
 ///
 /// The processors are built once, outside the setup closure. `PostProcessors` is
 /// `Clone` and wgpu handles are refcounted, so cloning reuses the pipelines --
@@ -665,16 +665,12 @@ pub fn post_benchmark(c: &mut Criterion) {
                 b.iter_with_setup(
                     || {
                         // Same size and sample count as `denoise_benchmark`, so
-                        // the two groups' `none` arms are the same measurement
-                        // -- which includes `preview`, since saturation is a
-                        // preview processor and would otherwise run per batch
-                        // here and once there.
+                        // the two groups' `none` arms are the same measurement.
                         create_test_scene(RenderConfig {
                             samples_per_pixel: 16,
                             width: 800,
                             height: 600,
                             post_processors: processor.clone().into_iter().collect(),
-                            preview: false,
                             ..RenderConfig::default()
                         })
                     },

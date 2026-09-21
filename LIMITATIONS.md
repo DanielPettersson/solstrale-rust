@@ -1007,7 +1007,7 @@ so the blur is linear in the kernel as expected and bloom's fixed cost is
 0.39 ms, the five à-trous iterations 1.46 ms and the resolve 0.13 ms.
 
 **What the live viewer costs**, same scene and size, 16 spp, from
-`gpu_pass_timings`. The `denoise_preview` arm is the default chain with
+`gpu_pass_timings`. The `denoise_preview` arm is the same chain with
 `RenderConfig::preview` on, so the filter runs on every batch instead of on the
 last one:
 
@@ -1016,10 +1016,12 @@ last one:
 | denoise, 5 iterations | 32.92 ms | 8 | 2.41 ms | 6.8% |
 | denoise, preview | 33.04 ms | 32 | 8.01 ms | 19.4% |
 
-So a batch render with a denoiser in the chain and nobody watching pays about a
-sixth of its time for previews nobody reads, which is what the flag is for. It
-is not a per-sample cost: the filter is per pixel, so its share falls as the
-batch size rises and grows as the resolution does.
+A sixth of the render, charged per batch whether or not anyone reads a batch,
+which is why the flag is off by default and why a viewport has to ask for it.
+It is not a per-sample cost: the filter is per pixel, so its share falls as the
+batch size rises and grows as the resolution does. A viewport renders one batch
+per frame and reads every one of them, so there the same arithmetic runs the
+other way.
 
 **The interactive path is not on any benchmark.** Every render benchmark traces
 one accumulation to the end and so sees exactly one restart against thousands

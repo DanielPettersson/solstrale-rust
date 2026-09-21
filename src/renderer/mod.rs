@@ -252,20 +252,25 @@ pub struct RenderConfig {
     /// Whether the post-processors that declare themselves preview processors
     /// run on every batch, or only on the last one.
     ///
-    /// On, the default: the image published on [`RenderProgress`] is a
-    /// processed image at every batch rather than only at the end. The case
-    /// this exists for is a camera drag, which restarts the accumulation on
-    /// every frame and so never reaches a last batch at all -- the one regime
-    /// a denoiser is built for was the one regime it never ran in.
+    /// Off, the default: the chain runs once, on the final batch, as it always
+    /// did. The buffer published on [`RenderProgress`] still follows the
+    /// accumulation, it is just raw until the end.
     ///
-    /// Off: the chain runs once, on the final batch, as it always did. The
-    /// published buffer still follows the accumulation, it is just raw until
-    /// the end. That is for a batch render with nobody watching, and what it
-    /// saves is one run of the preview processors per batch. The only expensive
-    /// one is the denoiser, measured on a Radeon RX 5700 XT at 800x600 as 1.8
-    /// ms of GPU time per batch against the 12 ms a batch of samples is sized
-    /// to fill -- so a denoised batch render pays something like a sixth of its
-    /// time for previews nobody reads.
+    /// On: every batch gets a processed image. **Turn this on for an
+    /// interactive viewport**, which is the case it exists for -- a camera drag
+    /// restarts the accumulation on every frame and so never reaches a last
+    /// batch at all, which made the one regime a denoiser is built for the one
+    /// regime it never ran in. A drag frame on `create_test_scene` at 800x600
+    /// goes from 2.7 ms to 4.8 ms and stops being a one-sample image; see
+    /// `interactive_restart_frame_cost` in `tests/interactive_test.rs`.
+    ///
+    /// Default off because the cost is charged per batch whether or not anyone
+    /// is looking. The only expensive preview processor is the denoiser,
+    /// measured on a Radeon RX 5700 XT at 800x600 as 1.8 ms of GPU time per
+    /// batch against the 12 ms a batch of samples is sized to fill, so a
+    /// denoised batch render would pay something like a sixth of its time for
+    /// previews nobody reads. A viewport renders one batch per frame and reads
+    /// every one of them; a batch render reads the last.
     ///
     /// Which processors those are is [`crate::post::PostProcessor::preview`]:
     /// the denoiser and the saturation grade, not bloom. Nothing about the
@@ -288,7 +293,7 @@ impl Default for RenderConfig {
             low_discrepancy: true,
             seed: 0,
             post_processors: vec![],
-            preview: true,
+            preview: false,
         }
     }
 }
