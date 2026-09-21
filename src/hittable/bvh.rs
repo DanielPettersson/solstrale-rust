@@ -29,11 +29,16 @@ const PARALLEL_CUTOFF: usize = 8192;
 pub(crate) const LEAF_FLAG: u32 = 0x8000_0000;
 /// Leaf primitive count, bits 30..24.
 const LEAF_COUNT_SHIFT: u32 = 24;
+/// Mask for the leaf primitive count once shifted down.
+const LEAF_COUNT_MASK: u32 = 0x7F;
 /// Leaf primitive offset, bits 23..0.
 const LEAF_OFFSET_MASK: u32 = 0x00FF_FFFF;
 
 /// Largest scene the leaf encoding can address.
 pub const MAX_PRIMITIVES: usize = LEAF_OFFSET_MASK as usize;
+
+/// A leaf's count has to fit the seven bits the encoding gives it.
+const _: () = assert!(MAX_LEAF_PRIMS as u32 <= LEAF_COUNT_MASK);
 
 /// Entries in the GPU traversal stack (`traversal_stack` in `ray_trace.wgsl`).
 ///
@@ -590,8 +595,13 @@ mod tests {
     use crate::geo::transformation::NopTransformer;
     use crate::geo::vec3::Vec3;
     use crate::hittable::Triangle;
+    use crate::loader::Loader;
+    use crate::loader::obj::Obj;
     use crate::material::Lambertian;
     use crate::material::texture::SolidColor;
+
+    /// Cost of one node traversal relative to one primitive intersection.
+    const TRAVERSAL_COST: f32 = 1.0;
 
     /// A triangle whose `v0.x` is `i`, so a permutation is readable off the result.
     fn tagged(i: u32) -> Hittables {
@@ -719,5 +729,108 @@ mod tests {
             wgsl.contains("var<private> traversal_stack: array<u32, MAX_TRAVERSAL_DEPTH>;"),
             "the traversal stack is no longer sized by MAX_TRAVERSAL_DEPTH"
         );
+    }
+
+    /// Node count, depth, mean leaf size and the SAH cost of the whole tree.
+    ///
+    /// The cost is the quantity the build's greedy heuristic approximates one
+    /// level at a time: every internal node charges [`TRAVERSAL_COST`] for its
+    /// box and every leaf charges one intersection per primitive, each weighted
+    /// by the conditional probability that a ray hitting the root box also hits
+    /// that node's -- its surface area over the root's. It is the one number
+    /// that says a change to `split` built a *better* tree rather than a
+    /// different one, and it says so deterministically, on the CPU, in a
+    /// second. Read it before spending minutes on a GPU traversal benchmark.
+    #[derive(Default)]
+    struct TreeStats {
+        nodes: usize,
+        leaves: usize,
+        leaf_prims: usize,
+        depth: u32,
+        /// Already divided by the root area, so it is comparable across scenes.
+        cost: f64,
+    }
+
+    impl Display for TreeStats {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "nodes {:>7}  depth {:>2}  leaves {:>7}  mean leaf {:.2}  sah cost {:.2}",
+                self.nodes,
+                self.depth,
+                self.leaves,
+                self.leaf_prims as f64 / self.leaves.max(1) as f64,
+                self.cost
+            )
+        }
+    }
+
+    fn tree_stats(bvh: &Bvh) -> TreeStats {
+        let mut s = TreeStats::default();
+        if bvh.nodes.is_empty() {
+            return s;
+        }
+        let root_area = Aabb32::from(&bvh.b_box).half_area();
+        let inv_root = if root_area > 0. {
+            1. / root_area as f64
+        } else {
+            0.
+        };
+        accumulate(&bvh.nodes, 0, root_area, 1, inv_root, &mut s);
+        s
+    }
+
+    fn accumulate(
+        nodes: &[BvhNode],
+        idx: u32,
+        area: f32,
+        depth: u32,
+        inv_root: f64,
+        s: &mut TreeStats,
+    ) {
+        let node = &nodes[idx as usize];
+        s.nodes += 1;
+        s.depth = s.depth.max(depth);
+        s.cost += TRAVERSAL_COST as f64 * area as f64 * inv_root;
+
+        for (meta, b_box) in [
+            (node.left_meta, &node.left_box),
+            (node.right_meta, &node.right_box),
+        ] {
+            let area = Aabb32::from(b_box).half_area();
+            if meta & LEAF_FLAG == 0 {
+                accumulate(nodes, meta, area, depth + 1, inv_root, s);
+                continue;
+            }
+            let count = ((meta >> LEAF_COUNT_SHIFT) & LEAF_COUNT_MASK) as usize;
+            // The empty child of a single-leaf root intersects nothing.
+            if count == 0 {
+                continue;
+            }
+            s.leaves += 1;
+            s.leaf_prims += count;
+            s.cost += count as f64 * area as f64 * inv_root;
+        }
+    }
+
+    /// Diagnostic, not a gate.
+    /// `cargo test bvh_tree_quality -- --ignored --nocapture`
+    ///
+    /// The cloud is the same distribution `bvh_build` benches. The spider mesh
+    /// is here because clustered real geometry is where a split heuristic and a
+    /// leaf rule behave differently from a uniform cloud -- it is 1368
+    /// triangles in 19 shells, and its cost moves when the cloud's barely does.
+    #[test]
+    #[ignore]
+    fn bvh_tree_quality() {
+        for n in [1_000u32, 10_000, 100_000, 1_000_000] {
+            let bvh = Bvh::new(cloud(n));
+            println!("cloud {:>7}  {}", n, tree_stats(&bvh));
+        }
+
+        let spider = Obj::new("resources/spider/", "spider.obj")
+            .load(&NopTransformer(), None)
+            .unwrap();
+        println!("spider {:>6}  {}", spider.prims.len(), tree_stats(&spider));
     }
 }
