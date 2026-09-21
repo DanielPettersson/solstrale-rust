@@ -13,6 +13,7 @@ use crate::renderer::gpu_data::{
     MAT_METAL, Material as GpuMaterial, PRIM_TYPE_QUAD, PRIM_TYPE_SHIFT, PRIM_TYPE_SPHERE,
     PRIM_TYPE_TRIANGLE, QuadAttr, QuadPos, Sphere as GpuSphere, TriangleAttr, TrianglePos,
 };
+use crate::util::luminance::luminance;
 use crate::util::rgb_color::srgb_to_vec3;
 use crate::util::texture_processing::{AtlasLayout, TexturePacker};
 use image::RgbImage;
@@ -384,12 +385,6 @@ fn light_ref(
         alias_prob: 0.,
         alias_index: 0,
     }
-}
-
-/// Rec. 709 luma: a light's colour reduced to the one number its selection
-/// probability ranks it by.
-fn luminance(c: Vec3) -> f64 {
-    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
 }
 
 /// The average colour a texture emits.

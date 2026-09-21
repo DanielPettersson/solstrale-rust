@@ -18,6 +18,7 @@ use crate::hittable::Triangle;
 use crate::loader::Loader;
 use crate::material::texture::{ImageMap, SolidColor, Textures};
 use crate::material::{Blend, Dielectric, DiffuseLight, Lambertian, Materials, Metal, texture};
+use crate::util::luminance::luminance;
 
 /// Crease angle used when the caller does not pick one.
 ///
@@ -288,9 +289,9 @@ impl Loader for Obj {
     }
 }
 
-/// Relative luminance, used only to weigh `Kd` against `Ks`.
-fn luminance(c: [f32; 3]) -> f64 {
-    0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64
+/// Relative luminance of an MTL colour, used only to weigh `Kd` against `Ks`.
+fn mtl_luminance(c: [f32; 3]) -> f64 {
+    luminance(Vec3::new(c[0] as f64, c[1] as f64, c[2] as f64))
 }
 
 /// `Ns` to the perceptual roughness [`Metal::new`] takes.
@@ -344,7 +345,7 @@ fn material_from_mtl(m: &tobj::Material, albedo: Textures, normal: Option<Textur
 
     // Zero when absent, so a material that never mentions `Ks` cannot pick up a
     // specular lobe it did not ask for.
-    let ks_luminance = m.specular.map(luminance).unwrap_or(0.);
+    let ks_luminance = m.specular.map(mtl_luminance).unwrap_or(0.);
     // `map_Kd` is the albedo when it is there, and the `Kd` beside it is
     // discarded -- so it has to be discarded here too, or a `Kd 0 0 0` next to
     // a texture and a `Ks` would weigh the blend all the way to metal and drop
@@ -352,7 +353,7 @@ fn material_from_mtl(m: &tobj::Material, albedo: Textures, normal: Option<Textur
     // defaults to when the file gives neither.
     let kd_luminance = match m.diffuse_texture {
         Some(_) => 1.,
-        None => m.diffuse.map(luminance).unwrap_or(1.),
+        None => m.diffuse.map(mtl_luminance).unwrap_or(1.),
     };
 
     // `Tr` is `1 - d`, and is not among the keys tobj parses.

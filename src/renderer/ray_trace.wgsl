@@ -608,13 +608,6 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.origin + t * r.direction;
 }
 
-// Scalar proxy used for the per-pixel variance estimate that drives adaptive
-// sampling. Perceptual weighting doesn't matter here, only that it's a single
-// number cheap to accumulate.
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
 // sRGB EOTF, the exact piecewise form with the linear toe rather than
 // `pow(x, 2.2)`: it is what the encoders that wrote these images used, and it
 // is the exact inverse of the OETF `buffer_to_image` encodes with. Mirrors

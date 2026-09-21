@@ -2,7 +2,8 @@
 
 use crate::post::{PostProcessContext, PostProcessor};
 use crate::util::wgpu_util::{
-    add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, storage_binding,
+    add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline,
+    shader_module_with_luminance, storage_binding,
 };
 use std::error::Error;
 
@@ -33,7 +34,11 @@ impl SaturationPostProcessor {
             ));
         }
 
-        let module = device.create_shader_module(wgpu::include_wgsl!("saturation.wgsl"));
+        let module = shader_module_with_luminance(
+            device,
+            "saturation.wgsl",
+            include_str!("saturation.wgsl"),
+        );
 
         let bind_group_layout = bind_group_layout(device, &[storage_binding(false, 16)]);
 
@@ -94,5 +99,98 @@ impl PostProcessor for SaturationPostProcessor {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geo::vec3::Vec3;
+    use crate::post::PostProcessContext;
+    use crate::util::luminance::luminance;
+    use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
+    use wgpu::util::DeviceExt;
+
+    /// The pass pivots around Rec. 709 luminance, which the shader used to get
+    /// from the NTSC weights instead. The golden tests run the whole filter at
+    /// a 0.95 structural threshold and one of the two did not notice; this
+    /// checks the arithmetic itself, against the same definition the rest of
+    /// the renderer uses.
+    #[test]
+    fn pivots_around_rec_709_luminance() {
+        let (device, queue) = get_wgpu_device_and_queue();
+
+        // Primaries, because that is where two sets of weights disagree most,
+        // plus a value above the display range: the pass runs on linear HDR.
+        let pixels: [[f32; 4]; 8] = [
+            [0., 0., 0., 1.],
+            [1., 1., 1., 1.],
+            [1., 0., 0., 1.],
+            [0., 1., 0., 1.],
+            [0., 0., 1., 1.],
+            [0.2, 0.6, 0.9, 1.],
+            [0.8, 0.1, 0.35, 1.],
+            [4., 0.5, 0.25, 1.],
+        ];
+        let width = pixels.len() as u32;
+        let size = size_of_val(&pixels) as u64;
+
+        for factor in [-1., -0.7, 0., 0.5, 1.] {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&pixels),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
+            // Bound by nothing: the fields the saturation pass never reads.
+            let unused = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+
+            let mut processor = SaturationPostProcessor::new(factor, device).unwrap();
+            processor.initialize(device, queue, width, 1);
+
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            processor
+                .post_process(&mut PostProcessContext {
+                    encoder: &mut encoder,
+                    buffer: &buffer,
+                    accumulator: &unused,
+                    sample_count_buffer: &unused,
+                    gbuffer: &unused,
+                    samples_completed: 1,
+                    device,
+                    timer: None,
+                })
+                .unwrap();
+
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, size);
+            queue.submit(Some(encoder.finish()));
+
+            let got: Vec<[f32; 4]> = get_result_from_buffer(device, &staging);
+
+            for (input, got) in pixels.iter().zip(got.iter()) {
+                let gray =
+                    luminance(Vec3::new(input[0] as f64, input[1] as f64, input[2] as f64)) as f32;
+                for ch in 0..3 {
+                    let want = -gray * factor as f32 + input[ch] * (1. + factor as f32);
+                    assert!(
+                        (got[ch] - want).abs() <= 1e-5 * want.abs().max(1.),
+                        "factor {factor} channel {ch} of {:?}: got {:?} want {want}",
+                        &input[..3],
+                        got[ch]
+                    );
+                }
+            }
+        }
     }
 }

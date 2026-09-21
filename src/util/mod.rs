@@ -6,6 +6,7 @@ pub mod gaussian;
 pub mod gpu_timing;
 pub mod height_map;
 pub mod interval;
+pub(crate) mod luminance;
 pub mod rgb_color;
 pub mod texture_processing;
 pub mod tone_map;

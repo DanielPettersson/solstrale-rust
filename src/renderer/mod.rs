@@ -16,7 +16,7 @@ use crate::renderer::scene_flattener::{SceneData, flatten_scene};
 use crate::util::gpu_timing::{GpuTimer, report_dispatch};
 use crate::util::wgpu_util::{
     add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
-    storage_binding, texture_binding, uniform_binding,
+    shader_module_with_luminance, storage_binding, texture_binding, uniform_binding,
 };
 use image::{DynamicImage, Rgb, RgbImage};
 use simple_error::SimpleError;
@@ -642,7 +642,8 @@ impl<'a> Renderer<'a> {
         let width = scene.render_config.width as u32;
         let height = scene.render_config.height as u32;
 
-        let module = device.create_shader_module(wgpu::include_wgsl!("ray_trace.wgsl"));
+        let module =
+            shader_module_with_luminance(device, "ray_trace.wgsl", include_str!("ray_trace.wgsl"));
 
         // Flatten scene
         let scene_data = flatten_scene(&scene);

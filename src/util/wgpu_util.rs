@@ -1,5 +1,6 @@
 //! Utility functions for working with wgpu
 use crate::util::gpu_timing::GpuTimer;
+use crate::util::luminance::LUMINANCE_WGSL;
 use crate::util::tone_map::ToneMapper;
 use bytemuck::AnyBitPattern;
 use once_cell::sync::Lazy;
@@ -158,6 +159,23 @@ pub(crate) fn add_compute_pass_2d(
     compute_pass.set_pipeline(pipeline);
     compute_pass.set_bind_group(0, bind_group, &[]);
     compute_pass.dispatch_workgroups(workgroup_count_x, workgroup_count_y, 1);
+}
+
+/// Creates a shader module with the shared `luminance` declaration spliced
+/// ahead of `source`. WGSL has no include directive, so the one definition of
+/// the Rec. 709 weights has to be concatenated to reach a second module.
+///
+/// `source` rather than a path, so a caller that already splices something in
+/// -- the denoiser's tone curve -- can hand over the result.
+pub(crate) fn shader_module_with_luminance(
+    device: &wgpu::Device,
+    label: &str,
+    source: &str,
+) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(format!("{LUMINANCE_WGSL}\n{source}").into()),
+    })
 }
 
 pub(crate) fn compute_pipeline<'a>(
