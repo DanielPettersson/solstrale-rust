@@ -401,11 +401,19 @@ fn test_gpu_scene_sphere() {
 
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-30., 30., 30.),
+            5.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
 
-    world.push(Sphere::new(Vec3::new(0., 0., 0.), 6., mat.into()).into());
+    world.push(Sphere::new(Vec3::new(0., 0., 0.), 6., mat.into(), &NopTransformer()).into());
 
     let scene = Scene {
         world: Bvh::new(world).into(),
@@ -433,7 +441,15 @@ fn test_gpu_scene_box() {
 
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-10., 20., 30.), 5., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-10., 20., 30.),
+            5.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let mat = Lambertian::new(SolidColor::new(0.2, 0.2, 1.0).into(), None);
 
@@ -526,13 +542,21 @@ fn test_gpu_scene_sphere2() {
 
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-30., 30., 30.),
+            5.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
     let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
 
-    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 4., blue.into()).into());
-    world.push(Sphere::new(Vec3::new(4., 1., 0.), 4., red.into()).into());
+    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 4., blue.into(), &NopTransformer()).into());
+    world.push(Sphere::new(Vec3::new(4., 1., 0.), 4., red.into(), &NopTransformer()).into());
 
     let scene = Scene {
         world: Bvh::new(world).into(),
@@ -560,13 +584,21 @@ fn test_gpu_scene_sphere_quad_and_triangle() {
 
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-30., 30., 30.),
+            5.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
     let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
     let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
 
-    world.push(Sphere::new(Vec3::new(-4., 1., 0.), 2., blue.into()).into());
+    world.push(Sphere::new(Vec3::new(-4., 1., 0.), 2., blue.into(), &NopTransformer()).into());
     world.push(
         Triangle::new(
             Vec3::new(4., 0., 0.),
@@ -614,7 +646,15 @@ fn test_gpu_scene_triangle3() {
 
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-30., 30., 30.),
+            5.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
     let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
@@ -677,17 +717,25 @@ fn test_gpu_scene_nested_bvh() {
 
     let mut world: Vec<Hittables> = Vec::new();
     let light = DiffuseLight::new(45., 45., 45., None);
-    world.push(Sphere::new(Vec3::new(-30., 30., 30.), 5., light.into()).into());
+    world.push(
+        Sphere::new(
+            Vec3::new(-30., 30., 30.),
+            5.,
+            light.into(),
+            &NopTransformer(),
+        )
+        .into(),
+    );
 
     let blue = Lambertian::new(SolidColor::new(0.2, 0.2, 1.).into(), None);
     let red = Lambertian::new(SolidColor::new(1., 0.2, 0.2).into(), None);
     let green = Lambertian::new(SolidColor::new(0.2, 1., 0.2).into(), None);
 
-    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 2., blue.into()).into());
+    world.push(Sphere::new(Vec3::new(-4., -1., 0.), 2., blue.into(), &NopTransformer()).into());
 
     let mut sub_world: Vec<Hittables> = Vec::new();
-    sub_world.push(Sphere::new(Vec3::new(0., -1., 0.), 2., red.into()).into());
-    sub_world.push(Sphere::new(Vec3::new(4., -1., 0.), 2., green.into()).into());
+    sub_world.push(Sphere::new(Vec3::new(0., -1., 0.), 2., red.into(), &NopTransformer()).into());
+    sub_world.push(Sphere::new(Vec3::new(4., -1., 0.), 2., green.into(), &NopTransformer()).into());
 
     let bvh = Bvh::new(sub_world);
     world.push(bvh.into());

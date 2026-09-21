@@ -33,6 +33,7 @@
 //! # use std::thread;
 //! # use image::RgbImage;
 //! # use solstrale::camera::CameraConfig;
+//! # use solstrale::geo::transformation::NopTransformer;
 //! # use solstrale::geo::vec3::Vec3;
 //! # use solstrale::hittable::{Bvh, Sphere, Hittable, Hittables};
 //! # use solstrale::material::{DiffuseLight, Lambertian};
@@ -50,7 +51,7 @@
 //! let mut world: Vec<Hittables> = Vec::new();
 //! let yellow = Lambertian::new(SolidColor::new(1., 1., 0.).into(), None);
 //! let light = DiffuseLight::new(10., 10., 10., None);
-//! world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.5, yellow.into()).into());
+//! world.push(Sphere::new(Vec3::new(0., 0., 0.), 0.5, yellow.into(), &NopTransformer()).into());
 //!
 //! let scene = Scene {
 //!     world: Bvh::new(world).into(),

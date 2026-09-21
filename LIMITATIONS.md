@@ -133,6 +133,18 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   general and would have to change alongside any `Transformer` that could
   shear.
 
+- **A sphere's texture cannot be rotated.** `Sphere::new` applies a transform
+  to its centre and its radius, which is everything a sphere's geometry has:
+  rotating a sphere about its own centre moves no surface. It does turn the
+  texture, though, and that is not expressible -- `resolve_hit`
+  (`renderer/ray_trace.wgsl`) derives the spherical coordinates from the
+  world-space outward normal, so a rotated texture would need the rotation
+  stored per sphere and undone there -- `GpuSphere`'s three words of tail
+  padding would hold it -- and a cost on every sphere hit for the one case
+  that wants it. A rotation passed to `Sphere::new` therefore carries the
+  centre around the origin, like the point it is, and leaves the mapping
+  alone.
+
 - **Light seen through glass is still clamped.** A dielectric bounce puts the
   emitter at depth >= 1, so the indirect clamp covers it. Routing by "every
   vertex so far was specular" instead of `depth == 0` would exempt it, but it
