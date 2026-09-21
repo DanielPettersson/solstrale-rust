@@ -12,6 +12,11 @@ use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 #[derive(Clone)]
 /// Applies a bloom effect on the pixel colors
+///
+/// Not a preview processor (see [`PostProcessor::preview`]): a full-resolution
+/// separable Gaussian is the most expensive pass in the crate, and the cost of
+/// leaving it out of the preview is that the glow appears on the last batch --
+/// a pop, on an effect that is a look rather than information.
 pub struct BloomPostProcessor {
     width: u32,
     height: u32,

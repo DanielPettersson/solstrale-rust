@@ -496,6 +496,15 @@ pub fn adaptive_sampling_benchmark(c: &mut Criterion) {
 /// high spp. The `none` arm is what makes the numbers mean anything, since
 /// `render_and_sync` also times scene upload and readback.
 ///
+/// Every arm but `preview` runs the chain once, on the last batch, which is the
+/// default and what "the cost of the chain" has always meant here. The
+/// `preview` arm is the same chain with [`RenderConfig::preview`] on: it then
+/// runs on every batch, and the difference between the two is what a viewport
+/// pays to have every frame filtered. The interactive side of the same trade is
+/// `interactive_restart_frame_cost` in `tests/interactive_test.rs`, which this
+/// benchmark cannot see -- it renders one accumulation to the end, and a drag
+/// never gets there.
+///
 /// The processors are built once, outside the setup closure. `PostProcessors` is
 /// `Clone` and wgpu handles are refcounted, so cloning reuses the pipelines --
 /// rebuilding them per iteration would measure shader compilation instead.
@@ -505,38 +514,33 @@ pub fn denoise_benchmark(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     let (device, _) = get_wgpu_device_and_queue();
-    let denoisers: Vec<(&str, Option<PostProcessors>)> = vec![
-        ("none", None),
-        (
-            "iterations_3",
-            Some(
-                DenoisePostProcessor::new(1., Some(3), None, device)
-                    .unwrap()
-                    .into(),
-            ),
-        ),
-        (
-            "iterations_5",
-            Some(
-                DenoisePostProcessor::new(1., Some(5), None, device)
-                    .unwrap()
-                    .into(),
-            ),
-        ),
+    let denoiser = |iterations| -> Option<PostProcessors> {
+        Some(
+            DenoisePostProcessor::new(1., Some(iterations), None, device)
+                .unwrap()
+                .into(),
+        )
+    };
+    let arms: Vec<(&str, Option<PostProcessors>, bool)> = vec![
+        ("none", None, false),
+        ("iterations_3", denoiser(3), false),
+        ("iterations_5", denoiser(5), false),
+        ("preview", denoiser(5), true),
     ];
 
-    for (name, denoiser) in &denoisers {
+    for (name, denoiser, preview) in &arms {
         group.bench_with_input(
             BenchmarkId::from_parameter(name),
-            denoiser,
-            |b, denoiser| {
+            &(denoiser, *preview),
+            |b, (denoiser, preview)| {
                 b.iter_with_setup(
                     || {
                         create_test_scene(RenderConfig {
                             samples_per_pixel: 16,
                             width: 800,
                             height: 600,
-                            post_processors: denoiser.clone().into_iter().collect(),
+                            post_processors: (*denoiser).clone().into_iter().collect(),
+                            preview: *preview,
                             ..RenderConfig::default()
                         })
                     },

@@ -26,6 +26,9 @@
 //!   variance the sample loop already tracks, which cuts error against a converged
 //!   reference by about a third at 8 samples per pixel and leaves an already
 //!   converged image essentially untouched
+//! * The denoiser and the saturation grade can also run on the unfinished
+//!   image, so an interactive viewport is filtered while the camera is moving
+//!   rather than only once it stops -- see [`renderer::RenderConfig::preview`]
 //!
 //! ## Example:
 //! ```rust

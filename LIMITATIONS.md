@@ -571,6 +571,45 @@ Recorded so they aren't reconsidered without new information.
   point the cheap version is a per-pixel blue-noise offset into the Owen
   scramble seed, about five lines.
 
+- **Skipping the per-batch copy into the post buffer.** `Renderer::render`
+  copies the accumulator into `post_buffer` on every batch, not just the one
+  the chain runs on, because `post_buffer` is what `RenderProgress` publishes
+  and a caller watching an unfinished render has to find the accumulated image
+  in it. Skipping it on non-final batches would hand that caller an empty
+  allocation, and the handle cannot be swapped per batch either -- the progress
+  contract is a stable buffer handle, so a caller caching a bind group per
+  handle never has to rebuild it.
+
+  So it was worth a measurement first, and the measurement is the answer.
+  `GpuTimer::encoder_scope` now gives the copy a scope of its own -- it is the
+  one piece of GPU work in the render loop that is not a compute pass, so it
+  needed `TIMESTAMP_QUERY_INSIDE_ENCODERS` before any number could exist at
+  all. At 800x600 on a Radeon RX 5700 XT `post_copy` reads **0.035 to 0.06 ms**
+  against a 7 to 12 ms dispatch, which is the figure 15.36 MB moved at the
+  card's 448 GB/s predicts. Some dispatches read 0.4 ms instead, bimodally and
+  not only on the first read -- the sub-millisecond instability recorded under
+  GPU timing below. Even that reading is 4% of a dispatch and it is not what
+  would be recovered, since skipping the copy still leaves the barrier between
+  the trace pass and whatever reads the buffer.
+
+  It scales with pixels rather than with samples, so 4K during a drag is the
+  worst case it has: 265 MB against a ~30 ms dispatch, by the same bandwidth
+  arithmetic 1.2 ms, 4%. Revisit there if anywhere, and with `post_copy` in the
+  report rather than an estimate.
+
+- **Double-buffered submissions.** One submission is in flight at a time, on
+  purpose: a caller sharing the device with a vsync-throttled presenter would
+  otherwise accumulate frame latency, which is the same sharing the two-term
+  `DispatchCost` model exists for. What pipelining would recover is
+  submit-to-start latency and the poll wake-up.
+
+  Settled by #41's timestamps, and the number is already recorded below under
+  "Wall clock was not lying": GPU busy time is 97-98% of the measured dispatch
+  in steady state. There is no 10% of a dispatch waiting to be recovered.
+  Revisit only if the ratio on some scene comes back near 80%, and even then
+  the first thing to try is a wider `TARGET_DISPATCH` for non-interactive
+  callers, not giving up the back-pressure.
+
 ---
 
 ## Measurement records
@@ -966,6 +1005,51 @@ the tracer is the only thing on this list worth optimising. Within bloom, the
 so the blur is linear in the kernel as expected and bloom's fixed cost is
 0.16 ms. Within the denoiser, prepare is 0.11 ms, the variance prefilter
 0.39 ms, the five à-trous iterations 1.46 ms and the resolve 0.13 ms.
+
+**What the live viewer costs**, same scene and size, 16 spp, from
+`gpu_pass_timings`. The `denoise_preview` arm is the same chain with
+`RenderConfig::preview` on, so the filter runs on every batch instead of on the
+last one:
+
+| chain | trace | chain passes | chain | chain share |
+|---|---|---|---|---|
+| denoise, 5 iterations | 32.92 ms | 8 | 2.41 ms | 6.8% |
+| denoise, preview | 33.04 ms | 32 | 8.01 ms | 19.4% |
+
+A sixth of the render, charged per batch whether or not anyone reads a batch,
+which is why the flag is off by default and why a viewport has to ask for it.
+It is not a per-sample cost: the filter is per pixel, so its share falls as the
+batch size rises and grows as the resolution does. A viewport renders one batch
+per frame and reads every one of them, so there the same arithmetic runs the
+other way.
+
+**The interactive path is not on any benchmark.** Every render benchmark traces
+one accumulation to the end and so sees exactly one restart against thousands
+of sample paths. A camera drag is the opposite: every frame restarts, so
+everything charged per restart is charged per frame. `interactive_restart_frame_cost`
+in `tests/interactive_test.rs` is the only thing that measures it -- median of
+60 restart frames on `create_test_scene` at 800x600, one sample per frame, a
+new camera every frame:
+
+| arm | median frame |
+|---|---|
+| no chain, guide traced unconditionally (the old behaviour) | 2.66 ms |
+| no chain | 2.41-2.44 ms |
+| denoise, preview off | 2.73 ms |
+| denoise, preview on | 4.80 ms |
+
+The guide ray is **9% of a drag frame** on this scene, and it was being traced
+for every chain rather than for the denoiser that reads it. `writes_guide` is
+what turns it off, and it also takes `trace_guide`, `pack_guide`, `oct_encode`
+and `resolve_material_index_dominant` out of the module: `test_scene`'s tracer
+goes from 32516 to 23744 bytes of code and 6266 to 4626 instructions, a 27% cut
+that costs nothing because occupancy is unchanged at 128 VGPRs and 8 subgroups
+per SIMD either way. That last part is the honest reading -- the code shrinks,
+the shader does not get faster for anyone who was not tracing a guide they did
+not read.
+
+The other 2 ms is the filter, which is the thing being bought: at one sample
+per pixel there is no image without it.
 
 **The rough dielectric costs a quarter of the tracer's occupancy, and only
 where it is used.** The microfacet arm is the largest single addition the

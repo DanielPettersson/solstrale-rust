@@ -85,6 +85,9 @@ pub struct GpuTimer {
     readback_buffer: wgpu::Buffer,
     /// Nanoseconds per timestamp tick, as the queue reports it.
     period_ns: f32,
+    /// Whether the device can write a timestamp outside a pass, which is what
+    /// [`GpuTimer::encoder_scope`] needs and a compute pass does not.
+    inside_encoders: bool,
     /// Labels of the passes encoded so far, in the order they were encoded.
     /// Doubles as the query-index counter.
     labels: Vec<&'static str>,
@@ -132,6 +135,9 @@ impl GpuTimer {
                 mapped_at_creation: false,
             }),
             period_ns: queue.get_timestamp_period(),
+            inside_encoders: device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS),
             labels: Vec::with_capacity(MAX_PASSES),
         })
     }
@@ -153,6 +159,34 @@ impl GpuTimer {
             beginning_of_pass_write_index: Some(index as u32 * 2),
             end_of_pass_write_index: Some(index as u32 * 2 + 1),
         })
+    }
+
+    /// Brackets encoder-level work in a pair of timestamps, the way
+    /// [`Self::pass_writes`] brackets a compute pass.
+    ///
+    /// A compute pass carries its timestamps in its descriptor. A buffer copy
+    /// has no descriptor, so this is the only way to give one a scope of its
+    /// own -- and until it had one, the per-batch copy into the post buffer was
+    /// the single piece of GPU work in the render loop that no measurement
+    /// could see. `record` still runs on a device without
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS`, or once the query set is full; it is
+    /// only the timing that is lost.
+    pub(crate) fn encoder_scope(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        label: &'static str,
+        record: impl FnOnce(&mut wgpu::CommandEncoder),
+    ) {
+        let index = self.labels.len();
+        if !self.inside_encoders || index >= MAX_PASSES {
+            record(encoder);
+            return;
+        }
+        self.labels.push(label);
+
+        encoder.write_timestamp(&self.query_set, index as u32 * 2);
+        record(encoder);
+        encoder.write_timestamp(&self.query_set, index as u32 * 2 + 1);
     }
 
     /// Encodes the resolve and the copy that bring this command buffer's

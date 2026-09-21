@@ -100,6 +100,12 @@ impl PostProcessor for SaturationPostProcessor {
 
         Ok(())
     }
+
+    /// Yes: one dispatch of one pass, and a grade the preview would otherwise
+    /// be shown without and then have applied under it on the last batch.
+    fn preview(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -606,6 +606,24 @@ impl PostProcessor for DenoisePostProcessor {
 
         Ok(())
     }
+
+    /// Yes. A camera drag restarts the accumulation on every frame, so the
+    /// image a viewer is dragging is a one-sample image -- the noisiest the
+    /// renderer ever produces and the only one the filter cannot be left out
+    /// of. See [`RenderConfig::preview`], which is what pays for it.
+    ///
+    /// [`RenderConfig::preview`]: crate::renderer::RenderConfig::preview
+    fn preview(&self) -> bool {
+        true
+    }
+
+    /// Only with [`DenoiseGuide::Full`]. `ColorOnly` reads nothing but the
+    /// image and its variance, so it also spares the tracer the guide ray --
+    /// which is what makes the two arms of a guide measurement comparable
+    /// rather than one of them quietly paying for a buffer it never opens.
+    fn needs_guide(&self) -> bool {
+        self.guide == DenoiseGuide::Full
+    }
 }
 
 #[cfg(test)]
