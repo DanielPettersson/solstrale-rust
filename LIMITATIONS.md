@@ -291,15 +291,25 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   Conty–Kulla light BVH with importance evaluated where the shading happens,
   which is a much larger piece of work; the numbers it has to beat are in the
   measurement record below.
-- **A textured emitter is ranked by the mean of its texture.** `mean_color`
-  averages every texel, sRGB-decoded, so an emitter that is bright in one corner
-  and black elsewhere is selected as though it were uniformly dim. That is the
-  correct total power and the wrong distribution within the primitive, which
-  `sample_light` samples by area regardless. The alternative considered was
-  falling back to uniform selection for such lights, which is worse in every
-  case that is not adversarial. Note that the *shading* still reads the flat
-  `GpuMaterial.emission` — one texel at UV (0, 0) — which is the separate gap
-  recorded as issue #59.
+- **A textured emitter is a flat light of its texture's mean.** `mean_color`
+  averages every texel, sRGB-decoded, and that one radiance is both what
+  `GpuMaterial.emission` carries and what the light's power is ranked by. So an
+  emitter that is bright in one corner and black elsewhere emits, and is
+  selected, as though it were uniformly dim — the correct total power and the
+  wrong distribution within the primitive, which `sample_light` samples by area
+  regardless. The alternative considered for the ranking was falling back to
+  uniform selection for such lights, which is worse in every case that is not
+  adversarial.
+
+  Spatially varying emission is what is missing, and it is not one value to
+  change: `surface_at` would have to sample the emission texture the way it
+  samples albedo, `sample_light` would have to do the same at the point it
+  picked on the light — deriving a UV it does not currently need, in the
+  function every shadow ray goes through — and the two would have to agree, or
+  a light would emit one radiance toward a BSDF path and another toward a
+  shadow ray, which is bias rather than noise. There is also nothing to spend
+  it on yet: no constructor takes a texture for emission, and the obj loader
+  reads `Ke` but drops `map_Ke`.
 - **A sheared quad light is sampled by area, and so is a small one.**
   `quad_spherical` (`renderer/ray_trace.wgsl`) parametrises a spherical
   *rectangle*, and `Quad::new` takes any two edge vectors, so a quad whose edges

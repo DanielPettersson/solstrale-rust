@@ -274,9 +274,10 @@ fn collect_material_textures(material: &Materials, unique_textures: &mut Vec<Arc
                 collect_texture(n, unique_textures);
             }
         }
-        Materials::DiffuseLight(m) => {
-            collect_texture(&m.tex, unique_textures);
-        }
+        // Nothing: a light's texture is averaged into one radiance by
+        // `mean_color` and never sampled on the device, so packing it into the
+        // atlas would only spend atlas area. See `add_material`.
+        Materials::DiffuseLight(_) => {}
         Materials::Blend(b) => {
             collect_material_textures(&b.material_1, unique_textures);
             collect_material_textures(&b.material_2, unique_textures);
@@ -393,11 +394,12 @@ fn luminance(c: Vec3) -> f64 {
 
 /// The average colour a texture emits.
 ///
-/// `add_material` flattens a texture to the single texel at UV (0, 0) for the
-/// GPU's `emission` slot, and ranking a textured emitter by a corner pixel is
-/// the kind of silent wrongness that never shows up as a crash -- so an image
-/// is averaged over every texel instead, sRGB-decoded per texel to match
-/// `ImageMap::color`.
+/// The one radiance a textured emitter gets: `add_material` puts it in the
+/// GPU's `emission` slot and `light_ref` ranks the light's power by it. Every
+/// texel is averaged, sRGB-decoded per texel to match `ImageMap::color`,
+/// rather than the texture being flattened to whichever texel sits at UV
+/// (0, 0) -- a corner pixel is the kind of silent wrongness that never shows
+/// up as a crash.
 fn mean_color(tex: &Textures, caches: &mut FlattenCaches) -> Vec3 {
     let Textures::ImageMap(im) = tex else {
         return sample_texture(tex);
@@ -656,10 +658,23 @@ fn add_material(
     };
 
     let albedo = albedo_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
-    let emission = emission_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
 
+    // The mean of the texture, not the texel at UV (0, 0). `emission` is the
+    // whole of what the shader knows about a light's radiance -- `surface_at`
+    // and `sample_light` both read this one value, neither of them samples a
+    // texture for it -- so a textured emitter is a flat light of its average
+    // colour. That is the same number `light_ref` ranks its power by, which is
+    // what keeps the shading and the selection from describing two different
+    // lights.
+    let emission = emission_tex
+        .map(|t| mean_color(t, caches))
+        .unwrap_or(ZERO_VECTOR);
+
+    // Albedo only. This used to fall back to the emission texture, which put an
+    // emitter's image in the albedo slot -- where `surface_at` samples it into
+    // `surface.albedo`, a field no emitter arm reads, while the light stayed
+    // flat.
     let (texture_index, albedo_offset, albedo_scale) = albedo_tex
-        .or(emission_tex)
         .map(|t| get_texture_info(t, unique_textures, atlas_layout, caches))
         .unwrap_or((-1, [0.0; 2], [1.0; 2]));
 
@@ -804,11 +819,13 @@ mod tests {
     use crate::geo::vec3::Vec3;
     use crate::hittable::LEAF_FLAG;
     use crate::hittable::{Bvh, Hittables, Sphere};
-    use crate::material::texture::SolidColor;
-    use crate::material::{Dielectric, Lambertian, Materials};
+    use crate::material::texture::{SolidColor, Textures};
+    use crate::material::{Dielectric, DiffuseLight, Lambertian, Materials};
     use crate::renderer::dielectric_energy::ENERGY_TABLE_LEN;
     use crate::renderer::gpu_data::LightRef;
-    use crate::renderer::scene_flattener::{SceneData, build_alias_table, flatten_scene, pack_oct};
+    use crate::renderer::scene_flattener::{
+        SceneData, build_alias_table, flatten_scene, pack_oct, sample_texture,
+    };
     use crate::renderer::{RenderConfig, Scene};
 
     /// WGSL `unpack2x16snorm` then `oct_decode`, in Rust. Only the encoder
@@ -1197,5 +1214,112 @@ mod tests {
         // scale should be [100/128, 100/100]
         assert_eq!(m.albedo_offset, [0.0, 0.0]);
         assert_eq!(m.albedo_scale, [100.0 / 128.0, 100.0 / 100.0]);
+    }
+
+    /// A two-texel image, one white and one black, so its mean is nothing like
+    /// the texel a UV of (0, 0) lands on.
+    fn half_white_image() -> std::sync::Arc<image::RgbImage> {
+        let mut img = image::RgbImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgb([255, 255, 255]));
+        img.put_pixel(1, 0, image::Rgb([0, 0, 0]));
+        std::sync::Arc::new(img)
+    }
+
+    fn scene_of(mat: Materials) -> Scene {
+        Scene {
+            world: Hittables::Bvh(Bvh::new(vec![Hittables::Sphere(Sphere::new(
+                Vec3::new(0., 0., -2.),
+                1.0,
+                mat,
+            ))])),
+            camera: Default::default(),
+            background_color: Default::default(),
+            render_config: RenderConfig::default(),
+        }
+    }
+
+    /// The shader has one radiance per light and no way to sample a texture for
+    /// it, so a textured emitter is a flat light of its texture's mean. It used
+    /// to be a flat light of whatever texel sat at UV (0, 0), which is an
+    /// arbitrary pixel of the image (#59).
+    #[test]
+    fn a_textured_emitter_emits_its_texture_mean() {
+        use crate::material::texture::ImageMap;
+
+        let tex: Textures = ImageMap::new(half_white_image()).into();
+        // The value the flat slot used to carry, and what makes this test more
+        // than a tautology: the mean has to differ from it.
+        assert_eq!(Vec3::new(1., 1., 1.), sample_texture(&tex));
+
+        let data = flatten_scene(&scene_of(
+            DiffuseLight {
+                tex,
+                attenuation_factor: None,
+            }
+            .into(),
+        ));
+
+        assert_eq!(1, data.materials.len());
+        assert_eq!([0.5, 0.5, 0.5], data.materials[0].emission);
+    }
+
+    /// An emission image is never sampled on the device, so it takes no
+    /// texture slot and no atlas area. It used to take both -- `texture_index`
+    /// fell back to the emission texture, which is the albedo slot, where
+    /// `surface_at` sampled it into a field no emitter arm reads.
+    #[test]
+    fn an_emission_texture_reaches_neither_the_albedo_slot_nor_the_atlas() {
+        use crate::material::texture::ImageMap;
+
+        let data = flatten_scene(&scene_of(
+            DiffuseLight {
+                tex: ImageMap::new(half_white_image()).into(),
+                attenuation_factor: None,
+            }
+            .into(),
+        ));
+
+        assert_eq!(-1, data.materials[0].texture_index);
+        assert!(
+            data.textures.is_empty(),
+            "the atlas holds an emitter's image"
+        );
+        assert!(data.atlas_layout.is_none());
+    }
+
+    /// The albedo of a lit surface still reaches the atlas, so the arm above
+    /// removed an emitter's texture rather than texture collection as such.
+    #[test]
+    fn an_albedo_texture_still_reaches_the_atlas() {
+        use crate::material::texture::ImageMap;
+
+        let world = vec![
+            Hittables::Sphere(Sphere::new(
+                Vec3::new(0., 0., -2.),
+                1.,
+                Lambertian::new(ImageMap::new(half_white_image()).into(), None).into(),
+            )),
+            Hittables::Sphere(Sphere::new(
+                Vec3::new(3., 0., -2.),
+                1.,
+                DiffuseLight {
+                    tex: ImageMap::new(half_white_image()).into(),
+                    attenuation_factor: None,
+                }
+                .into(),
+            )),
+        ];
+        let data = flatten_scene(&Scene {
+            world: Hittables::Bvh(Bvh::new(world)),
+            camera: Default::default(),
+            background_color: Default::default(),
+            render_config: RenderConfig::default(),
+        });
+
+        assert_eq!(
+            1,
+            data.textures.len(),
+            "only the albedo belongs in the atlas"
+        );
     }
 }
