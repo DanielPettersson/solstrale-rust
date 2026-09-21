@@ -5,8 +5,10 @@ use bytemuck::AnyBitPattern;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use simple_error::SimpleError;
+use std::collections::HashMap;
 use std::error::Error;
 use std::num::NonZeroU64;
+use std::sync::Mutex;
 
 pub(crate) enum BindingType {
     Storage {
@@ -297,37 +299,108 @@ fn pipeline_layout(
     })
 }
 
+/// A compiled tone-map-and-pack pipeline and the layout its bind group needs.
+#[derive(Clone)]
+struct PackPipeline {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+}
+
+/// The emitted curve, and the image size its override constants are baked with.
+type PackKey = (String, u32, u32);
+
+/// Cache of those pipelines. Neither half of the key can change without a
+/// recompile: the first is source text, the second a pair of override
+/// constants.
+///
+/// [`buffer_to_image`] deliberately caches nothing else, but a pipeline is a
+/// few kilobytes where the staging buffer is 33 MB, and the driver's compile is
+/// ~0.4 ms -- 60% again on top of the 0.64 ms an 800x600 readback costs, and
+/// paid on every call without this.
+static PACK_PIPELINES: Lazy<Mutex<HashMap<PackKey, PackPipeline>>> = Lazy::new(Default::default);
+
+fn pack_pipeline(
+    device: &wgpu::Device,
+    tone_mapper: ToneMapper,
+    width: u32,
+    height: u32,
+) -> PackPipeline {
+    PACK_PIPELINES
+        .lock()
+        .unwrap()
+        .entry((tone_mapper.wgsl(), width, height))
+        .or_insert_with_key(|(curve, width, height)| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Tone Map Pack"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!("{curve}\n{}", include_str!("tone_map_pack.wgsl")).into(),
+                ),
+            });
+            let layout = bind_group_layout(
+                device,
+                &[storage_binding(true, 16), storage_binding(false, 4)],
+            );
+            let pipeline = compute_pipeline(
+                device,
+                &layout,
+                &module,
+                &[("width", *width as f64), ("height", *height as f64)],
+            );
+            PackPipeline { layout, pipeline }
+        })
+        .clone()
+}
+
 /// Converts a wgpu buffer of linear HDR radiance to an RgbImage.
 ///
 /// This is the display transform: `tone_mapper` brings unbounded radiance into
-/// `[0, 1]`, then the sRGB encode makes it displayable. Everything upstream --
+/// `[0, 1]`, then the gamma encode makes it displayable. Everything upstream --
 /// the accumulator, bloom, the denoiser -- works on the untouched linear
 /// values, so the curve chosen here changes only what is shown, never what is
 /// computed.
 ///
-/// This is the one place the image leaves the GPU, and at 4K it moves 133 MB, so
-/// how it is read matters more than the arithmetic does. Two things it
-/// deliberately does not do:
+/// This is the one place the image leaves the GPU, so how it is read matters
+/// more than the arithmetic does. The curve and the encode run in a compute
+/// pass first and pack to RGBA8, so what is copied back is 4 bytes a pixel
+/// rather than 16 -- 33 MB at 4K instead of 133 MB, and 26 ms to 8.4 ms;
+/// 800x600 goes 1.97 ms to 0.64 ms. What is left on the CPU is a byte shuffle.
+///
+/// The GPU curve is [`ToneMapper::wgsl`], the same source the denoiser's
+/// resolve pass and a desktop viewport splice in, and
+/// `wgsl_matches_the_cpu_curve` holds it to [`ToneMapper::map`] to 1e-4 across
+/// all four curves; `buffer_to_image_matches_the_cpu_encode` covers the encode
+/// and the pack around it.
+///
+/// Two things it deliberately does not do:
 ///
 /// - It does not go through [`get_result_from_buffer`], because that copies the
 ///   whole mapped range into a `Vec` first. The mapped range is host-visible
 ///   device memory, uncached and write-combined, and reading it serially runs at
 ///   roughly 1 GB/s -- so that one copy cost more than everything else here put
-///   together (129 ms of a 198 ms 4K readback). The pixels are read once,
-///   in place, and never materialised as a second buffer.
+///   together (129 ms of the 198 ms a 4K readback took when it was still 16
+///   bytes a pixel). The pixels are read once, in place, and never materialised
+///   as a second buffer.
 /// - It does not use `put_pixel`, whose bounds check and `%`/`/` per pixel are
 ///   pure overhead when the traversal order is already row-major. The output
-///   rows are walked in step with the input instead, in parallel: the curve is
-///   per-pixel with no shared state, and the read is latency-bound, so threads
-///   are what hide it.
+///   rows are walked in step with the input instead, in parallel: there is no
+///   arithmetic left to share, but the read is still latency-bound on that same
+///   write-combined memory, and threads are what hide it.
 ///
-/// Together, 198 ms -> 25 ms at 4K, for byte-identical output. Most of what is
-/// left is the staging allocation, deliberately not cached: holding a 133 MB
-/// host-visible buffer alive for the process to save 8 ms on a call that happens
-/// once at the end of a render is the wrong trade. Getting past it wants the
-/// curve moved onto the GPU -- [`ToneMapper::wgsl`] already emits it for the
-/// desktop viewport -- so that what crosses the bus is 4 bytes a pixel instead
-/// of 16.
+/// Neither staging nor packed buffer is cached, deliberately: holding 33 MB of
+/// host-visible memory alive for the process to save a few ms on a call that
+/// happens once at the end of a render is the wrong trade. The pipeline it
+/// dispatches is cached, because a driver compile is not proportional to the
+/// image and costs more than it saves.
+///
+/// `buffer` is bound as a read-only storage buffer, so it needs
+/// `BufferUsages::STORAGE`. Every buffer the renderer hands out on
+/// [`RenderProgress`](crate::renderer::RenderProgress) has it.
+///
+/// WGSL does not require `sqrt` or the curve's arithmetic to round exactly as
+/// Rust's do, so a channel sitting on a code-value boundary may land one value
+/// either side of what the CPU produced. On a Radeon RX 5700 XT under RADV it
+/// is in fact byte-identical, checked over 1e-6 to 1e6 radiance and all four
+/// curves, and the goldens did not shift at all.
 pub fn buffer_to_image(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -336,7 +409,14 @@ pub fn buffer_to_image(
     height: u32,
     tone_mapper: ToneMapper,
 ) -> image::RgbImage {
-    let size = width as u64 * height as u64 * 16;
+    let size = width as u64 * height as u64 * 4;
+
+    let packed_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Packed Image Buffer"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Staging Buffer"),
         size,
@@ -344,10 +424,29 @@ pub fn buffer_to_image(
         mapped_at_creation: false,
     });
 
+    let pack = pack_pipeline(device, tone_mapper, width, height);
+    let group = bind_group(
+        device,
+        &pack.layout,
+        &[
+            wgpu::BindingResource::Buffer(buffer.as_entire_buffer_binding()),
+            wgpu::BindingResource::Buffer(packed_buffer.as_entire_buffer_binding()),
+        ],
+    );
+
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging_buffer, 0, size);
+    add_compute_pass_2d(
+        &mut encoder,
+        &pack.pipeline,
+        &group,
+        width.div_ceil(8),
+        height.div_ceil(8),
+        None,
+        "tone_map_pack",
+    );
+    encoder.copy_buffer_to_buffer(&packed_buffer, 0, &staging_buffer, 0, size);
     queue.submit(Some(encoder.finish()));
 
     let buffer_slice = staging_buffer.slice(..);
@@ -357,22 +456,86 @@ pub fn buffer_to_image(
     let mut img = image::RgbImage::new(width, height);
     {
         let data = buffer_slice.get_mapped_range().unwrap();
-        let pixels: &[[f32; 4]] = bytemuck::cast_slice(&data);
+        let pixels: &[u32] = bytemuck::cast_slice(&data);
 
         img.as_mut()
             .par_chunks_mut(3)
             .zip(pixels.par_iter())
             .for_each(|(out, pixel)| {
-                let mapped = tone_mapper.map([pixel[0], pixel[1], pixel[2]]);
-                // Gamma 2.0, and the 0.999 ceiling so the `* 256` below cannot
-                // reach 256 and wrap the cast to u8.
-                let encode = |v: f32| (v.sqrt().min(0.999) * 256.0) as u8;
-                out[0] = encode(mapped[0]);
-                out[1] = encode(mapped[1]);
-                out[2] = encode(mapped[2]);
+                out[0] = *pixel as u8;
+                out[1] = (*pixel >> 8) as u8;
+                out[2] = (*pixel >> 16) as u8;
             });
     }
     staging_buffer.unmap();
 
     img
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::util::DeviceExt;
+
+    /// The GPU display transform against the CPU one it replaced.
+    ///
+    /// `wgsl_matches_the_cpu_curve` pins the curve; what is new here is what
+    /// wraps it -- the gamma, the 0.999 ceiling, the truncating cast and the
+    /// byte order of the pack -- plus the dispatch's bounds check, which is why
+    /// the image is deliberately not a multiple of the 8x8 workgroup.
+    ///
+    /// One code value of slack, for a driver whose `sqrt` or rational rounds
+    /// differently. This machine's does not -- the two agree exactly here, and
+    /// over a far denser ramp than is worth committing.
+    #[test]
+    fn buffer_to_image_matches_the_cpu_encode() {
+        let (device, queue) = get_wgpu_device_and_queue();
+        let (width, height) = (13u32, 7u32);
+
+        // The awkward inputs first, then a ramp across the shoulder fine enough
+        // that consecutive pixels differ by a code value or two.
+        let odd = [0., -1., f32::NAN, f32::INFINITY, f32::MAX, 1e18];
+        let radiance: Vec<[f32; 4]> = (0..(width * height) as usize)
+            .map(|i| {
+                let v = odd
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| (i - odd.len()) as f32 / 20.);
+                [v, v * 0.5, v * 0.25, 0.]
+            })
+            .collect();
+
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&radiance),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        for mapper in [
+            ToneMapper::Aces,
+            ToneMapper::PbrNeutral,
+            ToneMapper::Reinhard { white_point: 4. },
+            ToneMapper::Clamp,
+        ] {
+            let image = buffer_to_image(device, queue, &buffer, width, height, mapper);
+            assert_eq!(image.dimensions(), (width, height));
+
+            for (pixel, linear) in image.pixels().zip(radiance.iter()) {
+                let want = mapper.map([linear[0], linear[1], linear[2]]);
+                let encode = |v: f32| (v.sqrt().min(0.999) * 256.) as u8;
+                let want = [encode(want[0]), encode(want[1]), encode(want[2])];
+
+                for ch in 0..3 {
+                    assert!(
+                        pixel[ch].abs_diff(want[ch]) <= 1,
+                        "{:?} at {:?}: gpu {:?} vs cpu {:?}",
+                        mapper,
+                        &linear[..3],
+                        pixel.0,
+                        want
+                    );
+                }
+            }
+        }
+    }
 }
