@@ -1,6 +1,7 @@
 //! Reads a Wavefront .obj file and creates a bvh containing
 //! all triangles. It also read materials from the referred .mat file.
-//! Support for colored and textured lambertian materials.
+//! MTL materials are mapped onto this crate's material types by
+//! [`material_from_mtl`].
 //! Applies supplied default material if none in model
 use std::error::Error;
 
@@ -16,7 +17,7 @@ use crate::hittable::Hittables;
 use crate::hittable::Triangle;
 use crate::loader::Loader;
 use crate::material::texture::{ImageMap, SolidColor, Textures};
-use crate::material::{Lambertian, Materials, texture};
+use crate::material::{Blend, Dielectric, DiffuseLight, Lambertian, Materials, Metal, texture};
 
 /// Crease angle used when the caller does not pick one.
 ///
@@ -165,7 +166,7 @@ impl Loader for Obj {
                     Some(texture::load_normal_texture(&bump_texture_path)?.into())
                 }
             };
-            mats.push(Lambertian::new(albedo_texture, normal_texture).into());
+            mats.push(material_from_mtl(m, albedo_texture, normal_texture));
         }
 
         // The total is known up front, so the vector never has to grow. At 376 bytes per
@@ -287,6 +288,151 @@ impl Loader for Obj {
     }
 }
 
+/// Relative luminance, used only to weigh `Kd` against `Ks`.
+fn luminance(c: [f32; 3]) -> f64 {
+    0.2126 * c[0] as f64 + 0.7152 * c[1] as f64 + 0.0722 * c[2] as f64
+}
+
+/// `Ns` to the perceptual roughness [`Metal::new`] takes.
+///
+/// `alpha = sqrt(2 / (Ns + 2))` is the usual Phong-to-GGX conversion and
+/// `Metal` squares its parameter to get `alpha`, so this is the fourth root.
+/// A file with no `Ns` has no specular sharpness to declare, and comes out
+/// fully rough just as `Ns 0` does.
+fn roughness_from_shininess(ns: f32) -> f64 {
+    (2. / (ns.max(0.) as f64 + 2.)).powf(0.25)
+}
+
+/// Three floats from an `unknown_param` value, `Ke 1 0.5 0.2` style. A single
+/// float is read as grey.
+fn parse_f32_3(s: &str) -> Option<[f32; 3]> {
+    let v = s
+        .split_whitespace()
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<f32>, _>>()
+        .ok()?;
+    match v.len() {
+        1 => Some([v[0]; 3]),
+        3 => Some([v[0], v[1], v[2]]),
+        _ => None,
+    }
+}
+
+/// Maps one MTL material onto the material types this crate has.
+///
+/// Three things decide, in this order, because each is more specific than the
+/// next:
+///
+/// 1. `Ke`, when non-zero. [`DiffuseLight`] has no diffuse lobe to share with,
+///    and a file that declares emission means the surface to emit.
+/// 2. `d` / `Tr`, when they say the surface is not opaque. Opacity is data
+///    about the surface, where `illum` is only a hint about which model to
+///    shade it with.
+/// 3. `illum`, when the file states one. Heuristics otherwise.
+///
+/// `map_Ks`, `map_Ns` and `map_d` are dropped. [`crate::renderer::gpu_data`]'s
+/// `Material` carries one albedo slot and one normal slot; a third texture
+/// needs an index plus an offset/scale pair, 16 bytes, taking the struct from
+/// 96 to 112 and moving the layout `tests/gpu_data_test.rs` pins. `Tf` is
+/// dropped too, for want of anything to map a transmission filter onto.
+fn material_from_mtl(m: &tobj::Material, albedo: Textures, normal: Option<Textures>) -> Materials {
+    if let Some(ke) = m.unknown_param.get("Ke").and_then(|s| parse_f32_3(s))
+        && ke.iter().any(|&c| c > 0.)
+    {
+        return DiffuseLight::new(ke[0] as f64, ke[1] as f64, ke[2] as f64, None).into();
+    }
+
+    // Zero when absent, so a material that never mentions `Ks` cannot pick up a
+    // specular lobe it did not ask for.
+    let ks_luminance = m.specular.map(luminance).unwrap_or(0.);
+    // `map_Kd` is the albedo when it is there, and the `Kd` beside it is
+    // discarded -- so it has to be discarded here too, or a `Kd 0 0 0` next to
+    // a texture and a `Ks` would weigh the blend all the way to metal and drop
+    // the texture on the floor. White otherwise, which is what the albedo
+    // defaults to when the file gives neither.
+    let kd_luminance = match m.diffuse_texture {
+        Some(_) => 1.,
+        None => m.diffuse.map(luminance).unwrap_or(1.),
+    };
+
+    // `Tr` is `1 - d`, and is not among the keys tobj parses.
+    let dissolve = m.dissolve.or_else(|| {
+        m.unknown_param
+            .get("Tr")
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .map(|tr| 1. - tr)
+    });
+
+    let diffuse = || -> Materials { Lambertian::new(albedo.clone(), normal.clone()).into() };
+
+    let specular = || -> Materials {
+        // White when absent: a file that declares a mirror without `Ks` means a
+        // mirror, not a black surface. The zero above is only there to keep a
+        // missing `Ks` out of the blend weight.
+        let f0 = m.specular.unwrap_or([1.; 3]);
+        Metal::new(
+            SolidColor::new_from_f32_array(f0).into(),
+            normal.clone(),
+            roughness_from_shininess(m.shininess.unwrap_or(0.)),
+        )
+        .into()
+    };
+
+    let transparent = || -> Materials {
+        // `albedo` is Beer-Lambert absorption per world unit here rather than a
+        // surface colour, and `Kd` is the only tint the file offers. `Ni` has a
+        // spec default of 1, which is glass that does not bend light at all, so
+        // a surface that declares itself transparent and omits `Ni` gets 1.5.
+        Dielectric::new(
+            albedo.clone(),
+            normal.clone(),
+            m.optical_density.unwrap_or(1.5) as f64,
+            0.,
+        )
+        .into()
+    };
+
+    // `Blend` is a stochastic choice between two materials, not a layer. It
+    // gets the energy right in expectation and the variance wrong against a
+    // real layered BSDF, which is the price of covering `Kd` + `Ks` without a
+    // new material type. `blend_factor` is the chance of the second material.
+    //
+    // Collapsing at the ends is what keeps every `Ks 0` model in the repo
+    // byte-identical to what the loader produced before: a zero weight has to
+    // come out as a plain `Lambertian`, not a `Blend` that never picks its
+    // second arm, or every such model would pay for `has_blends`.
+    let plastic = || -> Materials {
+        let total = ks_luminance + kd_luminance;
+        let w = if total > 0. { ks_luminance / total } else { 0. };
+        if w <= 0. {
+            diffuse()
+        } else if w >= 1. {
+            specular()
+        } else {
+            Blend::new(diffuse(), specular(), w).into()
+        }
+    };
+
+    if dissolve.is_some_and(|d| d < 1.) {
+        return transparent();
+    }
+
+    match m.illumination_model {
+        Some(0 | 1) => diffuse(),
+        Some(3 | 5) => specular(),
+        // 2 is the highlight model this blend exists for. 4, 6, 7 and 9 are the
+        // transparent family, and reach here only on a surface that `d` called
+        // opaque -- which is the common case, not a corner: of the seven scenes
+        // this was checked against, `fireplace_room` marks 21 of its 22
+        // materials `illum 4` or `illum 7`, floor and dirt and leaves included,
+        // and declares `d` on none of them. Taking `illum` as the authority
+        // there would turn a whole room to glass. 8 disables ray-traced
+        // reflection and 10 is a shadow-matte flag, neither of which describes
+        // the surface, so both fall through with everything else.
+        _ => plastic(),
+    }
+}
+
 fn vec3_from_mesh_vec(positions: &[f32], offset: usize) -> Vec3 {
     Vec3::new(
         positions[offset] as f64,
@@ -365,7 +511,7 @@ mod tests {
 
     use crate::geo::transformation::{NopTransformer, RotationY, Transformations, Translation};
     use crate::hittable::Hittables;
-    use crate::material::texture::Textures;
+    use crate::material::texture::{Texture, Textures};
 
     use super::*;
 
@@ -678,6 +824,206 @@ mod tests {
             assert_eq!(t.normal, t.n0);
             assert_eq!(t.normal, t.n1);
             assert_eq!(t.normal, t.n2);
+        }
+    }
+
+    /// The material of the fixture triangle sitting at `x = 2 * group`.
+    ///
+    /// Keyed on position because `Bvh::new` reorders, so `prims` order says
+    /// nothing about which `usemtl` group a triangle came from.
+    fn material_at(bvh: &Bvh, group: usize) -> Materials {
+        bvh.prims
+            .iter()
+            .find_map(|p| match p {
+                Hittables::Triangle(t) if t.v0.x == (group * 2) as f64 => Some(t.mat.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no triangle for group {}", group))
+    }
+
+    fn materials_fixture() -> Bvh {
+        Obj::new("resources/obj/", "materials.obj")
+            .load(&NopTransformer(), None)
+            .unwrap()
+    }
+
+    /// MTL colours are parsed as `f32` and widened, so nothing here is exact.
+    fn assert_color(expected: Vec3, tex: &Textures) {
+        let actual = tex.color(Uv::default());
+        assert!(
+            (actual - expected).length() < 1e-6,
+            "expected {:?}, got {:?}",
+            expected,
+            actual
+        );
+    }
+
+    fn assert_near(expected: f64, actual: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "expected {}, got {}",
+            expected,
+            actual
+        );
+    }
+
+    #[test]
+    fn kd_alone_is_lambertian() {
+        match material_at(&materials_fixture(), 0) {
+            Materials::Lambertian(l) => assert_color(Vec3::new(0.8, 0.2, 0.2), &l.albedo),
+            other => panic!("expected Lambertian, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn kd_and_ks_blend_by_luminance() {
+        match material_at(&materials_fixture(), 1) {
+            Materials::Blend(b) => {
+                // Kd (0.2, 0.4, 0.8) is 0.38636 of luminance against Ks 0.5,
+                // so the specular arm is picked 0.5 / 0.88636 of the time.
+                assert!(
+                    (b.blend_factor - 0.564104).abs() < 1e-5,
+                    "blend factor was {}",
+                    b.blend_factor
+                );
+                match *b.material_1 {
+                    Materials::Lambertian(l) => assert_color(Vec3::new(0.2, 0.4, 0.8), &l.albedo),
+                    other => panic!("expected the diffuse arm first, got {:?}", other),
+                }
+                match *b.material_2 {
+                    Materials::Metal(m) => {
+                        assert_color(Vec3::new(0.5, 0.5, 0.5), &m.albedo);
+                        // Ns 200 through (2 / (Ns + 2))^(1/4).
+                        assert_near((2f64 / 202.).powf(0.25), m.fuzz, 1e-9);
+                    }
+                    other => panic!("expected the specular arm second, got {:?}", other),
+                }
+            }
+            other => panic!("expected Blend, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ke_is_a_diffuse_light() {
+        // Ke is not one of the fields tobj 4.0.3 parses, so this is also the
+        // test that the `unknown_param` read works.
+        match material_at(&materials_fixture(), 2) {
+            Materials::DiffuseLight(d) => {
+                assert_color(Vec3::new(3., 2., 1.), &d.tex);
+                assert_eq!(None, d.attenuation_factor);
+            }
+            other => panic!("expected DiffuseLight, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dissolve_is_a_dielectric() {
+        match material_at(&materials_fixture(), 3) {
+            Materials::Dielectric(d) => {
+                assert_near(1.52, d.index_of_refraction, 1e-6);
+                assert_color(Vec3::new(0.9, 0.95, 0.9), &d.albedo);
+                // MTL has nothing to say about roughness, and Ns 0 would read
+                // as fully rough, which is not what a plain `d` means.
+                assert_eq!(0., d.roughness);
+            }
+            other => panic!("expected Dielectric, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn illum_3_is_metal() {
+        match material_at(&materials_fixture(), 4) {
+            Materials::Metal(m) => {
+                assert_color(Vec3::new(0.9, 0.8, 0.7), &m.albedo);
+                assert_near((2f64 / 802.).powf(0.25), m.fuzz, 1e-9);
+            }
+            other => panic!("expected Metal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tr_is_read_as_one_minus_dissolve() {
+        match material_at(&materials_fixture(), 5) {
+            Materials::Dielectric(d) => assert_near(1.33, d.index_of_refraction, 1e-6),
+            other => panic!("expected Dielectric, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn illum_1_overrides_the_specular_heuristic() {
+        // Ks 0.9 against Kd 0.3 would blend to a mostly specular surface on the
+        // heuristics. `illum 1` says diffuse, and that is the authority.
+        match material_at(&materials_fixture(), 6) {
+            Materials::Lambertian(l) => assert_color(Vec3::new(0.3, 0.3, 0.3), &l.albedo),
+            other => panic!("expected Lambertian, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn the_transparent_illum_family_does_not_override_an_opaque_d() {
+        // The case that keeps fireplace_room a room: it marks 21 of its 22
+        // materials `illum 4` or `illum 7` while declaring `d` on none of them.
+        match material_at(&materials_fixture(), 7) {
+            Materials::Blend(b) => {
+                assert!(
+                    (b.blend_factor - 0.166667).abs() < 1e-5,
+                    "blend factor was {}",
+                    b.blend_factor
+                );
+            }
+            other => panic!("expected Blend, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn map_kd_outweighs_the_kd_beside_it() {
+        // `Kd 0 0 0` next to a `map_Kd` is what an exporter writes when the
+        // texture is the whole diffuse answer, and the loader already drops
+        // that `Kd` for the albedo. Weighing the blend with it instead would
+        // read the surface as pure specular and lose the texture -- which is
+        // what `fireplace_room`'s wooden table is written like.
+        match material_at(&materials_fixture(), 8) {
+            Materials::Blend(b) => {
+                // Ks 0.04 against the texture taken as white.
+                assert!(
+                    (b.blend_factor - 0.038462).abs() < 1e-5,
+                    "blend factor was {}",
+                    b.blend_factor
+                );
+                match *b.material_1 {
+                    Materials::Lambertian(l) => {
+                        assert!(matches!(l.albedo, Textures::ImageMap(_)))
+                    }
+                    other => panic!("expected the texture on the diffuse arm, got {:?}", other),
+                }
+            }
+            other => panic!("expected Blend, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spider_materials_stay_lambertian() {
+        // Every material the repo ships has `Ks 0 0 0` or no `Ks` at all, so
+        // the mapping has to leave all of them exactly where they were. A blend
+        // weight of zero collapsing to a `Blend` rather than to a `Lambertian`
+        // would fail here, and would cost every such scene the blend walk.
+        for (path, file) in [
+            ("resources/spider/", "spider.obj"),
+            ("resources/obj/", "boxWithMat.obj"),
+            ("resources/obj/", "triWithNormalMap.obj"),
+            ("resources/obj/", "triWithHeightMap.obj"),
+        ] {
+            let bvh = Obj::new(path, file).load(&NopTransformer(), None).unwrap();
+            for prim in &bvh.prims {
+                if let Hittables::Triangle(t) = prim {
+                    assert!(
+                        matches!(t.mat, Materials::Lambertian(_)),
+                        "{} produced {:?}",
+                        file,
+                        t.mat
+                    );
+                }
+            }
         }
     }
 

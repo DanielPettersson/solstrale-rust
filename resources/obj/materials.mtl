@@ -1,0 +1,59 @@
+# One material per mapping rule in Obj::load. Triangle n of materials.obj sits
+# at x = 2n and uses material n.
+
+# Kd alone.
+newmtl PlainDiffuse
+Kd 0.8 0.2 0.2
+
+# Kd and Ks, the plastic blend.
+newmtl Plastic
+Kd 0.2 0.4 0.8
+Ks 0.5 0.5 0.5
+Ns 200
+
+# Emissive, and Kd black to show Ke does not merely add to a diffuse lobe.
+newmtl Emissive
+Kd 0 0 0
+Ke 3 2 1
+
+# Dissolved, with an index of refraction.
+newmtl Glass
+Kd 0.9 0.95 0.9
+d 0.25
+Ni 1.52
+
+# illum as the authority: a mirror with no Kd at all.
+newmtl Mirror
+Ks 0.9 0.8 0.7
+Ns 800
+illum 3
+
+# Tr is 1 - d, and tobj does not parse it.
+newmtl TrGlass
+Kd 1 1 1
+Tr 0.75
+Ni 1.33
+
+# illum 1 overriding a Ks the heuristics would have blended in.
+newmtl MatteOverride
+Kd 0.3 0.3 0.3
+Ks 0.9 0.9 0.9
+Ns 100
+illum 1
+
+# The fireplace_room case: the transparent illum family on a surface d calls
+# opaque. Stays opaque.
+newmtl OpaqueIllum7
+Kd 0.5 0.5 0.5
+Ks 0.1 0.1 0.1
+Ns 50
+d 1
+illum 7
+
+# map_Kd beside a Kd of black, which is what an exporter writes when the
+# texture is the whole diffuse answer. The Ks must not outweigh it.
+newmtl TexturedPlastic
+Kd 0 0 0
+Ks 0.04 0.04 0.04
+Ns 400
+map_Kd ../textures/checker.jpg
