@@ -845,6 +845,67 @@ structural — an 8-sample render is literally a sub-net of the 4000-sample
 reference — and it flattered every arm by roughly 10% before the references were
 moved to `seed: 1`.
 
+### The pixel reconstruction filter
+
+Done (issue #68): the pixel's sample position is drawn from a tent rather than
+uniformly over the pixel's square, by filter importance sampling — the position
+comes from a density proportional to the filter, so the mean the accumulator
+already computes is the filtered pixel and nothing downstream changes. A tent
+because its inverse CDF is closed form, which keeps the warp monotone per
+dimension and so leaves the sampler's (0,2)-net stratification intact; a
+Blackman-Harris would need rejection sampling and a variable number of draws,
+which would cost exactly that. `RenderConfig::pixel_filter_radius` is the knob,
+0 being the box this replaced, and `pixel_filter_test` measures it on a shallow
+high-contrast edge — where staircasing shows and where the goldens, scored on a
+100x50 downsample, cannot see anything at all.
+
+**The radius has to exceed half a pixel**, which is the one counter-intuitive
+result and the reason the issue as filed could not be built. The issue proposed
+a filter supported *within* the pixel, on the grounds that a wider one needs
+each sample splatted across several pixels. But a tent narrower than a pixel is
+*more* concentrated than the box it replaces, not less, so it sharpens the
+transition instead of softening it. 256 spp, `staircase` being how much the
+sharpest step across the edge varies along it:
+
+| radius | staircase | worst step | edge width |
+|---|---|---|---|
+| 0 (box) | 0.142 | 0.977 | 1.332 px |
+| 0.5 | 0.150 | **1.000** | 1.156 px |
+| 0.75 | 0.119 | 0.895 | 1.332 px |
+| 1 (shipped) | 0.075 | 0.758 | 1.520 px |
+| 1.5 | 0.034 | 0.563 | 1.943 px |
+
+At radius 0.5 the worst step is a full 1.0 — a completely hard black-to-white
+jump between two rows, which is the artifact being removed. Past 1 the staircase
+keeps falling and the blur keeps rising with no knee to pick out, so the shipped
+value is the conventional two-pixel-wide tent.
+
+Going wider than the pixel does not in fact need splatting: splatting shares one
+sample between all the pixels its filter covers, and this gathers instead, each
+pixel drawing its own samples from its own filter and accumulating in place,
+which is what one-thread-one-pixel already does. What sharing was buying was
+variance, though, and that bill is real — a pixel at radius 1 spreads its
+samples over four times the area without getting any more of them. Linear RMSE
+against a 4000 spp reference at 64 spp, box → tent:
+
+| scene | rmse | trimmed |
+|---|---|---|
+| test scene | +3% | +4% |
+| specular | +13% | +12% |
+| Cornell | +10% | +16% |
+| rough metal, over the spheres alone | +85% | — |
+
+The rough metal figure is the worst case and the reason the knob exists: small
+spheres with strong highlights, masked to the spheres, so a two-pixel filter
+straddles the silhouette nearly everywhere inside the mask. It is also why
+`test_rough_metal_converges_with_nee` renders with `pixel_filter_radius: 0` —
+what that test pins is the estimator's noise, and the reconstruction filter is
+not part of it.
+
+Cost in the shader: +21 instructions on `test_scene` (4626 → 4647), with VGPRs
+and occupancy unchanged at 128 and 8 subgroups per SIMD. The arithmetic is free;
+the sampling is what costs.
+
 ### Light selection
 
 Done: `sample_light` picks an emitter in proportion to its emitted power, from

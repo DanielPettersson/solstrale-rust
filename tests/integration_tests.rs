@@ -3063,6 +3063,14 @@ fn test_rough_metal_converges_with_nee() {
         // Off in both arms: adaptive sampling would stop sampling the very
         // pixels whose noise is being measured.
         min_samples_per_pixel: u32::MAX,
+        // The box, in both arms. What this test pins is the estimator's noise,
+        // and the reconstruction filter is not part of it: the shipped tent
+        // spreads each pixel's samples over four times the area, which on
+        // spheres this small is most of one, and the mask below is tight enough
+        // to sit on the silhouette. That alone walks this number from 0.25 to
+        // 0.47 without anything about the estimator having changed. See
+        // `RenderConfig::pixel_filter_radius`.
+        pixel_filter_radius: 0.,
         ..Default::default()
     };
 

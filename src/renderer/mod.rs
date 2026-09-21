@@ -25,6 +25,8 @@ use wgpu::BufferUsages;
 pub mod dielectric_energy;
 pub mod gpu_data;
 #[cfg(test)]
+mod pixel_filter_test;
+#[cfg(test)]
 mod sampler_test;
 pub mod scene_flattener;
 #[cfg(test)]
@@ -136,6 +138,7 @@ impl Specialisation {
         width: u32,
         height: u32,
         low_discrepancy: bool,
+        pixel_filter_radius: f32,
         estimator: Estimator,
         writes_guide: bool,
     ) -> Vec<(&'static str, f64)> {
@@ -156,6 +159,7 @@ impl Specialisation {
             ("nee_enabled", flag(estimator.nee_enabled)),
             ("clamping_threshold", estimator.clamping_threshold as f64),
             ("low_discrepancy", flag(low_discrepancy)),
+            ("pixel_filter_radius", pixel_filter_radius as f64),
             ("writes_guide", flag(writes_guide)),
         ]
     }
@@ -235,6 +239,36 @@ pub struct RenderConfig {
     /// adaptive sampling overstates the variance of the mean and retires each
     /// pixel a little later than it needs to.
     pub low_discrepancy: bool,
+    /// Half-width, in pixels, of the tent the pixel's samples are drawn from.
+    ///
+    /// The reconstruction filter, importance-sampled: the sample position is
+    /// drawn from a density proportional to the filter, so the plain mean the
+    /// accumulator already computes *is* the filtered pixel. 0 is the box
+    /// filter -- a uniform draw over the pixel's own square -- which is what
+    /// this was before issue #68.
+    ///
+    /// **A radius below 0.75 is worse than the box**, which is the one
+    /// counter-intuitive thing here. A tent narrower than the pixel is more
+    /// concentrated than a box, not less, so it makes the transition steeper:
+    /// measured on a shallow high-contrast edge, radius 0.5 turns the sharpest
+    /// step across the edge into a full 1.0 -- a completely hard jump -- where
+    /// the box leaves 0.98 and the default leaves 0.76. Beating a box needs a
+    /// filter wider than the pixel, so that is what the default is.
+    ///
+    /// The cost is noise, and it is the reason this is a knob rather than a
+    /// constant. Each pixel draws its own samples and keeps them -- the tracer
+    /// has one thread per pixel and no way to splat a sample onto its
+    /// neighbours -- so a wider filter spreads a pixel's samples over more of
+    /// the image without giving it any more of them. Against a converged
+    /// reference at 64 spp, the default costs 3% of the linear RMSE on the test
+    /// scene and 10% on Cornell; on the rough metal spheres, measured over the
+    /// spheres alone, it costs 85%. Somewhere with small high-contrast
+    /// geometry and a sample budget to match, 0 is a defensible choice.
+    ///
+    /// Reaches the shader as an override constant, like `low_discrepancy`, so
+    /// the box costs no branch at run time. `pixel_filter_test` is what
+    /// measures the trade.
+    pub pixel_filter_radius: f32,
     /// Distinguishes two otherwise identical renders of the same scene.
     ///
     /// Feeds the initial `restart_index`, which is mixed into every pixel's
@@ -291,6 +325,7 @@ impl Default for RenderConfig {
             min_samples_per_pixel: 32,
             variance_threshold: 0.01,
             low_discrepancy: true,
+            pixel_filter_radius: 1.,
             seed: 0,
             post_processors: vec![],
             preview: false,
@@ -909,6 +944,7 @@ impl<'a> Renderer<'a> {
                 width,
                 height,
                 scene.render_config.low_discrepancy,
+                scene.render_config.pixel_filter_radius,
                 estimator,
                 writes_guide,
             ),

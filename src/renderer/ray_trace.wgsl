@@ -170,6 +170,17 @@ const GUIDE_FAR = 1e7;
 // See `Renderer::bsdf_only_reference`.
 override clamping_threshold: f32 = 10.0;
 
+// Radius, in pixels, of the tent the pixel's samples are drawn from. 0 is the
+// box filter this used to be: a uniform draw over the pixel's own square.
+//
+// See `pixel_filter_warp` for why it is a tent, and why a radius past half a
+// pixel is available at all. An override rather than a uniform for the same
+// reason `low_discrepancy` is one: it is fixed for the life of a pipeline, so
+// the box costs no branch at run time. Driven by
+// `RenderConfig::pixel_filter_radius`, which is also where the trade is
+// written down.
+override pixel_filter_radius: f32 = 1.0;
+
 const PI = 3.14159265359;
 
 // Offset used to push ray origins off the surface they start from, and to stop
@@ -2463,6 +2474,49 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
     return out;
 }
 
+// Inverse CDF of a tent of half-width `pixel_filter_radius`, mapping [0,1) onto
+// [-radius, radius].
+fn tent_warp(u: f32) -> f32 {
+    if (u < 0.5) {
+        return pixel_filter_radius * (sqrt(2.0 * u) - 1.0);
+    }
+    return pixel_filter_radius * (1.0 - sqrt(2.0 - 2.0 * u));
+}
+
+// Warps a uniform pair into an offset within the pixel, distributed as the
+// reconstruction filter. Returns the offset from the pixel's corner, so 0.5 is
+// its centre.
+//
+// Filter importance sampling: draw the sample position from a pdf proportional
+// to the filter and the plain mean of the samples is already the filtered
+// pixel, because the weight and the density cancel. Nothing downstream changes
+// -- the accumulator still averages.
+//
+// A tent because its inverse CDF is closed form, which matters more here than
+// its shape. The warp is monotone in each dimension separately, so it maps the
+// sampler's (0,2)-net onto the filter without disturbing the stratification;
+// a Blackman-Harris would need rejection sampling, whose variable number of
+// draws would cost exactly that.
+//
+// The radius may exceed half a pixel, which is the part that looks like it
+// should need splatting and does not. Splatting shares one sample between all
+// the pixels whose filter covers it; this gathers instead, each pixel drawing
+// its own samples from its own filter and accumulating in place, which is what
+// the one-thread-one-pixel architecture already does. Gathering is what makes a
+// wide filter *possible* here -- and a radius under half a pixel is worse than
+// no filter at all, so it is the only way to beat the box.
+//
+// What sharing was buying is variance, not correctness, and the bill comes here
+// instead: a pixel spreads its samples over four times the area at radius 1
+// without getting any more of them, so every sample near a high-contrast edge
+// now straddles it. `RenderConfig::pixel_filter_radius` has what that costs.
+fn pixel_filter_warp(u: vec2<f32>) -> vec2<f32> {
+    // Radius 0 is the box this used to be: the uniform draw, unwarped. An
+    // override, so naga folds this away rather than branching per sample.
+    if (pixel_filter_radius <= 0.0) { return u; }
+    return vec2<f32>(0.5 + tent_warp(u.x), 0.5 + tent_warp(u.y));
+}
+
 // Traces one path for the given pixel and sample index.
 //
 // Next-event estimation with multiple importance sampling: at every
@@ -2481,7 +2535,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * width + pixel.x;
     let smp = sampler_new(index, sample_index);
 
-    let jitter = sampler_2d(smp, PAIR_PIXEL_JITTER);
+    let jitter = pixel_filter_warp(sampler_2d(smp, PAIR_PIXEL_JITTER));
     let u = (f32(pixel.x) + jitter.x) / f32(width);
     let v = 1.0 - (f32(pixel.y) + jitter.y) / f32(height);
 
