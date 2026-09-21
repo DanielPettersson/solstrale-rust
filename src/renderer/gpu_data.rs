@@ -6,20 +6,6 @@ use std::fmt::Debug;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-/// Ray structure matching WGSL layout
-pub struct Ray {
-    /// Origin of the ray
-    pub origin: [f32; 3],
-    /// Padding to align to 16 bytes
-    pub _padding1: f32,
-    /// Direction of the ray
-    pub direction: [f32; 3],
-    /// Padding to align to 16 bytes
-    pub _padding2: f32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Sphere structure matching WGSL layout
 pub struct Sphere {
     /// Center of the sphere + radius in w

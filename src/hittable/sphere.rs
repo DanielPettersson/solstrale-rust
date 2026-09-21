@@ -1,6 +1,6 @@
 use crate::geo::Aabb;
 use crate::geo::vec3::Vec3;
-use crate::hittable::{Hittable, Hittables};
+use crate::hittable::Hittable;
 use crate::material::{Material, Materials};
 
 /// A sphere-shaped hittable object
@@ -30,14 +30,6 @@ impl Sphere {
 impl Hittable for Sphere {
     fn bounding_box(&self) -> &Aabb {
         &self.b_box
-    }
-
-    fn get_lights(&self) -> Vec<Hittables> {
-        if self.mat.is_light() {
-            vec![self.clone().into()]
-        } else {
-            vec![]
-        }
     }
 
     fn has_lights(&self) -> bool {

@@ -1,14 +1,13 @@
 #[cfg(test)]
 mod tests {
     use solstrale::renderer::gpu_data::{
-        BvhNode, GpuRenderConfig, LightRef, Material, QuadAttr, QuadPos, Ray, Sphere, TriangleAttr,
+        BvhNode, GpuRenderConfig, LightRef, Material, QuadAttr, QuadPos, Sphere, TriangleAttr,
         TrianglePos,
     };
     use std::mem::{offset_of, size_of};
 
     #[test]
     fn test_struct_sizes() {
-        assert_eq!(size_of::<Ray>(), 32);
         assert_eq!(size_of::<Sphere>(), 32);
         assert_eq!(size_of::<Material>(), 96);
         // Split hot/cold: traversal reads only the *Pos structs.
