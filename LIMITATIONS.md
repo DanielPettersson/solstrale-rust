@@ -226,22 +226,43 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   energy loss above, which smooth glass never pays — which is why the
   whole-frame row is not zero, and why compensating the dielectric would pay
   off here as well as on rough glass.
-- **Rough glass loses energy, and no correction puts it back.** The dielectric
-  is single-scatter GGX, as the conductor was before Turquin's factor: every
-  ray a microfacet sends onto another microfacet is dropped. Measured in a
-  furnace — a lossless glass ball in a uniform environment must be invisible,
-  which is a cleaner invariant than the conductor's because it holds for any
-  IOR and any number of internal bounces — a white 1.5 sphere reads
+- **The dielectric's multiple scattering is a table, not a fit.** Single-
+  scatter GGX drops every ray a microfacet sends onto another microfacet, and
+  uncompensated a white 1.5 ball read 1.0000 / 0.9942 / 0.8502 / 0.5805 /
+  0.3702 in a furnace across roughness 0 to 1 — a fully rough ball kept a third
+  of what it was given. `dielectric_multiscatter` divides `f` by the energy the
+  lobe does return, and `test_ggx_dielectric_is_energy_conserving_in_a_furnace`
+  now reads 1.0000 / 0.9937 / 1.0022 / 0.9985 / 1.0005 at 1.5 and within 0.005
+  of 1 at 1.33.
 
-  ```text
-  roughness  0      0.15    0.3     0.5     0.75    1
-             1.0000 0.9983  0.9785  0.8502  0.5805  0.3702
-  ```
+  A table where the conductor has a polynomial, for a reason that is not a
+  matter of taste: `E` depends on the index of refraction through the critical
+  angle, which is a kink rather than a curve, and fitting across it is what a
+  polynomial cannot do. Making the index a per-material table removes it from
+  the fit, and the two variables left are smooth enough for 16x16 bilinear to
+  carry to 0.005 — better than the 0.014 to 0.033 the conductor's fit gives.
+  The cost is a storage buffer, a per-material offset in what was padding, and
+  one build per distinct index in the scene, skipped entirely unless something
+  can make a dielectric rough.
 
-  Smooth glass is exactly invisible, which is the check that the Dirac path is
-  lossless; a fully rough ball keeps 37% of what it is given. The compensation
-  is its own commit, as it was for metal, and the artefact that would pin it is
-  a dielectric furnace test this one does not add.
+  The compensation multiplies `f` and not the sampling density, so both
+  estimators of a vertex get the same factor and MIS is untouched. There is no
+  `f0` weighting, unlike the conductor's: light that bounces twice between
+  microfacets is tinted twice on a metal, and a dielectric interface tints
+  nothing.
+- **Compensation and the firefly clamp fight at a high index.** The furnace
+  reads 0.9320 at index 2.0 and 0.8004 at 2.4 for a fully rough ball, and that
+  is the clamp rather than the table: with `clamping_threshold` lifted the 2.4
+  row is 1.0000 / 0.9766 / 0.9987 / 1.0180 / 0.9992.
+
+  `dielectric_multiscatter` is `1 / E`, and at a high index with heavy total
+  internal reflection `E` falls toward 0.3, so a single vertex can carry a
+  weight above 3. A path taking several such vertices before it escapes arrives
+  with a throughput in the tens, meets the clamp at 10, and loses the rest. The
+  compensation is unbiased in expectation; the clamp is not, and at a high index
+  the tail it cuts is exactly where the compensated energy lives. Glass and
+  water are unaffected — the effect needs an index around 2 before it is
+  visible at all — so this is recorded rather than fixed.
 - **Glass is non-dispersive.** `Dielectric` now has a Beer–Lambert interior
   absorption and a GGX microfacet lobe at both interfaces. Dispersion still
   needs per-wavelength transport, which breaks the `vec3 throughput` shortcut

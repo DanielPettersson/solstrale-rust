@@ -116,7 +116,8 @@ struct Material {
     fuzz: f32,
     refraction_index: f32,
     mat_type: u32,
-    _padding3: u32,
+    // Start of this material's pair of energy grids in `dielectric_energy`.
+    energy_offset: u32,
     texture_index: i32,
     normal_texture_index: i32,
     blend_indices: vec2<u32>,
@@ -344,6 +345,16 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 // and `pack_oct` in scene_flattener.rs.
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
+
+// Single-scatter directional albedo of the rough dielectric, one 16x16 grid per
+// side per index of refraction, concatenated. See renderer/dielectric_energy.rs
+// for how it is built and why it is a table rather than a fit; `Material`'s
+// `energy_offset` says where a material's pair of grids starts.
+//
+// Empty and never read unless `has_rough_dielectrics`, which is the same
+// condition that compiles out the arm that reads it.
+@group(0) @binding(16)
+var<storage, read> dielectric_energy: array<f32>;
 
 // ---------------------------------------------------------------------------
 // Pipeline specialisation
@@ -1274,6 +1285,42 @@ fn dielectric_half_transmit(wo: vec3<f32>, wi: vec3<f32>, eta_ti: f32) -> vec3<f
     return wi * eta_ti + wo;
 }
 
+// Grid shape, mirroring `ENERGY_COS_STEPS` and `ENERGY_ALPHA_STEPS`.
+const ENERGY_COS_STEPS = 16u;
+const ENERGY_ALPHA_STEPS = 16u;
+const ENERGY_SIDE_STRIDE = ENERGY_COS_STEPS * ENERGY_ALPHA_STEPS;
+
+// Turquin 2019's compensation for the dielectric: the single-scatter lobe drops
+// every ray a microfacet sends onto another microfacet, and dividing `f` by the
+// energy it *does* return puts that back.
+//
+// Two differences from the conductor's. There is no `f0` weighting -- light
+// that bounces twice between microfacets is tinted twice on a metal, and a
+// dielectric interface tints nothing -- so the factor is a plain `1 / E`. And
+// `E` comes from a bilinear table rather than a polynomial, because it depends
+// on the index of refraction through the critical angle, which is a kink no
+// polynomial follows; making the index a per-material table removes it from the
+// fit entirely.
+//
+// Multiplies `f` alone. The sampling density is untouched, so MIS is untouched,
+// and both estimators of a vertex get the same factor.
+fn dielectric_multiscatter(offset: u32, cos_o: f32, alpha: f32) -> f32 {
+    let x = clamp(cos_o, 0.0, 1.0) * f32(ENERGY_COS_STEPS - 1u);
+    let y = clamp(sqrt(alpha), 0.0, 1.0) * f32(ENERGY_ALPHA_STEPS - 1u);
+    let x0 = min(u32(x), ENERGY_COS_STEPS - 2u);
+    let y0 = min(u32(y), ENERGY_ALPHA_STEPS - 2u);
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+
+    let row0 = offset + y0 * ENERGY_COS_STEPS + x0;
+    let row1 = row0 + ENERGY_COS_STEPS;
+    let lo = mix(dielectric_energy[row0], dielectric_energy[row0 + 1u], fx);
+    let hi = mix(dielectric_energy[row1], dielectric_energy[row1 + 1u], fx);
+    // Floored for the same reason the conductor's fit is clamped: nothing here
+    // may turn into a division by zero at the rough, grazing corner.
+    return 1.0 / max(mix(lo, hi, fy), 0.05);
+}
+
 // d(w_h) / d(w_i) for the transmission lobe. The one factor in this whole
 // section that is easy to write upside down, which is why
 // `test_bsdf_only_sampling_converges_to_the_same_image` carries a rough glass
@@ -1360,6 +1407,9 @@ struct Surface {
     fuzz: f32,
     refraction_index: f32,
     mat_type: u32,
+    // Carried straight from the material; `bsdf_from_surface` picks the half
+    // that matches the side the ray is on.
+    energy_offset: u32,
 }
 
 // The blend walk nests to a data-dependent depth, so its coin flips go to
@@ -1427,6 +1477,7 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
     surface.attenuation_factor = material.attenuation_factor;
     surface.fuzz = material.fuzz;
     surface.refraction_index = material.refraction_index;
+    surface.energy_offset = material.energy_offset;
 
     surface.albedo = material.albedo;
     if (has_textures && material.texture_index >= 0) {
@@ -1508,6 +1559,9 @@ struct Bsdf {
     // Relative index of refraction, already resolved against which side of the
     // surface the ray is on.
     ior: f32,
+    // Start of the energy grid for *this side* of this material, resolved the
+    // same way `ior` is, so nothing below has to know which side it is on.
+    energy_offset: u32,
     kind: u32,
 }
 
@@ -1542,6 +1596,8 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
     // fuzz above 1 where GGX stops being meaningful.
     b.alpha = clamp(surface.fuzz * surface.fuzz, 0.0, 1.0);
     b.ior = select(surface.refraction_index, 1.0 / surface.refraction_index, front_face);
+    // Entering is the first half of the table, leaving the second.
+    b.energy_offset = surface.energy_offset + select(ENERGY_SIDE_STRIDE, 0u, front_face);
 
     if (surface.mat_type == MAT_LAMBERTIAN) {
         b.kind = BSDF_DIFFUSE;
@@ -1674,9 +1730,14 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         // both halves scale by their own Jacobian and lobe-selection chance.
         let d_vis = d * cos_oh / ((1.0 + lambda_o) * wo_f.z);
 
+        // Both halves are compensated by the same factor: what multiple
+        // scattering returns is energy, and which lobe it comes back through is
+        // not something the single-scatter model can say.
+        let comp = dielectric_multiscatter(b.energy_offset, wo_f.z, b.alpha);
+
         if (is_reflect) {
             // f * |cos_i| with the BSDF's own 1 / |cos_i| already cancelled.
-            e.f_cos = vec3<f32>(f * d * g2 / (4.0 * wo_f.z));
+            e.f_cos = vec3<f32>(comp * f * d * g2 / (4.0 * wo_f.z));
             e.pdf = f * d_vis / (4.0 * cos_oh);
         } else {
             let t = 1.0 - f;
@@ -1685,7 +1746,7 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
             // No eta^2 radiance factor, here or in bsdf_sample: it cancels over
             // a closed object, the smooth arm omits it, and what MIS requires
             // is that the two estimators agree with each other.
-            e.f_cos = vec3<f32>(t * d * g2 * cos_oh * jacobian / wo_f.z);
+            e.f_cos = vec3<f32>(comp * t * d * g2 * cos_oh * jacobian / wo_f.z);
             e.pdf = t * d_vis * jacobian;
         }
     }
@@ -1814,8 +1875,12 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             s.wi = normalize(direction);
             // The VNDF cancellation, exactly the conductor's minus the Fresnel
             // term -- which cancels here against the chance of having picked
-            // this half of the lobe. Both halves collapse to the same G2 / G1.
-            s.weight = vec3<f32>((1.0 + lambda_o) / (1.0 + lambda_o + lambda_i));
+            // this half of the lobe. Both halves collapse to the same G2 / G1,
+            // times the multiple-scattering factor `bsdf_eval` also applies.
+            s.weight = vec3<f32>(
+                dielectric_multiscatter(b.energy_offset, wo_f.z, b.alpha)
+                    * (1.0 + lambda_o) / (1.0 + lambda_o + lambda_i)
+            );
             let d_vis = ggx_d(h.z, b.alpha) * cos_oh / ((1.0 + lambda_o) * wo_f.z);
             if (is_reflect) {
                 s.pdf = f * d_vis / (4.0 * cos_oh);

@@ -22,6 +22,7 @@ use image::{DynamicImage, Rgb, RgbImage};
 use simple_error::SimpleError;
 use wgpu::BufferUsages;
 
+pub mod dielectric_energy;
 pub mod gpu_data;
 #[cfg(test)]
 mod sampler_test;
@@ -729,6 +730,17 @@ impl<'a> Renderer<'a> {
             &scene_data.quad_pos,
             BufferUsages::STORAGE,
         );
+        // Empty unless the scene can present a rough dielectric, in which case
+        // it is one 512-entry table per distinct index of refraction.
+        // `create_and_upload_buffer` pads an empty slice up to a valid binding.
+        let dielectric_energy_buffer = create_and_upload_buffer(
+            device,
+            queue,
+            "Dielectric Energy Buffer",
+            &scene_data.dielectric_energy,
+            BufferUsages::STORAGE,
+        );
+
         let quad_attr_buffer = create_and_upload_buffer(
             device,
             queue,
@@ -875,6 +887,7 @@ impl<'a> Renderer<'a> {
                 storage_binding(true, 0),  // 13: quad attributes
                 storage_binding(false, 0), // 14: per-pixel sample count
                 storage_binding(false, 0), // 15: guide (denoiser G-buffer)
+                storage_binding(true, 0),  // 16: dielectric energy tables
             ],
         );
 
@@ -946,6 +959,7 @@ impl<'a> Renderer<'a> {
                 wgpu::BindingResource::Buffer(quad_attr_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(sample_count_buffer.as_entire_buffer_binding()),
                 wgpu::BindingResource::Buffer(gbuffer.as_entire_buffer_binding()),
+                wgpu::BindingResource::Buffer(dielectric_energy_buffer.as_entire_buffer_binding()),
             ],
         );
 
