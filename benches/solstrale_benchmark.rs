@@ -681,10 +681,15 @@ pub fn post_benchmark(c: &mut Criterion) {
 /// What it costs to get the finished image off the GPU.
 ///
 /// On no other bench path at all: `render_and_sync` consumes progress and polls
-/// but never reads back, so the copy, the map and the tone-mapped encode in
-/// `buffer_to_image` were unmeasured -- including the 198 ms -> 25 ms at 4K that
-/// its own doc comment claims. Two sizes an order of magnitude apart, because
-/// the staging allocation is a fixed cost and the 133 MB read at 4K is not.
+/// but never reads back, so the tone-map pass, the copy and the map in
+/// `buffer_to_image` are unmeasured without this arm -- including every number
+/// its doc comment claims. Two sizes an order of magnitude apart, because the
+/// two allocations and the pipeline lookup are fixed costs where the 33 MB
+/// read at 4K is not.
+///
+/// Throughput is quoted against the 16 bytes a pixel the pass reads on the GPU
+/// side, not the 4 it copies back, so the two are comparable across the move
+/// of the curve onto the GPU.
 ///
 /// The scene is rendered once per size, outside the timed closure: what is
 /// being measured is the readback, not the trace.

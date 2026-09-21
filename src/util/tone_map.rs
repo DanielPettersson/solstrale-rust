@@ -123,17 +123,20 @@ impl ToneMapper {
     /// it can be concatenated into any shader that needs to display the
     /// renderer's linear buffer.
     ///
-    /// This exists because the display transform has more than one
-    /// implementation: [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image)
-    /// runs on the CPU when an image is saved, while an interactive viewer
-    /// blits the buffer to a surface on the GPU and never goes near it. Two
-    /// hand-written copies of a curve drift, and a preview that disagrees with
-    /// the saved file is a bug that is easy to look straight past.
+    /// This is where the curve runs in anger: the saved image goes through it
+    /// in [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image)'s pack
+    /// pass, the denoiser's resolve pass judges residual noise through it, and
+    /// an interactive viewer blits the buffer to a surface with it. Splicing
+    /// one emitted source into all three is what keeps them from drifting --
+    /// a preview that disagrees with the saved file is a bug that is easy to
+    /// look straight past.
     ///
-    /// Every coefficient here is formatted in from the same constant
-    /// [`ToneMapper::map`] uses, and `wgsl_matches_the_cpu_curve` runs this
-    /// source on the GPU and checks it against `map` over the range, so the two
-    /// cannot drift apart unnoticed.
+    /// [`ToneMapper::map`] is still the CPU implementation of the same curve,
+    /// for callers that have pixels in hand rather than a buffer on the device.
+    /// Every coefficient here is formatted in from the same constant `map`
+    /// uses, and `wgsl_matches_the_cpu_curve` runs this source on the GPU and
+    /// checks it against `map` over the range, so the two cannot drift apart
+    /// unnoticed.
     pub fn wgsl(&self) -> String {
         // NaN is folded to zero explicitly rather than left to `max`: WGSL does
         // not define which operand `max` returns for NaN, where Rust's `f32::max`
