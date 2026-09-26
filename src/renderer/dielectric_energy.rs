@@ -13,15 +13,13 @@
 //! twice between microfacets is tinted twice on a metal, and a dielectric
 //! interface tints nothing.
 //!
-//! **A table rather than a fit, unlike the conductor's.** `E` depends on the
-//! relative index as well as on the angle and the roughness, and it depends on
-//! it discontinuously in effect: below the critical angle a microfacet
-//! transmits, above it the surface is a mirror, and the critical angle *is* the
-//! index. Fitting a polynomial across that is fitting across a kink. Making the
-//! index an axis instead of a parameter removes it from the problem entirely --
-//! the table is built for the index the material actually has, and what is left
-//! is a surface in two variables smooth enough for 16x16 bilinear to carry to
-//! 0.005, against the 0.014 to 0.033 the conductor's fit gives.
+//! **A table rather than a fit, unlike the conductor's.** `E` also depends on
+//! the relative index, and effectively discontinuously: below the critical
+//! angle a microfacet transmits, above it the surface is a mirror, and the
+//! critical angle *is* the index. Building the table for the index the material
+//! has removes that from the problem, leaving a surface in two variables smooth
+//! enough for 16x16 bilinear to carry to 0.005, against the 0.014 to 0.033 the
+//! conductor's fit gives.
 //!
 //! The cost of that choice is a storage buffer and a per-material offset, and
 //! one table build per distinct index in the scene -- `E` does not depend on

@@ -13,14 +13,18 @@ A WGPU-based GPU Monte Carlo path tracing library, with features like:
 * Refraction
 * Soft shadows
 * Bump mapping
-* Smooth shading: per-vertex normals are interpolated across a triangle, so an
-  imported mesh looks like the surface it approximates rather than like its
-  facets. Taken from the model's own `vn` records, or generated at a default
-  crease angle when it has none, so hard edges stay hard. `with_flat_shading`
-  turns generation off
 * Light attenuation
+* Smooth shading: per-vertex normals are interpolated across a triangle, taken
+  from the model's own `vn` records or generated at a default crease angle when
+  it has none, so hard edges stay hard. `with_flat_shading` turns generation off
+* GGX microfacet metal and glass, both with Turquin multiple-scattering energy
+  compensation, so a rough surface does not darken as its roughness rises.
+  `Metal::albedo` is f0 and `fuzz` is a perceptual roughness; `Dielectric` takes
+  a roughness of its own, plus a per-world-unit Beer-Lambert absorption
 * Next-event estimation with multiple importance sampling, for much lower noise
-  per sample on scenes lit by discrete lights
+  per sample on scenes lit by discrete lights. Lights are picked in proportion
+  to their emitted power through an alias table, and a large quad light is
+  sampled by solid angle rather than by area
 * Owen-scrambled Sobol sampling, hash-based and table-free, padded into
   independent 2D sequences per draw. Cuts error against a converged reference by
   25-40% on the test scenes at every sample count, for the same work -- it does
@@ -28,12 +32,17 @@ A WGPU-based GPU Monte Carlo path tracing library, with features like:
   rather than plain stratification because adaptive sampling retires each pixel
   at a sample count nobody knows in advance, and only Owen scrambling keeps a
   truncated sequence unbiased
+* Per-pixel adaptive sampling: a pixel stops being traced once the relative
+  standard error of its own estimate falls below `variance_threshold`
 * Russian roulette path termination
 
 ### Performance & Loading
-* Loading of obj models with included materials and per-vertex normals
-* Multithreaded BVH construction using Rayon, with a binned SAH split heuristic
-  and front-to-back ordered GPU traversal
+* Loading of obj models with included materials and per-vertex normals, with MTL
+  materials mapped onto the crate's material types
+* Multithreaded BVH construction using Rayon, with a binned SAH sweep over all
+  three axes and front-to-back ordered GPU traversal
+* The tracer is compiled against the scene it is tracing, so a branch the scene
+  could never have taken is not in the shader at all
 
 ### Post-Processing
 Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
@@ -46,6 +55,9 @@ Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https:/
   is faded back in against each pixel's neighbourhood rather than against its own
   noise-inflated brightness, and outlier rejection runs alongside the filter's
   variance pre-pass for the tail an edge-avoiding filter cannot reach
+* With `RenderConfig::preview`, the denoiser and the saturation grade also run
+  on the unfinished image, so an interactive viewport is filtered while the
+  camera is moving rather than only once it stops
 
 ### Display
 * Tone mapping: ACES filmic by default, with Khronos PBR Neutral, extended
@@ -128,9 +140,12 @@ fn main() {
 | `samples_per_pixel` | 50 | Paths traced per pixel |
 | `max_depth` | 10 | Maximum ray bounces before a path is cut off |
 | `samples_per_batch` | 4 | Samples traced per GPU dispatch |
+| `min_samples_per_pixel` | 32 | Samples a pixel must reach before adaptive sampling may retire it |
+| `variance_threshold` | 0.01 | Relative standard error below which a pixel is retired |
 | `low_discrepancy` | `true` | Draw samples from an Owen-scrambled Sobol sequence rather than white noise |
 | `seed` | 0 | Distinguishes two otherwise identical renders |
 | `post_processors` | none | Filters applied to the final image |
+| `preview` | `false` | Run the preview post-processors on every batch, not just the last |
 
 Order matters in `post_processors`: put the denoiser first. Denoising a bloomed
 image blurs the bloom, while bloom applied to a denoised image is what you want.
@@ -138,7 +153,18 @@ image blurs the bloom, while bloom applied to a denoised image is what you want.
 `samples_per_batch` trades reporting granularity for throughput: larger batches
 amortise dispatch overhead and collapse the per-sample read-modify-write of the
 accumulation buffer, but render progress is reported less often and camera
-changes take longer to take effect.
+changes take longer to take effect. The renderer tunes the actual size down from
+here to keep a single dispatch inside one vsync interval.
+
+`variance_threshold` is a noise floor, not only a speed knob: retiring is
+permanent, so a pixel keeps whatever error it had when it passed the test and no
+amount of `samples_per_pixel` pushes it lower. Set `min_samples_per_pixel` above
+`samples_per_pixel` to disable adaptive sampling entirely.
+
+`preview` is what an interactive viewport wants. A camera drag restarts the
+accumulation on every frame and so never reaches a last batch, which is the one
+regime a denoiser is built for; the cost is a full run of those processors per
+batch whether or not anyone is watching, hence the default.
 
 `seed` matters when a render is being measured against another one. Two renders
 that share a seed trace the same sample stream, so a low-sample render and the
@@ -157,6 +183,27 @@ work are recorded there as having been measured and found to lie.
 Outstanding work is tracked in
 [GitHub issues](https://github.com/DanielPettersson/solstrale-rust/issues),
 prioritised `P1`/`P2`/`P3`.
+
+## Upgrading to 0.5
+`Metal` is now a GGX microfacet conductor. `albedo` means f0, the reflectance at
+normal incidence, rather than a flat multiplier, and `fuzz` is a perceptual
+roughness used as `alpha = fuzz * fuzz`. Numbers are not comparable with the old
+fuzz parameter: the same value reads noticeably sharper.
+
+`Dielectric::new` takes two more arguments, `albedo` and `roughness`. `albedo`
+is the fraction transmitted per world unit travelled inside the glass, so
+`SolidColor::new(1., 1., 1.)` is clear glass and exactly a no-op; `roughness` is
+the same perceptual roughness `Metal` takes, and `0.` is the smooth glass of
+earlier versions.
+
+`Sphere::new` takes a `&dyn Transformer` as its fourth argument, like `Quad::new`
+and `Triangle::new`. Pass `&NopTransformer()` to keep the old behaviour.
+
+`buffer_to_image` takes a `ToneMapper`. `ToneMapper::Clamp` reproduces what
+earlier versions did; `ToneMapper::default()` is ACES filmic.
+
+`RenderConfig` gained `preview`, and `Hittable::get_lights` and `GpuRay` are
+gone. `AttenuatedColor` is deprecated and will be removed.
 
 ## Upgrading to 0.4
 `PostProcessor::post_process` now takes a single `PostProcessContext` instead of

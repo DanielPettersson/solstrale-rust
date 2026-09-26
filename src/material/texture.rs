@@ -1,18 +1,15 @@
 //! Contains textures to be used by materials
 //!
 //! Colour authored in code is linear; colour read from an image file is not.
-//! A [`SolidColor`] is taken at face value, and so is an MTL `Kd` triple,
-//! because a number written by hand is a linear radiance. Image data is sRGB
-//! encoded, so [`ImageMap::color`] decodes it. The asymmetry is deliberate:
-//! the two live in different spaces because they were authored in different
-//! spaces.
+//! A [`SolidColor`] and an MTL `Kd` triple are taken at face value, while image
+//! data is sRGB encoded and [`ImageMap::color`] decodes it.
 //!
 //! Only *colour* is decoded. Normal and height maps are geometry stored in a
-//! byte, never a colour, and go through the raw
+//! byte, and go through the raw
 //! [`rgb_to_vec3`](crate::util::rgb_color::rgb_to_vec3) -- including the
-//! normal-versus-height heuristic in `load_bump_map`, which decides on whether
-//! pixel triples have unit length and would misclassify every bump map in the
-//! project if the bytes were bent through a transfer function first.
+//! normal-versus-height heuristic in `load_bump_map`, which tests whether pixel
+//! triples have unit length and would misclassify every bump map in the project
+//! if the bytes were bent through a transfer function first.
 use std::error::Error;
 use std::sync::Arc;
 

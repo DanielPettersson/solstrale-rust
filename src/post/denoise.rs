@@ -36,48 +36,33 @@ pub enum DenoiseGuide {
 /// same tone curve and gamma the readback applies, reaching full strength at
 /// `FULL_STRENGTH_GRAIN` code values. Measured against a converged reference
 /// on the test scene, it cuts linear RMSE by half at 8 samples per pixel and by
-/// about a quarter at 64.
-///
-/// That criterion replaced the pixel's relative standard error, and the
-/// difference is the whole of why a denoised image now gets smoother as the
-/// sample count rises. On a Cornell box, displayed grain in code values:
+/// about a quarter at 64. Displayed grain on a Cornell box, in code values:
 ///
 /// ```text
 ///                2 spp   8 spp  32 spp  128 spp
 /// raw           15.366   9.428   5.645    3.121
-/// before         3.009   3.566   3.512    2.632
-/// now            2.066   1.739   1.426    1.060
+/// denoised       2.066   1.739   1.426    1.060
 /// ```
 ///
-/// The old fade was linear in the standard error while the standard error falls
-/// as `1/sqrt(n)`, so it handed noise back at the rate the sampler removed it --
-/// and it only committed fully to noise worth 13 to 30 code values, where the
-/// eye picks grain out of a flat wall at about one. The cost of the new one is
-/// that "converged" no longer means "untouched": at 2000 samples per pixel the
-/// filter still moves the test scene by 2.4% of linear RMSE, though half the
-/// frame moves by under half a code value. See `denoise_resolve.wgsl`.
+/// The cost of judging visibility rather than convergence is that "converged"
+/// no longer means "untouched": at 2000 samples per pixel the filter still moves
+/// the test scene by 2.4% of linear RMSE, though half the frame moves by under
+/// half a code value. See `denoise_resolve.wgsl`.
 ///
-/// An edge-avoiding filter cannot remove a firefly on its own -- a firefly is an
-/// edge by every measure such a filter has -- so what decided a firefly's fate
-/// was the fade above, and it leaked at two scales. The fade's denominator was
-/// the pixel's own luminance, which biases it to preserve noise that moved a
-/// pixel up and remove noise that moved it down; it is now the lower of that and
-/// the pixel's neighbourhood level. And the variance pre-pass now also does
-/// outlier rejection, which covers the extreme tail and the below-two-samples
-/// case the fade never runs on at all. See the block comments on `level` in
-/// `denoise_resolve.wgsl` and on `prefilter_variance` in `denoise_atrous.wgsl`.
-///
-/// Measured on a Cornell box through the display transform, counting pixels more
-/// than 20 of 255 brighter than every neighbour, the denoiser used to leave
-/// 1000-3000 of them at every sample count from 2 upwards. It now leaves at most
-/// one at strength 5, and 129 of a raw render's 11780 at strength 1.
+/// Fireflies are handled apart from the filter, which cannot remove one on its
+/// own -- a firefly is an edge by every measure such a filter has. The fade's
+/// denominator is the lower of the pixel's own luminance and its neighbourhood
+/// level, and the variance pre-pass also does outlier rejection for the extreme
+/// tail and the below-two-samples case the fade never runs on. Counting pixels
+/// more than 20 of 255 brighter than every neighbour on a Cornell box, that
+/// leaves at most one at strength 5, and 129 of a raw render's 11780 at
+/// strength 1. See the block comments on `level` in `denoise_resolve.wgsl` and
+/// on `prefilter_variance` in `denoise_atrous.wgsl`.
 ///
 /// Costs eight compute dispatches, run once on the finished image: 6.6 ms at
 /// 800x600 on a Radeon RX 5700 XT, against 52 ms for the render itself at 16
 /// samples per pixel. The cost is per pixel and independent of sample count, so
-/// it matters less the longer the render. Outlier rejection adds no dispatch of
-/// its own: it needs the same guide-weighted neighbourhood the variance pre-pass
-/// was already gathering.
+/// it matters less the longer the render.
 ///
 /// Place this first in [`crate::renderer::RenderConfig::post_processors`].
 /// Denoising a bloomed image blurs the bloom; bloom applied to a denoised image
@@ -142,27 +127,21 @@ const MAX_ITERATIONS: u32 = 8;
 ///
 /// The fade in `denoise_resolve.wgsl` is a linear ramp, so the grain it leaves
 /// behind is `g * (1 - g / tau)` for a displayed noise level `g`. That peaks at
-/// `g = tau / 2` and is worth **`tau / 4`** there, whatever the sample count. So
-/// this constant does not set how hard the filter runs so much as bound what it
-/// is allowed to leave: at 2 code values the worst case anywhere in the image,
-/// at any sample count, is half a code value -- below the quantisation step of
-/// the image it is written into, so unrepresentable rather than merely subtle.
+/// `g = tau / 2` and is worth `tau / 4` there, whatever the sample count. So
+/// this constant bounds what the filter is allowed to leave rather than setting
+/// how hard it runs: at 2 code values the worst case anywhere in the image is
+/// half a code value, below the quantisation step of the image it is written
+/// into.
 ///
-/// 2 is also about where grain stops being visible rather than where it stops
-/// being measurable: on a flat mid-grey wall it is roughly 0.8% contrast,
-/// against the ~1% the eye resolves in a smooth gradient.
+/// 2 is also about where grain stops being visible: on a flat mid-grey wall it
+/// is roughly 0.8% contrast, against the ~1% the eye resolves in a gradient.
+/// Adaptive sampling retires a pixel at 0.42 to 0.75 code values, so full
+/// strength sits a factor of about three above where the sampler stops caring,
+/// and the ramp's tail covers the gap.
 ///
-/// The renderer's own numbers agree on the order of magnitude. Adaptive sampling
-/// retires a pixel at `variance_threshold` = 0.01 relative standard error, which
-/// through the display transform is 0.42 to 0.75 code values depending on
-/// brightness. So "full strength" sits a factor of about three above where the
-/// sampler stops caring, and the ramp's tail covers the gap between them --
-/// adaptive sampling stops spending samples, and this pass cleans up the
-/// residue it left.
-///
-/// Chosen on `denoise_display_sweep`, which is also what to re-run to change it.
-/// Note that `strength` scales this and `sigma_colour` together, so moving the
-/// threshold alone means editing this constant.
+/// Chosen on `denoise_display_sweep`, which is what to re-run to change it.
+/// `strength` scales this and `sigma_colour` together, so moving the threshold
+/// alone means editing this constant.
 const FULL_STRENGTH_GRAIN: f64 = 2.0;
 
 /// Per-iteration repair of the variance recursion in `denoise_atrous.wgsl`,
@@ -174,10 +153,9 @@ const FULL_STRENGTH_GRAIN: f64 = 2.0;
 /// neighbours'. Tracking `sum(w^2 * var)` through that under-reports the
 /// variance, compounding once per iteration.
 ///
-/// How badly is exactly computable, because the cascade has a closed form. Each
-/// iteration convolves with the 5x5 B-spline `h = (1,4,6,4,1)/16` at a tap
-/// spacing of `2^i`, and `h` is `((1 + z)/2)^4`, so after `N` iterations the
-/// composite kernel is
+/// How badly is exactly computable. Each iteration convolves with the 5x5
+/// B-spline `h = (1,4,6,4,1)/16` at a tap spacing of `2^i`, and `h` is
+/// `((1 + z)/2)^4`, so after `N` iterations the composite kernel is
 ///
 /// ```text
 /// prod_{i<N} ((1 + z^(2^i))/2)^4 = [(1 + z + ... + z^(M-1)) / M]^4,  M = 2^N
@@ -193,23 +171,20 @@ const FULL_STRENGTH_GRAIN: f64 = 2.0;
 /// under-reported by      1.0     2.7     8.7    28.8    96.1
 /// ```
 ///
-/// A tolerance is a square root of that, so by the fifth iteration it was ten
-/// times too tight and the widest passes were doing essentially nothing -- which
-/// is why the denoiser cleared large-scale blotches and left fine grain.
+/// A tolerance is a square root of that, so uncorrected the fifth iteration is
+/// ten times too tight and the widest passes do essentially nothing.
 ///
-/// Each entry is `sum k^2(i+1) / (sum k^2(i) * sum h^2)`, in 2-D. The pleasing
-/// part is what it implies: with the correction in, the luminance tolerance
-/// shrinks by 0.273 across the first iteration and then by 0.452, 0.489, 0.497,
-/// 0.499 -- it *halves* per iteration from the second onward, which is exactly
-/// Dammertz's `sigma / 2^i` schedule, arrived at rather than assumed.
+/// Each entry is `sum k^2(i+1) / (sum k^2(i) * sum h^2)`, in 2-D. With the
+/// correction in, the luminance tolerance shrinks by 0.273 across the first
+/// iteration and then by 0.452, 0.489, 0.497, 0.499 -- halving per iteration
+/// from the second onward, which is Dammertz's `sigma / 2^i` schedule arrived at
+/// rather than assumed.
 ///
-/// The derivation is for the unweighted kernel, so applying it whole wherever
-/// the edge stops have already narrowed the kernel over-states it -- measured,
-/// that cost the specular scene 18% of its RMSE against a converged reference,
-/// concentrated on the mirror and the caustic. `denoise_atrous.wgsl` therefore
-/// fades each factor in on how much of the kernel actually survived its weights;
-/// see the comment at the recursion. The specular scene stays the control on any
-/// change here.
+/// The derivation is for the unweighted kernel, so applying it whole where the
+/// edge stops have narrowed the kernel overstates it -- 18% of the specular
+/// scene's RMSE, concentrated on the mirror and the caustic.
+/// `denoise_atrous.wgsl` therefore fades each factor in on how much of the
+/// kernel survived its weights. The specular scene stays the control here.
 const VARIANCE_CORRELATION: [f64; MAX_ITERATIONS as usize] =
     [1.0, 2.7272, 3.1961, 3.3072, 3.3346, 3.3414, 3.3431, 3.3435];
 
@@ -219,14 +194,11 @@ impl DenoisePostProcessor {
     /// # Arguments
     /// * `strength` How hard to filter, from 0 to 10. 1 is the tuned default,
     ///   below 1 keeps more detail and more noise, above 1 blurs harder. It
-    ///   scales two things: the luminance tolerance the edge stop allows, as the
-    ///   square root so that the top of the range stays usable, and the
-    ///   threshold at which the fade commits to the filtered result, in
-    ///   proportion. 0 is exactly the identity -- every non-centre tap goes to
-    ///   zero weight, the despeckle switches off and the fade blends nothing --
-    ///   and 10 puts the fade's threshold at 0.2 code values, below the
-    ///   quantisation step of the final image, so the filtered result is taken
-    ///   essentially whole at any sample count.
+    ///   scales the luminance tolerance the edge stop allows (as its square
+    ///   root, so the top of the range stays usable) and the threshold at which
+    ///   the fade commits to the filtered result. 0 is exactly the identity;
+    ///   10 puts the fade's threshold below the final image's quantisation
+    ///   step, so the filtered result is taken essentially whole.
     /// * `iterations` Number of à-trous iterations, each doubling the tap
     ///   spacing. If not specified, defaults to 5. 1 to 8.
     /// * `guide` Which guide channels may guide the filter. If not specified,
@@ -322,17 +294,12 @@ impl DenoisePostProcessor {
     /// through. Defaults to [`ToneMapper::default`].
     ///
     /// The denoiser fades itself out on how visible the remaining noise would
-    /// be *on screen*, which means it has to know the curve the image will be
-    /// shown through. That curve is chosen by whoever calls
-    /// [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image), not by the
-    /// post-processing chain, so the two are set independently and this is how
-    /// they are kept in step. Getting it wrong is bounded rather than
-    /// catastrophic -- at linear 0.64 the ACES slope is 69 code values per unit
-    /// radiance against a plain gamma's 160, so the filter would misjudge
-    /// brightish regions by about 2.3x -- but there is no reason to.
-    ///
-    /// A builder rather than a fifth argument to [`Self::new`] so that adding
-    /// it breaks nobody.
+    /// be *on screen*, so it has to know the curve the image will be shown
+    /// through. That curve is chosen by whoever calls
+    /// [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image), so this is
+    /// how the two are kept in step. Getting it wrong is bounded -- at linear
+    /// 0.64 the ACES slope is 69 code values per unit radiance against a plain
+    /// gamma's 160, a factor of 2.3 -- but there is no reason to.
     pub fn with_tone_mapper(mut self, tone_mapper: ToneMapper) -> Self {
         self.tone_mapper = tone_mapper;
         self
@@ -357,34 +324,22 @@ impl PostProcessor for DenoisePostProcessor {
             &dimensions,
         ));
 
-        // The paper's defaults, with only the luminance falloff exposed. Held in
-        // one place so every pipeline built below agrees on them.
+        // The paper's defaults, with only the luminance falloff exposed, in one
+        // place so every pipeline built below agrees on them.
         //
-        // SVGF's sigma_l is 4. Half that measured best here across 8, 64 and
-        // 2000 samples per pixel on the test scene -- unsurprising, since SVGF
-        // filters a reprojected temporal estimate whose variance is far shakier
-        // than the exact Welford one the sample loop hands us. Folded into the
-        // base so that a `strength` of 1 is the tuned default rather than a
-        // number users have to know to halve.
+        // SVGF's sigma_l is 4; half that measured best here across 8, 64 and
+        // 2000 samples per pixel, since SVGF filters a reprojected temporal
+        // estimate whose variance is far shakier than the exact Welford one the
+        // sample loop hands us.
         //
-        // Sub-linear in `strength`, which is new, and necessary now that the
-        // knob also opens the fade in denoise_resolve.wgsl. Two independent
-        // noisy pixels differ by something with a standard deviation of
-        // sqrt(2) * SE, so a sigma of 2 accepts taps within 1.4 standard
-        // deviations of that difference and SVGF's 4 within 2.8; the defensible
-        // band is somewhere in between. Linear scaling put a strength of 10 at
-        // 20, which is fourteen standard deviations -- at 100 samples per pixel
-        // that accepts any tap within 80% relative contrast of the centre, which
-        // is every gradient, soft shadow and colour bleed in a Cornell box. It
-        // was only ever harmless because the fade then discarded four fifths of
-        // the result.
-        //
-        // A square root because it is monotone with fixed points at exactly 0
-        // and exactly 1: strength 0 stays the identity, strength 1 stays the
-        // tuned default that every gate and golden is measured at, and only the
-        // range in between and above moves. 10 now gives 6.3, which is 4.5
-        // standard deviations -- outside the textbook band, but that is a
-        // defensible reading of "the user asked for maximum".
+        // Sub-linear in `strength`. Two independent noisy pixels differ by
+        // something with a standard deviation of sqrt(2) * SE, so a sigma of 2
+        // accepts taps within 1.4 standard deviations of that difference and
+        // SVGF's 4 within 2.8. Linear scaling put a strength of 10 at 20, or
+        // fourteen standard deviations, which accepts every gradient, soft
+        // shadow and colour bleed in a Cornell box. A square root is monotone
+        // with fixed points at exactly 0 and 1, so the identity and the tuned
+        // default are untouched and 10 gives 6.3.
         let sigmas = [
             ("sigma_colour", 2.0 * self.strength.sqrt()),
             ("sigma_normal", 128.),
@@ -398,18 +353,14 @@ impl PostProcessor for DenoisePostProcessor {
                     DenoiseGuide::ColorOnly => 0.,
                 },
             ),
-            // Outlier rejection, deliberately *not* scaled by `strength`. The
-            // whole reason fireflies survived was that the stage which decided
-            // their fate read no sigma at all, so turning the knob did nothing;
-            // re-coupling the two would reintroduce exactly that. See
+            // Outlier rejection, deliberately not scaled by `strength`; see
             // prefilter_variance in denoise_atrous.wgsl.
             //
-            // At a strength of 0 the luminance tolerance collapses to 1e-8 and
-            // every non-centre tap goes to zero weight, which is as close to
-            // the identity as this filter gets. The despeckle reads no sigma,
-            // so it would go on clamping right through that unless it is
-            // switched off too -- and "off" would quietly stop meaning off.
-            // test_denoise_strength_zero_is_the_identity is the guard.
+            // At a strength of 0 the luminance tolerance collapses and every
+            // non-centre tap goes to zero weight. The despeckle reads no sigma,
+            // so it has to be switched off explicitly or "off" would stop
+            // meaning off. test_denoise_strength_zero_is_the_identity guards
+            // this.
             ("despeckle_enabled", f64::from(self.strength != 0.)),
         ];
 
@@ -427,17 +378,14 @@ impl PostProcessor for DenoisePostProcessor {
             &self.atrous_module,
             "prefilter_variance",
             // No correlation to correct: the pre-pass pools per-pixel variance
-            // *estimates* to buy degrees of freedom, with unsquared weights, and
-            // never filters the image. Passing anything else here to make it
-            // "consistent" with the iterations below would be wrong.
+            // estimates with unsquared weights and never filters the image.
             &constants(1, 1.),
         ));
 
-        // The tone curve is spliced in ahead of the shader's own source, so
-        // nothing relies on WGSL resolving a call to a function declared later
-        // in the module. `ToneMapper::wgsl` emits one free function named
-        // `solstrale_tone_map` with no bindings or entry point, which is what
-        // makes it safe to concatenate.
+        // The tone curve goes ahead of the shader's own source, so nothing
+        // relies on WGSL resolving a call to a function declared later.
+        // `ToneMapper::wgsl` emits one free function with no bindings or entry
+        // point, which is what makes it safe to concatenate.
         let resolve_module = self.resolve_module.insert(shader_module_with_luminance(
             device,
             "denoise_resolve.wgsl",
@@ -618,9 +566,7 @@ impl PostProcessor for DenoisePostProcessor {
     }
 
     /// Only with [`DenoiseGuide::Full`]. `ColorOnly` reads nothing but the
-    /// image and its variance, so it also spares the tracer the guide ray --
-    /// which is what makes the two arms of a guide measurement comparable
-    /// rather than one of them quietly paying for a buffer it never opens.
+    /// image and its variance, so it also spares the tracer the guide ray.
     fn needs_guide(&self) -> bool {
         self.guide == DenoiseGuide::Full
     }
@@ -631,16 +577,13 @@ mod tests {
     use super::*;
     use crate::util::wgpu_util::get_wgpu_device_and_queue;
 
-    /// The resolve shader is the one module in the crate that is assembled from
-    /// two sources at run time rather than compiled from a single file, so a
+    /// The resolve shader is assembled from two sources at run time, so a
     /// splice that does not parse is not a compile error -- it surfaces as a
-    /// panic out of wgpu's uncaptured-error handler, in the middle of a user's
-    /// render, for whichever tone mapper they happened to pick.
+    /// panic out of wgpu's uncaptured-error handler mid-render, for whichever
+    /// tone mapper the user picked. So build it for every curve in the enum.
     ///
-    /// So build it for every curve in the enum. The sibling of
-    /// `wgsl_matches_the_cpu_curve` in `util/tone_map.rs`: that one pins what
-    /// the emitted source *computes*, this one pins that it still compiles once
-    /// something else is concatenated onto it.
+    /// The sibling of `wgsl_matches_the_cpu_curve` in `util/tone_map.rs`: that
+    /// one pins what the emitted source computes, this one that it compiles.
     #[test]
     fn the_resolve_shader_compiles_against_every_tone_mapper() {
         let (device, queue) = get_wgpu_device_and_queue();

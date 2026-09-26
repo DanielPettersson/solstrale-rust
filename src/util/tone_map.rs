@@ -1,22 +1,17 @@
 //! Tone mapping: the curve that takes unbounded linear radiance down to the
 //! `[0, 1]` a display can show.
 //!
-//! This is a *display* transform, not a post-process. It runs in
-//! [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image), at the point
-//! the renderer's linear HDR buffer becomes an 8-bit image, and it is the last
-//! thing to touch the values before the sRGB encode. Nothing upstream -- bloom,
-//! the denoiser, the accumulator itself -- ever sees a tone-mapped value, which
-//! is what keeps those filters operating on real radiance.
-//!
-//! Before this existed the readback simply did `sqrt(L).min(0.999)`, so every
-//! value above linear 1.0 was the same white no matter how much brighter it
-//! really was. That clip, rather than the firefly clamp, was what decided what
-//! a highlight looked like.
+//! A *display* transform, not a post-process. It runs in
+//! [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image), where the
+//! renderer's linear HDR buffer becomes an 8-bit image, and is the last thing
+//! to touch the values before the transfer function. Nothing upstream -- bloom, the
+//! denoiser, the accumulator -- ever sees a tone-mapped value, which is what
+//! keeps those filters operating on real radiance.
 
 /// A curve mapping unbounded linear radiance to the `[0, 1]` display range.
 ///
 /// All of these operate per channel on linear values, and all are applied
-/// *before* the sRGB encode.
+/// *before* the transfer function the readback encodes with.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 #[non_exhaustive]
 pub enum ToneMapper {
@@ -50,20 +45,17 @@ pub enum ToneMapper {
         white_point: f32,
     },
 
-    /// No tone mapping: clip at 1.0, which is what the renderer did before any
-    /// of the above existed. Kept so the old look stays reachable, and as the
-    /// baseline to compare the curves against.
+    /// No tone mapping: clip at 1.0. The baseline to compare the curves
+    /// against.
     Clamp,
 }
 
 /// Ceiling applied to radiance before any curve sees it.
 ///
-/// Every curve here squares its input, and `f32` squares overflow to infinity
-/// above ~1.8e19 -- in ACES that makes the rational `inf / inf`, which is NaN,
-/// and a NaN pixel casts to a black one rather than the white the value
-/// obviously wanted. Clamping first is simpler than making each curve
-/// overflow-safe, and 1e18 is many orders of magnitude above any radiance a
-/// render produces, so the clamp is unreachable in practice.
+/// Every curve squares its input, and `f32` squares overflow above ~1.8e19 --
+/// in ACES that makes the rational `inf / inf`, and the resulting NaN pixel
+/// casts to black rather than white. Clamping first is simpler than making each
+/// curve overflow-safe, and 1e18 is unreachable in practice.
 const MAX_RADIANCE: f32 = 1e18;
 
 /// Floor on Reinhard's white point.
@@ -120,23 +112,19 @@ impl ToneMapper {
     /// fn solstrale_tone_map(color: vec3<f32>) -> vec3<f32>
     /// ```
     /// (the name is [`WGSL_FN`]) with no bindings, uniforms or entry point, so
-    /// it can be concatenated into any shader that needs to display the
-    /// renderer's linear buffer.
+    /// it can be concatenated into any shader that displays the renderer's
+    /// linear buffer.
     ///
     /// This is where the curve runs in anger: the saved image goes through it
     /// in [`buffer_to_image`](crate::util::wgpu_util::buffer_to_image)'s pack
     /// pass, the denoiser's resolve pass judges residual noise through it, and
-    /// an interactive viewer blits the buffer to a surface with it. Splicing
-    /// one emitted source into all three is what keeps them from drifting --
-    /// a preview that disagrees with the saved file is a bug that is easy to
-    /// look straight past.
+    /// an interactive viewer blits with it. One emitted source keeps all three
+    /// from drifting.
     ///
-    /// [`ToneMapper::map`] is still the CPU implementation of the same curve,
-    /// for callers that have pixels in hand rather than a buffer on the device.
-    /// Every coefficient here is formatted in from the same constant `map`
-    /// uses, and `wgsl_matches_the_cpu_curve` runs this source on the GPU and
-    /// checks it against `map` over the range, so the two cannot drift apart
-    /// unnoticed.
+    /// [`ToneMapper::map`] is the CPU implementation of the same curve, for
+    /// callers holding pixels rather than a buffer. Every coefficient here is
+    /// formatted in from the constant `map` uses, and `wgsl_matches_the_cpu_curve`
+    /// checks the two against each other on the GPU.
     pub fn wgsl(&self) -> String {
         // NaN is folded to zero explicitly rather than left to `max`: WGSL does
         // not define which operand `max` returns for NaN, where Rust's `f32::max`
@@ -202,11 +190,10 @@ impl ToneMapper {
 
 /// Formats an `f32` as a WGSL float literal.
 ///
-/// `{:?}` gives the shortest representation that round-trips, but for a whole
+/// `{:?}` gives the shortest round-tripping representation, but for a whole
 /// number that is `4`, which WGSL parses as an integer -- and `4 * c` against a
-/// `vec3<f32>` is a type error rather than a wrong answer, so it would surface
-/// as a shader compile failure. Appending `.0` where there is no `.` or
-/// exponent keeps every emitted literal floating point.
+/// `vec3<f32>` is a shader compile error. Appending `.0` where there is no `.`
+/// or exponent keeps every emitted literal floating point.
 fn wgsl_f32(v: f32) -> String {
     let s = format!("{:?}", v);
     if s.contains('.') || s.contains('e') || s.contains("inf") || s.contains("NaN") {
@@ -409,10 +396,10 @@ mod tests {
         assert!((out[0] - 0.5).abs() < 1e-6, "was {:?}", out);
     }
 
-    /// Clamp has to reproduce exactly what the readback did before tone mapping
-    /// existed, or the old look is no longer reachable.
+    /// Clamp is the untouched-but-clipped baseline, so it must pass values
+    /// below 1 through exactly.
     #[test]
-    fn clamp_is_the_old_behaviour() {
+    fn clamp_clips_and_otherwise_does_nothing() {
         assert_eq!(ToneMapper::Clamp.map([0.25, 1.5, 1.]), [0.25, 1., 1.]);
     }
 

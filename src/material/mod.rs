@@ -92,10 +92,7 @@ impl Metal {
     ///
     /// `fuzz` is a perceptual roughness in `[0, 1]`, used as the GGX roughness
     /// `alpha = fuzz * fuzz` -- the squared-roughness convention every other
-    /// renderer's roughness slider means. `0` is an exact mirror. Values are
-    /// not comparable with the pre-GGX fuzz parameter, which was a sphere
-    /// radius around the mirror direction and calibrated against nothing: the
-    /// same number now reads noticeably sharper.
+    /// renderer's roughness slider means. `0` is an exact mirror.
     pub fn new(albedo: Textures, normal: Option<Textures>, fuzz: f64) -> Metal {
         Metal {
             albedo,
@@ -121,14 +118,11 @@ impl Dielectric {
     ///
     /// `albedo` is the fraction transmitted **per world unit** travelled inside
     /// the glass, applied as Beer-Lambert absorption between the entry and exit
-    /// faces. `(1, 1, 1)` is clear glass and exactly a no-op. A radius-1 sphere
-    /// of `(0.5, 1, 0.5)` passes a quarter of its red and blue across the two
-    /// units through its middle and more near the silhouette, where the chord
-    /// is shorter -- the depth-dependent tint that makes glass read as a solid
-    /// rather than a coloured film.
-    ///
-    /// Per unit rather than a colour at a reference depth, because that form
-    /// needs a second parameter to express clear glass at all.
+    /// faces; `(1, 1, 1)` is clear glass and exactly a no-op. The chord is
+    /// shorter near a silhouette, so the tint is depth-dependent, which is what
+    /// makes glass read as a solid rather than a coloured film. Per unit rather
+    /// than a colour at a reference depth, which would need a second parameter
+    /// to express clear glass at all.
     ///
     /// Entry and exit are assumed to be the same material, so nested or
     /// intersecting glass is not described.

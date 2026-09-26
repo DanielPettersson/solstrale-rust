@@ -39,14 +39,12 @@ mod tests {
         }
     }
 
-    /// The whole point of this module. The saturation pass carried NTSC weights
-    /// for as long as it had a copy of its own, and nothing in the renderer
-    /// disagreed loudly enough to notice -- so a second copy anywhere in the
-    /// library is the failure, whatever weights it happens to hold.
+    /// The whole point of this module: a second copy of the weights anywhere in
+    /// the library is the failure, whatever weights it happens to hold.
     ///
     /// Scans the library only. The test metrics in `tests/` weigh luminance
-    /// themselves on purpose: a metric that imported the code it measures would
-    /// move with it.
+    /// themselves on purpose -- a metric that imported the code it measures
+    /// would move with it.
     #[test]
     fn nothing_else_in_the_library_weighs_luminance() {
         let mut paths = Vec::new();

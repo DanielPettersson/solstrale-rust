@@ -692,8 +692,8 @@ pub fn create_light_attenuation_scene(
     let red = Lambertian::new(SolidColor::new(1., 0., 0.).into(), None);
     let green = Lambertian::new(SolidColor::new(0., 1., 0.).into(), None);
     let blue = Lambertian::new(SolidColor::new(0., 0., 1.).into(), None);
-    // Clear, not the 0.8 grey it used to be: that value was silently ignored
-    // and is now load-bearing, and this scene has never been about absorption.
+    // Clear: a dielectric's albedo is interior absorption, and this scene has
+    // never been about that.
     let glass = Dielectric::new(SolidColor::new(1., 1., 1.).into(), None, 1.5, 0.);
 
     world.push(
@@ -1009,11 +1009,9 @@ fn cornell_scene(render_config: RenderConfig, world: Vec<Hittables>) -> Scene {
 /// From most of the floor a direction that reaches the lower emitter carries on
 /// into the upper one, which is the one configuration where "which light is
 /// this direction's light?" has more than one answer. A light PDF that sums
-/// over every emitter the ray crosses at any distance counts both and
-/// under-weights the BSDF-sampled hit; one that asks only about the emitter the
-/// ray actually reaches does not. It was worth 4.3% of this scene's mean
-/// radiance, which is what `test_bsdf_only_sampling_converges_to_the_same_image`
-/// measures.
+/// over every emitter the ray crosses counts both and under-weights the
+/// BSDF-sampled hit, by 4.3% of this scene's mean radiance -- which is what
+/// `test_bsdf_only_sampling_converges_to_the_same_image` measures.
 #[allow(dead_code)]
 pub fn create_cornell_stacked_lights_scene(render_config: RenderConfig) -> Scene {
     let mut world = cornell_world();
@@ -1216,12 +1214,10 @@ pub fn create_srgb_decode_scene(
 /// Five metal spheres across the roughness range, over the textured floor, lit
 /// by one small quad light.
 ///
-/// Small on purpose. A small light is exactly the configuration the fuzz-sphere
-/// metal could not render: with no pdf it could not take a shadow ray, so a
-/// rough metal had to find the light by chance through its own lobe, which is
-/// the noisiest way there is. With a GGX lobe and next-event estimation the
-/// same frame is clean, and `test_rough_metal_converges_with_nee` is what
-/// measures the difference.
+/// Small on purpose: without a pdf to take a shadow ray against, a rough metal
+/// has to find a small light by chance through its own lobe, which is the
+/// noisiest way there is. `test_rough_metal_converges_with_nee` measures what
+/// a GGX lobe plus next-event estimation is worth here.
 ///
 /// The textured floor gives the roughest spheres something with structure to
 /// blur, so the roughness sequence reads as a sequence rather than as five
@@ -1309,23 +1305,18 @@ pub fn rough_metal_sphere_center(i: usize) -> Vec3 {
 /// high above them.
 ///
 /// The configuration a rough dielectric with no pdf renders as pure noise, and
-/// the reason it is worth having at all -- before `Dielectric` carried a
-/// roughness there was no frosted glass in the renderer, so nothing in the
-/// suite could exercise the transmission lobe or its Jacobian. The only glass
-/// anywhere else is three smooth 1.5 spheres.
+/// the only frosted glass in the suite -- everything else is three smooth 1.5
+/// spheres, which exercise neither the transmission lobe nor its Jacobian.
 ///
 /// Same shape as its metal twin, except for the one thing glass changes: the
 /// light is 60x dimmer, and the background with it. A 300-radiance pinpoint is
-/// seen *straight through* a glass ball at very nearly its own radiance, so
-/// every one of those samples meets the firefly clamp and is cut from 300 to
-/// 10. That makes the clamp the dominant variance reducer in the frame -- it
-/// hides what next-event estimation buys, and it converges 5% away from an
-/// unclamped reference, which is 17% on the metal scene and the reason that one
-/// is not in the BSDF-only table either. At radiance 5 nothing a path carries
-/// reaches the threshold, so the measurement is of the estimator rather than
-/// of the clamp. Scaling the background alongside keeps the light delivering
-/// the same 98% of what lights the spheres; the whole image is simply darker,
-/// and every measurement taken on it is relative.
+/// seen straight through a glass ball at very nearly its own radiance, so every
+/// such sample meets the firefly clamp and is cut from 300 to 10 -- which makes
+/// the clamp the dominant variance reducer in the frame and converges 5% away
+/// from an unclamped reference. At radiance 5 nothing a path carries reaches
+/// the threshold, so the measurement is of the estimator. Scaling the
+/// background alongside keeps the light delivering the same 98% of what lights
+/// the spheres.
 #[allow(dead_code)]
 pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
     // 60x dimmer than the metal twin's 300, background included.
@@ -1334,19 +1325,15 @@ pub fn create_rough_glass_scene(render_config: RenderConfig) -> Scene {
 
 /// The same five spheres under a wide dim light instead of a small bright one.
 ///
-/// Built for `test_bsdf_only_sampling_converges_to_the_same_image`, which its
-/// twin above cannot serve. That test gates on a *whole-image mean* agreeing to
-/// half a per cent, and a pinpoint seen through glass does not deliver a mean
-/// that steady: with exact Fresnel the reflect-or-transmit choice is a real
-/// coin across the whole band around the critical angle, so the frame is
-/// firefly-driven and its 2000 spp mean wanders between -0.4% and +1.4% from
-/// one seed to the next. The gate would be measuring its own noise.
+/// Built for `test_bsdf_only_sampling_converges_to_the_same_image`, which gates
+/// on a whole-image mean agreeing to half a per cent -- and a pinpoint seen
+/// through glass is firefly-driven, its 2000 spp mean wandering between -0.4%
+/// and +1.4% between seeds. The gate would be measuring its own noise.
 ///
 /// A wide light removes the fireflies without removing the lobe: every path
-/// still crosses two microfacet dielectric interfaces and every transmission
-/// still carries the Jacobian this test exists to check -- across far more of
-/// the lobe than a pinpoint reaches, in fact. Radiance 3 keeps the firefly
-/// clamp inert, which is the other thing that test needs.
+/// still crosses two microfacet interfaces and carries the Jacobian that test
+/// checks, across more of the lobe than a pinpoint reaches. Radiance 3 keeps
+/// the firefly clamp inert, which is the other thing it needs.
 #[allow(dead_code)]
 pub fn create_soft_lit_rough_glass_scene(render_config: RenderConfig) -> Scene {
     rough_glass_scene(render_config, Vec3::new(-4., 6., -3.), 8., 3., 1.)

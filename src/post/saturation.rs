@@ -62,9 +62,8 @@ impl PostProcessor for SaturationPostProcessor {
         self.width = width;
         self.height = height;
 
-        // The shader dispatches over a 2-D grid and so needs the row stride and
-        // the bounds as constants; it can no longer recover either from
-        // `arrayLength`, which only ever gave it a pixel count.
+        // The shader dispatches over a 2-D grid, so it needs the row stride and
+        // the bounds as constants: `arrayLength` only gives it a pixel count.
         self.pipeline = Some(compute_pipeline(
             device,
             &self.bind_group_layout,
@@ -117,11 +116,10 @@ mod tests {
     use crate::util::wgpu_util::{get_result_from_buffer, get_wgpu_device_and_queue};
     use wgpu::util::DeviceExt;
 
-    /// The pass pivots around Rec. 709 luminance, which the shader used to get
-    /// from the NTSC weights instead. The golden tests run the whole filter at
-    /// a 0.95 structural threshold and one of the two did not notice; this
-    /// checks the arithmetic itself, against the same definition the rest of
-    /// the renderer uses.
+    /// The pass pivots around Rec. 709 luminance. The golden tests run the
+    /// whole filter at a 0.95 structural threshold, which is loose enough to
+    /// miss a wrong set of weights; this checks the arithmetic itself against
+    /// the definition the rest of the renderer uses.
     #[test]
     fn pivots_around_rec_709_luminance() {
         let (device, queue) = get_wgpu_device_and_queue();

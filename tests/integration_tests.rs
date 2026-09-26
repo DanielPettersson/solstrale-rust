@@ -870,49 +870,38 @@ fn test_adaptive_sampling_convergence() {
 /// the crate that uses neither.
 ///
 /// [`Renderer::bsdf_only_reference`] is a plain BSDF path tracer with the
-/// firefly clamp lifted: no light is ever sampled or weighed, and every
-/// emitter it lands on is taken at weight 1. It estimates the same integral as
-/// the shipped renderer, so converged, the two have to agree. Nothing else in
-/// the suite can say that -- the gamma-mapped RMS goldens are scored at 0.9 on
-/// a 100x50 downsample, which a uniform brightness shift walks straight
-/// through.
+/// firefly clamp lifted: no light is ever sampled or weighed. It estimates the
+/// same integral as the shipped renderer, so converged, the two have to agree.
+/// Nothing else in the suite can say that -- the goldens are scored at 0.9 on a
+/// 100x50 downsample, which a uniform brightness shift walks straight through.
 ///
 /// The six scenes are six ways a light PDF can be wrong. Cornell has no
-/// background at all, so a total loss of direct lighting has nowhere to hide;
-/// the stacked-lights Cornell is the one configuration where a direction
-/// reaches two emitters at once; the specular scene drives the weight-1 path
-/// through metal and glass; the test scene's radius-10 sphere light is crossed
-/// by most of the rays in the frame; the many-lights room is where the
-/// selection probability stops being the constant `1 / light_count` -- a
-/// `select_pdf` that disagreed with the alias table the sampler draws from
-/// would land here as a shifted mean and nowhere else.
+/// background, so a total loss of direct lighting has nowhere to hide; the
+/// stacked-lights Cornell is the one configuration where a direction reaches
+/// two emitters at once; the specular scene drives the weight-1 path through
+/// metal and glass; the test scene's radius-10 sphere light is crossed by most
+/// of the rays in the frame; and the many-lights room is where the selection
+/// probability stops being the constant `1 / light_count`, so a `select_pdf`
+/// disagreeing with the alias table lands here and nowhere else.
 ///
-/// Rough glass is the sixth, and it is here for the BSDF rather than the light.
-/// It is the strongest available check on the transmission lobe, and the only
-/// one that does not go through the pdf it is checking: the two arms are
-/// different estimators of the same integral, so agreeing to half a percent is
-/// what says the microfacet refraction Jacobian and the MIS algebra are right.
-/// A pdf wrong by a constant factor shows up here and in nothing else in the
-/// suite -- `test_rough_glass_converges_with_nee` would still pass, because
-/// both of its arms would be wrong together.
+/// Rough glass is the sixth, and it is here for the BSDF rather than the light:
+/// the strongest available check on the transmission lobe, and the only one
+/// that does not go through the pdf it is checking. A Jacobian wrong by a
+/// constant factor shows up here alone --
+/// `test_rough_glass_converges_with_nee` would still pass, both of its arms
+/// being wrong together.
 ///
-/// It is the *soft-lit* rough glass scene rather than the small-light one that
-/// `test_rough_glass_converges_with_nee` uses, and the reason belongs to this
-/// test. This is a gate on a whole-image mean at half a per cent, and a
-/// pinpoint seen through glass does not deliver a mean that steady: with exact
-/// Fresnel the frame is firefly-driven and its 2000 spp mean wanders between
-/// -0.4% and +1.4% from one seed to the next. Under the wide light the same
-/// figure is 0.03% to 0.10% over four seeds, and every path still crosses two
-/// microfacet interfaces on the way.
+/// The *soft-lit* rough glass scene rather than the small-light one, because
+/// this is a gate on a whole-image mean at half a per cent: a pinpoint seen
+/// through glass is firefly-driven and its 2000 spp mean wanders between -0.4%
+/// and +1.4% between seeds, against 0.03% to 0.10% under the wide light.
 ///
-/// The reference lifts the clamp because the shipped renderer's clamp is the
-/// one thing here that is deliberately biased, and on a BSDF-only path it bites
-/// far harder -- every emitter hit arrives as an unweighted indirect sample.
-/// Clamped both ways, Cornell's two arms sit 15% apart and the gate would have
-/// to be loose enough to be worthless. Unclamped on the reference side, the
-/// four scenes come in at 0.07%, 0.11%, 0.00% and 0.13%. So a failure here that
-/// *shrinks* when `clamping_threshold` in `ray_trace.wgsl` is raised is the
-/// clamp costing the shipped renderer energy, not the MIS weights being wrong.
+/// The reference lifts the clamp because on a BSDF-only path it bites far
+/// harder -- every emitter hit arrives as an unweighted indirect sample, and
+/// clamped both ways Cornell's two arms sit 15% apart. Unclamped, the four
+/// scenes come in at 0.07%, 0.11%, 0.00% and 0.13%. A failure here that shrinks
+/// when `clamping_threshold` is raised is the clamp costing the shipped
+/// renderer energy, not the MIS weights being wrong.
 #[test]
 fn test_bsdf_only_sampling_converges_to_the_same_image() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -1176,20 +1165,16 @@ fn grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
 /// How much grain a viewer would actually see, in code values of the 0-255
 /// scale the image is written on.
 ///
-/// [`grain`]'s sibling, and it exists because `grain` cannot see the thing this
-/// change is about. That one is an RMS in linear radiance, normalised by the
-/// mean; this one measures through the display transform, for the reason spelt
-/// out on [`fireflies`], and reports an absolute number of code values so it
-/// can be compared against what the eye resolves -- about one.
+/// [`grain`]'s sibling. That one is an RMS in linear radiance normalised by the
+/// mean; this measures through the display transform, for the reason spelt out
+/// on [`fireflies`], and reports an absolute number of code values so it can be
+/// compared against what the eye resolves -- about one.
 ///
 /// The median rather than an RMS, scaled by 1.4826 so it reads as a standard
-/// deviation on the Gaussian the flat regions are. Every high-pass of a render
-/// has object silhouettes in it, and those are real detail, arbitrarily large,
-/// and present in exactly the same places whether the image is denoised or not.
-/// They put a floor under any RMS that is independent of the noise -- which is
-/// precisely the floor that would hide the improvement being measured. The
-/// median is owned by the flat majority of the frame, which is where grain
-/// lives and where the complaint came from.
+/// deviation. Every high-pass of a render has object silhouettes in it, which
+/// are real detail present whether the image is denoised or not, and they put a
+/// noise-independent floor under any RMS. The median is owned by the flat
+/// majority of the frame, which is where grain lives.
 #[allow(dead_code)]
 fn displayed_grain(pixels: &[[f32; 4]], width: usize, height: usize) -> f64 {
     let displayed: Vec<f64> = pixels
@@ -1280,14 +1265,11 @@ fn displayed_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
 /// displayed luminance exceeds the brightest of their four neighbours by more
 /// than `excess`, on the 0-255 scale the image is finally written on.
 ///
-/// Measured *through the display transform*, and that is the whole point. The
-/// first version of this counted in linear radiance, and it lied: it scored a
-/// change that removed 100% of the outliers it could see, while the rendered
-/// image looked all but unchanged. ACES plus the sRGB encode compresses highlights
-/// hard, so a pixel pulled from twenty times its neighbourhood's brightness down
-/// to three times has lost 85% of its excess radiance and almost none of its
-/// visibility -- it is still a white dot on a dark ceiling. A metric in linear
-/// space rewards the first 85% and says nothing about the part a viewer sees.
+/// Measured *through the display transform*, and that is the whole point. ACES
+/// plus the sRGB encode compresses highlights hard, so a pixel pulled from
+/// twenty times its neighbourhood's brightness down to three has lost 85% of
+/// its excess radiance and almost none of its visibility. A metric in linear
+/// space rewards that 85% and says nothing about the part a viewer sees.
 ///
 /// Reference-free, like [`grain`], and for the same reason: it must not reward
 /// blur, since blur is what the thing being measured would otherwise hide
@@ -1395,9 +1377,7 @@ fn linear_rmse(a: &[[f32; 4]], b: &[[f32; 4]]) -> f64 {
 /// A `workgroup_size(64)` pass dispatched as `(width * height) / 64` workgroups
 /// crosses `max_compute_workgroups_per_dimension` -- 65535 on a Radeon RX 5700
 /// XT, so 4194240 pixels -- and fails wgpu validation outright, which surfaces
-/// as a panic from the default uncaptured-error handler rather than as a
-/// `Result`. Bloom and saturation were both built that way, and both broke below
-/// 4K, on the same limit the tracer's dispatch was converted to a 2-D grid for.
+/// as a panic from the default uncaptured-error handler rather than a `Result`.
 ///
 /// 2732x1536 is the smallest 16:9 size past the ceiling, and is deliberately
 /// only just past it: the point is the dispatch shape, not the resolution, and
@@ -1632,23 +1612,12 @@ fn test_denoise_improves_low_sample_image() {
     println!("  8 spp, denoised:    {}", rmse_denoised);
     println!("  ratio:              {}", rmse_denoised / rmse_noisy);
 
-    // Two gates, because the ratio alone is misleading here.
-    //
-    // The ratio was 0.56 against white noise, 0.62 against the low-discrepancy
-    // sampler, 0.71 once image textures were sRGB decoded, and is 0.82 now that
-    // light selection is power-proportional. Every loosening is the same
-    // effect: the denominator falls faster than the numerator. The sampler
-    // removed noise before the filter could; the decode darkened this scene's
-    // textured floor, which is the easy, flat majority of the frame, leaving
-    // the RMSE dominated by the untextured reds and the glass the filter was
-    // always going to struggle with; and power-proportional selection stopped
-    // this scene's three very differently powered lights being sampled equally
-    // often, which took 15% off the 8 spp input (0.232 -> 0.199) against 2% off
-    // the denoised image (0.166 -> 0.162).
-    //
-    // The absolute assertion is what stops each such change having to make that
-    // argument again: in all three the thing anyone actually looks at improved
-    // while the ratio got worse.
+    // Two gates, because the ratio alone is misleading: anything that removes
+    // noise before the filter can -- the low-discrepancy sampler, the sRGB
+    // decode, power-proportional light selection -- loosens the ratio while
+    // improving both images. It has gone 0.56 -> 0.62 -> 0.71 -> 0.82 that way.
+    // The absolute assertion is what stops each such change having to argue the
+    // point again.
     assert!(
         rmse_denoised < rmse_noisy * 0.85,
         "denoising 8 spp should cut linear RMSE against the reference by at least 15%, \
@@ -1668,13 +1637,10 @@ fn test_denoise_improves_low_sample_image() {
 /// and glass: the filter has to still be a net win where most of the frame is
 /// seen in a reflection or through a lens.
 ///
-/// Deliberately not the gate on the specular guide itself. Global RMSE at a low
-/// sample count rewards blurring, so a guide that smears the reflected image
-/// along the mirror scores about the same here -- measured, the primary-hit
-/// guide gives 0.71 against this guide's 0.72. What pins the guide is
-/// `renderer::test::test_gbuffer_follows_specular_chain`, which checks it
-/// analytically, and `test_scene_specular_denoise`, which would move if the
-/// reflections changed.
+/// Not the gate on the specular guide itself: global RMSE at a low sample count
+/// rewards blurring, so a guide that smears the reflected image along the
+/// mirror scores about the same (0.71 against this guide's 0.72). The guide is
+/// pinned by `renderer::test::test_gbuffer_follows_specular_chain`.
 #[test]
 fn test_denoise_improves_specular_image() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -1719,18 +1685,17 @@ fn test_denoise_improves_specular_image() {
     );
 }
 
-/// Spending more samples must not make the denoised image grainier. Obvious,
-/// and it did not hold: at 1 sample per pixel the chain has no Welford variance
-/// to work from and falls back on estimates that cannot collapse, while from 2
-/// samples up it trusted each pixel's own M2 -- one degree of freedom, reading
-/// near zero for every pixel whose two samples happened to agree, which in a
-/// path tracer means every pixel that missed the light twice. Each of those
-/// declared itself converged and kept its raw value, so a 2 spp render came out
-/// of the denoiser covered in speckle that a 1 spp render did not have.
+/// Spending more samples must not make the denoised image grainier.
 ///
-/// Measured at strength 4, where the effect was reported and where it is
-/// largest: a strong filter has the most to undo when a pixel opts out of it.
-/// Before the fix the 2 spp image was 30% grainier than the 1 spp one.
+/// The trap is the 1-to-2-sample step. At 1 spp there is no Welford variance and
+/// the chain falls back on estimates that cannot collapse; from 2 up, a pixel's
+/// own M2 carries one degree of freedom and reads near zero whenever its two
+/// samples agree -- which in a path tracer means every pixel that missed the
+/// light twice. Each of those would declare itself converged and keep its raw
+/// value. Pooling over the neighbourhood is what prevents it.
+///
+/// Measured at strength 4, where the effect is largest: a strong filter has the
+/// most to undo when a pixel opts out of it.
 #[test]
 fn test_denoise_grain_does_not_grow_with_samples() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -1764,38 +1729,27 @@ fn test_denoise_grain_does_not_grow_with_samples() {
     );
 }
 
-/// The gate this change exists for: spending more samples has to buy a
-/// visibly smoother denoised image, and it did not.
+/// Spending more samples has to buy a visibly smoother denoised image.
 ///
-/// The old resolve fade set `blend` to the pixel's relative standard error over
-/// a `full_strength_error` of 0.4, so the residual it left was
-/// `sigma * (1 - sigma / (0.4 * L))` -- a downward parabola in sigma, peaking
-/// at `sigma = 0.2 L`. Any two noise levels symmetric about that peak leave
-/// *identical* grain, and a Cornell wall at 10 spp (sigma ~ 0.30 L) and at 100
-/// spp (sigma ~ 0.095 L) are almost exactly that pair. The fade handed noise
-/// back at the same rate the sampler removed it, so the two images were
-/// indistinguishable. Measured on a 1303x964 Cornell render, ten times the
-/// samples bought 19% less grain.
+/// The trap is a fade keyed on relative standard error: the residual it leaves
+/// is `sigma * (1 - sigma / (0.4 * L))`, a downward parabola peaking at
+/// `sigma = 0.2 L`, so any two noise levels symmetric about that peak leave
+/// identical grain -- and a Cornell wall at 10 spp and at 100 spp are almost
+/// exactly that pair. Such a fade hands noise back at the rate the sampler
+/// removes it. Measured against it, the denoised sequence ran 3.009, 3.566,
+/// 3.512, 2.632: rising, then flat, ending at 0.84 of the raw render.
 ///
-/// Measured through the display transform, in code values, because the old
-/// criterion's defect was precisely that it was not perceptual: 0.4 relative
-/// linear error is 13 to 30 code values of visible grain depending on
-/// brightness, and the eye sees grain at about one.
+/// Measured through the display transform, in code values, because that defect
+/// is precisely a non-perceptual criterion: 0.4 relative linear error is 13 to
+/// 30 code values of grain depending on brightness, and the eye sees grain at
+/// about one.
 ///
-/// Three assertions, and all three fail on the code this replaced, where the
-/// denoised sequence ran 3.009, 3.566, 3.512, 2.632 -- rising at first, flat
-/// through the middle, and ending at 0.84 of the raw render.
-///
-/// What is deliberately *not* asserted is a per-step ratio near the 0.5 that
-/// 1/sqrt(n) would suggest, because this metric has a floor that has nothing to
-/// do with noise. A 4000 spp render of this scene measures 0.628 code values of
-/// "grain" that are its silhouettes and shading gradients -- real detail, which
-/// no amount of filtering should remove. The denoised figures below are within a
-/// factor of two of that floor, so the achievable per-step ratio is well above
-/// 0.5 and rises as the floor is approached. `denoise_display_sweep` prints the
-/// floor alongside the sweep for exactly this reason, and 128 is where this
-/// stops because beyond it the ratio is measuring the scene rather than the
-/// filter.
+/// Deliberately *not* asserted is a per-step ratio near the 0.5 that 1/sqrt(n)
+/// suggests, because the metric has a floor unrelated to noise: a 4000 spp
+/// render of this scene measures 0.628 code values of silhouettes and shading
+/// gradients. The denoised figures are within a factor of two of that, so the
+/// achievable ratio is well above 0.5 and rises as the floor is approached --
+/// which is also why this stops at 128.
 #[test]
 fn test_denoised_grain_keeps_falling_with_samples() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -1865,26 +1819,17 @@ fn test_denoised_grain_keeps_falling_with_samples() {
 /// as 1/n. Without this the filter would keep a fixed blur floor that a
 /// single-spp golden test cannot see.
 ///
-/// This used to bound the relative linear RMSE between the denoised and the
-/// plain 2000 spp render at 0.02, and measured 0.0045. It now measures 0.023 and
-/// that is correct rather than a regression: the test scene at 2000 spp with
-/// adaptive sampling off still carries about two code values of grain, which is
-/// visible, and the fade is now built to remove visible grain rather than to
-/// retire on a relative error. The old bound *was* the premise being replaced --
-/// "2000 samples means converged, so do nothing" is the same linear-relative
-/// notion of convergence that let 13 to 30 code values of grain through at lower
-/// sample counts.
+/// Stated in the units the filter works in, and as two properties rather than
+/// one -- a bound on linear RMSE against the plain render would conflate them,
+/// and would also assert that 2000 samples means "do nothing", which is the
+/// same linear-relative notion of convergence the fade exists to replace:
 ///
-/// So the property is restated in the units the filter now works in, and it is
-/// two properties rather than one, because "near identity" was doing both jobs:
-///
-/// 1. The image a viewer sees must be all but unchanged -- half the frame moving
-///    by less than one code value is what that should always have meant.
-/// 2. The fade must actually keep fading. This is the part the old bound really
-///    protected, and the part a fixed blur floor would violate: the criterion is
-///    quadratic in sigma while the blend is unsaturated and linear once it
-///    saturates, so four times the samples has to cut the change by at least
-///    two. A filter that had stopped fading would hold it flat.
+/// 1. The image a viewer sees must be all but unchanged -- half the frame
+///    moving by less than one code value.
+/// 2. The fade must keep fading, which is what a fixed blur floor would
+///    violate. The criterion is quadratic in sigma while the blend is
+///    unsaturated and linear once it saturates, so four times the samples has
+///    to cut the change by at least two.
 ///
 /// Measured with the median rather than an RMS, for the reason on
 /// [`displayed_difference`]: the few percent of pixels that are genuinely still
@@ -1951,9 +1896,9 @@ fn test_denoise_is_near_identity_at_high_samples() {
 /// flattening real detail scores *better* until the noise runs out. The pair is
 /// what has to be read: grain falling while RMSE rises is over-blur.
 ///
-/// The strength range runs the full documented 0 to 10 rather than stopping at
-/// 2, because `strength` now scales the resolve fade as well as `sigma_colour`
-/// and the top of the range is no longer a mild variation on the middle.
+/// The strength range runs the full documented 0 to 10, because `strength`
+/// scales the resolve fade as well as `sigma_colour` and the top of the range
+/// is not a mild variation on the middle.
 #[test]
 #[ignore]
 fn denoise_strength_sweep() {
@@ -2132,14 +2077,13 @@ fn tone_map_visual_comparison() {
 /// The gate this whole change exists for: a denoised image must not keep
 /// fireflies, at any sample count.
 ///
-/// Before the despeckle stage in `prefilter_variance` the denoiser removed
-/// between 61% and 91% of them depending on the sample count, which sounds
-/// respectable and looks terrible -- what is left is a scatter of single pixels
-/// tens of times brighter than the surface they sit on, and the eye finds every
-/// one. It also got *worse* with more samples in the sense that mattered: 1 spp
-/// at strength 5 was the one clean configuration in the whole grid, because it
-/// is the only one where `denoise_resolve.wgsl` takes the filtered result whole
-/// instead of blending a fraction of the raw outlier back in.
+/// Without the despeckle stage in `prefilter_variance` the filter removes
+/// between 61% and 91% of them, which sounds respectable and looks terrible:
+/// what is left is a scatter of single pixels tens of times brighter than the
+/// surface they sit on, and the eye finds every one. The one clean
+/// configuration in that grid is 1 spp, the only case where
+/// `denoise_resolve.wgsl` takes the filtered result whole instead of blending a
+/// fraction of the raw outlier back in.
 ///
 /// So the assertion is a proportion rather than an absolute count -- the scene
 /// produces a different number of outliers at every sample count and there is
@@ -2667,13 +2611,10 @@ fn print_pass_table(title: &str) {
 /// collapses the luminance tolerance to 1e-8 and every non-centre tap goes to
 /// zero weight. That is as close to the identity as this filter gets.
 ///
-/// Outlier rejection does not read `sigma_colour`, and deliberately so: that
-/// their fate was decided by a stage reading no sigma at all is exactly why
-/// `strength` used to make so little difference to fireflies. So it has to be
-/// switched off explicitly at zero, or "off" would quietly stop meaning off,
-/// and this is the test that says so. Measured, the bound below has a hundred-
-/// fold margin when the switch is wired up and fails by three hundredfold when
-/// it is not.
+/// Outlier rejection deliberately does not read `sigma_colour`, so it has to be
+/// switched off explicitly at zero or "off" would quietly stop meaning off. The
+/// bound below has a hundredfold margin when the switch is wired up and fails
+/// by three hundredfold when it is not.
 #[test]
 fn test_denoise_strength_zero_is_the_identity() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -3013,12 +2954,10 @@ fn test_ggx_metal_is_energy_conserving_in_a_furnace() {
 /// What the furnace reads per roughness. Pinned rather than bounded, so that
 /// anything which moves them shows up in a diff.
 ///
-/// Uncompensated, the same five readings were 1.0000 / 0.9942 / 0.8976 /
-/// 0.6318 / 0.3503 -- a fully rough metal kept a third of the light it was
-/// given. A CPU quadrature of the BRDF's definition agreed with every one of
-/// those to 0.0015, so that table pinned the single-scatter model rather than
-/// this implementation of it, and this one pins how much of the rest Turquin's
-/// factor puts back.
+/// Uncompensated, the same five readings are 1.0000 / 0.9942 / 0.8976 / 0.6318
+/// / 0.3503 -- a fully rough metal keeps a third of the light it was given, and
+/// a CPU quadrature of the BRDF's definition agrees with each to 0.0015. So
+/// these pin how much of the rest Turquin's factor puts back.
 ///
 /// `albedo = 1` is the hardest case for it, not the easiest: with f0 = 1 the
 /// factor is exactly `1 / E`, so the compensated reading is `E_true / E_fit`
@@ -3036,20 +2975,15 @@ const FURNACE_EXPECTED: [(f64, f64); 5] = [
 /// that says so: the same scene at 64 and 1024 spp, compared over the spheres
 /// alone.
 ///
-/// Relative to the reference's own mean, not absolute. The pre-GGX metal lost
-/// most of its energy to the below-horizon `break`, so its image was six times
-/// darker and an absolute error would have scored it *better* for being dark.
-/// Measured on this scene, at 64 spp against each model's own 1024 spp
-/// reference: the fuzz-sphere metal with no next-event estimation ran 0.886 of
-/// its own mean, the single-scatter GGX metal with it ran 0.346, and with the
-/// multiple-scattering factor -- which brightens the rough spheres and so
-/// raises the mean the error is taken against -- it runs 0.256.
+/// Relative to the reference's own mean rather than absolute, since an absolute
+/// figure scores a darker arm better. At 64 spp against each model's own 1024
+/// spp reference: a fuzz-sphere metal with no next-event estimation runs 0.886
+/// of its own mean, single-scatter GGX with it runs 0.346, and with the
+/// multiple-scattering factor 0.256.
 ///
-/// The golden harness provably cannot capture this. It resizes to 100x50 before
-/// comparing, which averages the noise away -- the noisy before and the clean
-/// after score almost identically through it. **The golden harness averages away
-/// exactly the defect being fixed**, which is why this test measures per-pixel
-/// error at full resolution instead.
+/// The golden harness cannot see this: it resizes to 100x50 before comparing,
+/// which averages away exactly the noise being measured. Hence a per-pixel
+/// error at full resolution.
 #[test]
 fn test_rough_metal_converges_with_nee() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -3118,10 +3052,8 @@ const ROUGH_METAL_RMSE_BOUND: f64 = 0.35;
 /// darker, and the single-scatter dielectric does darken as roughness rises.
 ///
 /// Measured against a build with `bsdf_is_specular` forced true for the
-/// dielectric and its sampled pdf forced to 0 -- the lobe still has its width,
-/// it simply has no density for a light to land on, which is exactly what a
-/// rough dielectric bolted onto the old RTIOW arm would have been. Over four
-/// seeds:
+/// dielectric and its sampled pdf forced to 0 -- the lobe keeps its width but
+/// has no density for a light to land on. Over four seeds:
 ///
 /// ```text
 /// width, no pdf   2.884  2.892  2.798  2.860
@@ -3141,10 +3073,9 @@ const ROUGH_METAL_RMSE_BOUND: f64 = 0.35;
 /// of landing on a delta -- the limitation LIMITATIONS.md records under
 /// "Dielectrics block NEE shadow rays".
 ///
-/// **The golden harness cannot see this.** It downscales to 100x50 before
-/// comparing, which averages away exactly the defect being measured -- the
-/// noisy before and the clean after score almost identically through it. Hence
-/// a per-pixel error at full resolution, as the metal test does.
+/// The golden harness cannot see this: it downscales to 100x50 before
+/// comparing, which averages away exactly the noise being measured. Hence a
+/// per-pixel error at full resolution, as the metal test does.
 #[test]
 fn test_rough_glass_converges_with_nee() {
     let (device, queue) = get_wgpu_device_and_queue();
@@ -3211,9 +3142,9 @@ const ROUGH_GLASS_RMSE_BOUND: f64 = 1.3;
 /// bounces around inside it. There is no albedo to discount and no Fresnel term
 /// to reason about -- the sphere either disappears or the BSDF is losing energy.
 ///
-/// Uncompensated, the same readings at 1.5 were 1.0000 / 0.9942 / 0.8502 /
-/// 0.5805 / 0.3702 across roughness 0 to 1: a fully rough ball kept a third of
-/// what it was given. `dielectric_multiscatter` is what puts the rest back.
+/// Uncompensated, the readings at 1.5 are 1.0000 / 0.9942 / 0.8502 / 0.5805 /
+/// 0.3702 across roughness 0 to 1: a fully rough ball keeps a third of what it
+/// was given. `dielectric_multiscatter` puts the rest back.
 ///
 /// Three things this measurement needs that the conductor's does not:
 ///
@@ -3377,16 +3308,13 @@ const WIDE_LIGHT_RMSE_BOUND: f64 = 0.035;
 /// residual throughput scaling, leaving `albedo^thickness` as the only term the
 /// ratio can still see.
 ///
-/// The obvious metric lies. "The image got darker" passes for a wrong sign, a
-/// wrong exponent, absorption applied on entry instead of on exit, or applied
-/// once per bounce instead of per unit length -- every one of those merely
-/// dims. None of them survives a ratio.
+/// "The image got darker" passes for a wrong sign, a wrong exponent, absorption
+/// applied on entry instead of on exit, or applied once per bounce instead of
+/// per unit length. None of those survives a ratio.
 ///
 /// Two thicknesses, and neither of them 1: at unit thickness `a^t` and a flat
 /// `a` per traversal are the same number, so a single slab cannot tell an
-/// exponential from a constant.
-///
-/// With the albedo ignored, as it was, both ratios read 1.
+/// exponential from a constant. With the albedo ignored both ratios read 1.
 #[test]
 fn test_beer_lambert_absorption_follows_the_exponential() {
     let (device, queue) = get_wgpu_device_and_queue();

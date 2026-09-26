@@ -127,11 +127,10 @@ impl PostProcessor for BloomPostProcessor {
         self.width = width;
         self.height = height;
 
-        // Every pass dispatches over a 2-D grid, so all four need the row stride
-        // and the bounds as constants. A 1-D dispatch would need one workgroup
-        // per 64 pixels, which crosses `max_compute_workgroups_per_dimension`
-        // (65535 on a Radeon RX 5700 XT) at 4194240 pixels -- 4K failed
-        // validation outright, the same way the tracer's dispatch used to.
+        // Every pass dispatches over a 2-D grid, so all four need the row
+        // stride and the bounds as constants. A 1-D dispatch would cross
+        // `max_compute_workgroups_per_dimension` (65535 on a Radeon RX 5700 XT)
+        // at 4194240 pixels, so 4K would fail validation outright.
         let dimensions = [("width", width as f64), ("height", height as f64)];
 
         self.filter_bright_pipeline = Some(compute_pipeline(

@@ -69,13 +69,11 @@ fn create_wgpu_device_and_queue() -> Result<(wgpu::Device, wgpu::Queue), Box<dyn
         required_limits.max_storage_buffers_per_shader_stage.min(16);
 
     // Timestamp queries are a diagnostic, asked for only when the adapter has
-    // them: `GpuTimer` gates itself on the environment variable as well, so a
-    // device without the feature loses nothing but the instrument. The base
-    // feature covers `ComputePassTimestampWrites` on a pass descriptor;
+    // them. The base feature covers `ComputePassTimestampWrites`;
     // `TIMESTAMP_QUERY_INSIDE_ENCODERS` buys `CommandEncoder::write_timestamp`,
-    // which is the only way to time the one piece of GPU work in the render
-    // loop that is not a compute pass -- the copy into the post buffer. Asked
-    // for separately, because an adapter may have the first without the second.
+    // the only way to time the one piece of GPU work in the render loop that is
+    // not a compute pass. Asked for separately, since an adapter may have the
+    // first without the second.
     let mut required_features = wgpu::Features::TEXTURE_BINDING_ARRAY
         | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
     required_features |= adapter.features()
@@ -110,12 +108,9 @@ pub fn get_result_from_buffer<T: AnyBitPattern>(
 
 /// Dispatches over a flat 1-D workgroup grid.
 ///
-/// Test-only, and deliberately so. A 1-D dispatch at `workgroup_size(64)` needs
-/// one workgroup per 64 elements, which crosses
+/// Test-only: at `workgroup_size(64)` this crosses
 /// `max_compute_workgroups_per_dimension` (65535 on a Radeon RX 5700 XT) at
-/// 4194240 elements -- below 4K, so no pass over the image may use it. What is
-/// left is `wgsl_matches_the_cpu_curve`, which dispatches over a couple of dozen
-/// test values rather than over pixels.
+/// 4194240 elements, below 4K, so no pass over the image may use it.
 #[cfg(test)]
 pub(crate) fn add_compute_pass(
     encoder: &mut wgpu::CommandEncoder,
@@ -134,16 +129,14 @@ pub(crate) fn add_compute_pass(
 
 /// Dispatches over a 2-D workgroup grid.
 ///
-/// The tracer needs this both for coherence (a workgroup covering an 8x8 tile
-/// of pixels traces far more similar rays than one covering 64 pixels of a
-/// single scanline) and for reach: a 1-D dispatch runs into
-/// `max_compute_workgroups_per_dimension` at ~4.2M pixels, so 4K was not
-/// renderable at all.
+/// The tracer needs this for coherence -- a workgroup covering an 8x8 tile of
+/// pixels traces far more similar rays than one covering 64 pixels of a
+/// scanline -- and for reach, since a 1-D dispatch runs into
+/// `max_compute_workgroups_per_dimension` at ~4.2M pixels.
 ///
-/// Bracketed by a pair of GPU timestamps when a [`GpuTimer`] is passed, which
-/// is what makes the per-pass cost of a dispatch measurable at all. `label`
-/// names the pass in that report, and is also handed to wgpu, so the same name
-/// identifies the pass in a graphics debugger.
+/// Bracketed by a pair of GPU timestamps when a [`GpuTimer`] is passed. `label`
+/// names the pass in that report and is handed to wgpu, so the same name
+/// identifies it in a graphics debugger.
 pub(crate) fn add_compute_pass_2d(
     encoder: &mut wgpu::CommandEncoder,
     pipeline: &wgpu::ComputePipeline,
@@ -334,10 +327,9 @@ type PackKey = (String, u32, u32);
 /// recompile: the first is source text, the second a pair of override
 /// constants.
 ///
-/// [`buffer_to_image`] deliberately caches nothing else, but a pipeline is a
-/// few kilobytes where the staging buffer is 33 MB, and the driver's compile is
-/// ~0.4 ms -- 60% again on top of the 0.64 ms an 800x600 readback costs, and
-/// paid on every call without this.
+/// [`buffer_to_image`] caches nothing else, but a pipeline is a few kilobytes
+/// where the staging buffer is 33 MB, and the driver's compile is ~0.4 ms
+/// against the 0.64 ms an 800x600 readback costs.
 static PACK_PIPELINES: Lazy<Mutex<HashMap<PackKey, PackPipeline>>> = Lazy::new(Default::default);
 
 fn pack_pipeline(
@@ -383,35 +375,31 @@ fn pack_pipeline(
 /// This is the one place the image leaves the GPU, so how it is read matters
 /// more than the arithmetic does. The curve and the encode run in a compute
 /// pass first and pack to RGBA8, so what is copied back is 4 bytes a pixel
-/// rather than 16 -- 33 MB at 4K instead of 133 MB, and 26 ms to 8.4 ms;
-/// 800x600 goes 1.97 ms to 0.64 ms. What is left on the CPU is a byte shuffle.
+/// rather than 16 -- 33 MB at 4K instead of 133 MB, and 26 ms to 8.4 ms. What
+/// is left on the CPU is a byte shuffle.
 ///
 /// The GPU curve is [`ToneMapper::wgsl`], the same source the denoiser's
-/// resolve pass and a desktop viewport splice in, and
+/// resolve pass and a desktop viewport splice in;
 /// `wgsl_matches_the_cpu_curve` holds it to [`ToneMapper::map`] to 1e-4 across
-/// all four curves; `buffer_to_image_matches_the_cpu_encode` covers the encode
-/// and the pack around it.
+/// all four curves, and `buffer_to_image_matches_the_cpu_encode` covers the
+/// encode and the pack around it.
 ///
 /// Two things it deliberately does not do:
 ///
-/// - It does not go through [`get_result_from_buffer`], because that copies the
-///   whole mapped range into a `Vec` first. The mapped range is host-visible
-///   device memory, uncached and write-combined, and reading it serially runs at
-///   roughly 1 GB/s -- so that one copy cost more than everything else here put
-///   together (129 ms of the 198 ms a 4K readback took when it was still 16
-///   bytes a pixel). The pixels are read once, in place, and never materialised
-///   as a second buffer.
+/// - It does not go through [`get_result_from_buffer`], which copies the whole
+///   mapped range into a `Vec` first. That range is host-visible, uncached,
+///   write-combined memory that reads serially at roughly 1 GB/s, so the copy
+///   cost more than everything else here together. The pixels are read once, in
+///   place.
 /// - It does not use `put_pixel`, whose bounds check and `%`/`/` per pixel are
-///   pure overhead when the traversal order is already row-major. The output
-///   rows are walked in step with the input instead, in parallel: there is no
-///   arithmetic left to share, but the read is still latency-bound on that same
-///   write-combined memory, and threads are what hide it.
+///   overhead when the traversal order is already row-major. The output rows
+///   are walked in step with the input, in parallel, since the read is
+///   latency-bound on that write-combined memory and threads hide it.
 ///
-/// Neither staging nor packed buffer is cached, deliberately: holding 33 MB of
-/// host-visible memory alive for the process to save a few ms on a call that
-/// happens once at the end of a render is the wrong trade. The pipeline it
-/// dispatches is cached, because a driver compile is not proportional to the
-/// image and costs more than it saves.
+/// Neither staging nor packed buffer is cached: holding 33 MB of host-visible
+/// memory alive to save a few ms once at the end of a render is the wrong
+/// trade. The pipeline is, because a driver compile is not proportional to the
+/// image.
 ///
 /// `buffer` is bound as a read-only storage buffer, so it needs
 /// `BufferUsages::STORAGE`. Every buffer the renderer hands out on
@@ -498,16 +486,15 @@ mod tests {
     use super::*;
     use wgpu::util::DeviceExt;
 
-    /// The GPU display transform against the CPU one it replaced.
+    /// The GPU display transform against the CPU one.
     ///
-    /// `wgsl_matches_the_cpu_curve` pins the curve; what is new here is what
+    /// `wgsl_matches_the_cpu_curve` pins the curve; what this adds is what
     /// wraps it -- the gamma, the 0.999 ceiling, the truncating cast and the
     /// byte order of the pack -- plus the dispatch's bounds check, which is why
     /// the image is deliberately not a multiple of the 8x8 workgroup.
     ///
     /// One code value of slack, for a driver whose `sqrt` or rational rounds
-    /// differently. This machine's does not -- the two agree exactly here, and
-    /// over a far denser ramp than is worth committing.
+    /// differently. This machine's does not.
     #[test]
     fn buffer_to_image_matches_the_cpu_encode() {
         let (device, queue) = get_wgpu_device_and_queue();

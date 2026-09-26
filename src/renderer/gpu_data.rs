@@ -21,10 +21,9 @@ pub struct Sphere {
 /// Triangle geometry touched by the traversal inner loop.
 ///
 /// Split out from the shading attributes: the ray/triangle test needs only
-/// these 48 bytes, so keeping the 80 bytes of UVs, normal and tangent frame in
-/// a separate buffer cuts the bandwidth the inner loop pulls by roughly 3x.
-/// Edges are stored rather than absolute vertices because the CPU already has
-/// them and Moeller-Trumbore wants them directly.
+/// these 48 bytes, so keeping the other 80 in a separate buffer cuts the inner
+/// loop's bandwidth by roughly 3x. Edges rather than absolute vertices, which
+/// is what Moeller-Trumbore wants.
 pub struct TrianglePos {
     /// First vertex
     pub v0: [f32; 3],
@@ -44,9 +43,9 @@ pub struct TrianglePos {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Triangle shading attributes, fetched once per ray after traversal settles.
 ///
-/// The three shading normals ride in what used to be padding -- one word at
-/// offset 44 and two at 72 -- so smooth shading costs no extra buffer, binding
-/// or traversal bandwidth. `tests/gpu_data_test.rs` pins the offsets.
+/// The three shading normals ride in padding, so smooth shading costs no extra
+/// buffer, binding or traversal bandwidth. `tests/gpu_data_test.rs` pins the
+/// offsets.
 pub struct TriangleAttr {
     /// Geometric normal, derived from the winding
     pub normal: [f32; 3],
@@ -126,11 +125,9 @@ pub struct QuadAttr {
 /// bits 23..0. A leaf with count 0 is the empty child of a single-leaf root and
 /// intersects nothing.
 ///
-/// The two padding words are free space, not waste that has to stay: a parent
-/// index and a which-child-am-I bit fit in them at the same 64 bytes, which is
-/// what a stackless Laine-style restart trail would need. Worth knowing if the
-/// traversal stack ever shows up as scratch traffic; not a reason to rewrite
-/// the loop before it does.
+/// The two padding words would fit a parent index and a which-child-am-I bit at
+/// the same 64 bytes, which is what a stackless Laine-style restart trail needs
+/// -- worth knowing if the traversal stack ever shows up as scratch traffic.
 pub struct BvhNode {
     /// Left child AABB minimum
     pub left_min: [f32; 3],
@@ -216,10 +213,8 @@ pub struct Material {
     pub mat_type: u32,
     /// Where this material's single-scatter albedo table starts in
     /// `dielectric_energy`, entering half first. Only a dielectric that can be
-    /// rough has one; everything else leaves it 0 and never reads it.
-    ///
-    /// Reuses what was padding, so the struct is the same 96 bytes it was and
-    /// the byte-image interning in `add_material` still works unchanged.
+    /// rough has one; everything else leaves it 0 and never reads it. Sits in
+    /// what would otherwise be padding.
     pub energy_offset: u32,
     /// Texture index (-1 for none)
     pub texture_index: i32,
@@ -271,13 +266,12 @@ pub struct GpuCamera {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Reference to a light source, plus its share of the scene's emitted power.
 ///
-/// The sampler and the MIS weight both need the probability of picking this
-/// light. They read it from `select_pdf` -- the same field of the same entry --
-/// rather than each computing it, which is what keeps a non-uniform selector
-/// from silently biasing the image: there is no second expression to drift.
+/// The sampler and the MIS weight both read the pick probability from
+/// `select_pdf` rather than each computing it, so there is no second expression
+/// for a non-uniform selector to silently bias the image through.
 ///
 /// `alias_prob` and `alias_index` are Vose's alias table over `select_pdf`, so
-/// selection is one 1D draw regardless of how many emitters there are. See
+/// selection is one 1D draw however many emitters there are. See
 /// `build_alias_table` in `scene_flattener`.
 pub struct LightRef {
     /// `(prim_type << PRIM_TYPE_SHIFT) | prim_index`, the packing `prim_refs`
@@ -297,10 +291,9 @@ pub struct LightRef {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Render configuration matching WGSL layout.
 ///
-/// What is *not* here is as deliberate as what is. The image size and the light
-/// count are fixed for the life of a `Renderer`, so they reach the shader as
-/// override constants instead -- see `Specialisation` in `renderer`. Only the
-/// fields a dispatch actually varies are left.
+/// Only what a dispatch varies. The image size and the light count are fixed
+/// for the life of a `Renderer`, so they reach the shader as override constants
+/// instead -- see `Specialisation` in `renderer`.
 pub struct GpuRenderConfig {
     /// Number of samples already accumulated into the output buffer before
     /// this dispatch. Also seeds the RNG.
