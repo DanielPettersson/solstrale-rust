@@ -9,14 +9,24 @@
 //! * Soft shadows
 //! * Bump mapping
 //! * Light attenuation
+//! * Smooth shading from a model's own `vn` records, or generated at a crease
+//!   angle when it has none
+//! * GGX microfacet metal and glass, both with multiple-scattering energy
+//!   compensation, plus Beer-Lambert absorption inside a dielectric
 //! * Next-event estimation with multiple importance sampling, for much lower noise
-//!   per sample on scenes lit by discrete lights
-//! * Russian roulette path termination
+//!   per sample on scenes lit by discrete lights. Lights are picked in
+//!   proportion to their emitted power, and a large quad light is sampled by
+//!   solid angle
+//! * Owen-scrambled Sobol sampling, which cuts error against a converged
+//!   reference by 25-40% at every sample count for the same work
+//! * Per-pixel adaptive sampling, and Russian roulette path termination
 //!
 //! ### Performance & Loading
-//! * Loading of obj models with included materials
-//! * Multithreaded BVH construction using Rayon, with a binned SAH split heuristic
-//!   and front-to-back ordered GPU traversal
+//! * Loading of obj models with included materials and per-vertex normals
+//! * Multithreaded BVH construction using Rayon, with a binned SAH sweep over
+//!   all three axes and front-to-back ordered GPU traversal
+//! * The tracer is compiled against the scene it is tracing, so a branch the
+//!   scene could never have taken is not in the shader at all
 //!
 //! ### Post-Processing
 //! Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
@@ -29,6 +39,12 @@
 //! * The denoiser and the saturation grade can also run on the unfinished
 //!   image, so an interactive viewport is filtered while the camera is moving
 //!   rather than only once it stops -- see [`renderer::RenderConfig::preview`]
+//!
+//! ### Display
+//! * Tone mapping in [`util::wgpu_util::buffer_to_image`]: ACES filmic by
+//!   default, with Khronos PBR Neutral, extended Reinhard and a plain clamp
+//!   selectable. A display transform, so everything upstream keeps working on
+//!   real radiance
 //!
 //! ## Example:
 //! ```rust

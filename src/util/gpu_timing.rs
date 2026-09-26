@@ -164,13 +164,11 @@ impl GpuTimer {
     /// Brackets encoder-level work in a pair of timestamps, the way
     /// [`Self::pass_writes`] brackets a compute pass.
     ///
-    /// A compute pass carries its timestamps in its descriptor. A buffer copy
+    /// A compute pass carries its timestamps in its descriptor; a buffer copy
     /// has no descriptor, so this is the only way to give one a scope of its
-    /// own -- and until it had one, the per-batch copy into the post buffer was
-    /// the single piece of GPU work in the render loop that no measurement
-    /// could see. `record` still runs on a device without
-    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS`, or once the query set is full; it is
-    /// only the timing that is lost.
+    /// own. `record` still runs on a device without
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS`, or once the query set is full; only
+    /// the timing is lost.
     pub(crate) fn encoder_scope(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,

@@ -211,15 +211,14 @@ fn test_index_shuffle_maps_a_prefix_onto_an_aligned_block() {
 
 #[test]
 fn test_the_pads_do_not_walk_in_lockstep() {
-    // The failure the index shuffle exists to prevent, and the one an image
-    // cannot show you: without it, the top bit of every scrambled dimension is
-    // the low bit of the sample index XOR a per-dimension constant, so every
-    // pad crosses into its other half on the same sample. The pads are then
-    // rigidly correlated however independent their scramble seeds are, and the
-    // error stops falling -- measured, linear RMSE on the test scene flattened
-    // at 0.17 from 64 spp up rather than halving per 4x samples.
+    // The failure the index shuffle exists to prevent: without it the top bit of
+    // every scrambled dimension is the low bit of the sample index XOR a
+    // per-dimension constant, so every pad crosses into its other half on the
+    // same sample. The pads are then rigidly correlated however independent
+    // their scramble seeds are, and the error stops falling -- RMSE on the test
+    // scene flat at 0.17 from 64 spp up rather than halving per 4x.
     //
-    // Tested as a correlation rather than as an identity, because what is wrong
+    // Tested as a correlation rather than an identity, because what is wrong
     // with lockstep is that it is perfect, not that it exists.
     let seeds: Vec<u32> = (0..8).map(|p| hash_combine(0x1234_5678, p)).collect();
     for (a, &sa) in seeds.iter().enumerate() {
@@ -242,13 +241,11 @@ fn test_the_pads_do_not_walk_in_lockstep() {
 
 #[test]
 fn test_hash_combine_does_not_collide_where_xor_did() {
-    // The seed used to be `index ^ (sample_index * A) ^ (restart_index * B)`,
-    // which is not injective in the triple: whenever the XOR coincides, two
-    // different pixels at different sample indices trace identical relative
-    // paths. That is not a rounding-error concern -- at 1920x1080 and 4096
-    // samples the form collides on 2185 pairs. It reads as low-frequency
-    // blotching, which `grain` (a 3x3 high-pass) cannot see, so nothing in the
-    // suite would have caught it.
+    // A bare XOR of the three terms, `index ^ (sample * A) ^ (restart * B)`, is
+    // not injective in the triple: at 1920x1080 and 4096 samples it collides on
+    // 2185 pairs, and colliding pixels trace identical relative paths. That
+    // reads as low-frequency blotching, which `grain` (a 3x3 high-pass) cannot
+    // see, so nothing else in the suite would catch it.
     let xor_seed = |index: u32, sample: u32| index ^ sample.wrapping_mul(0x9E37_79B9);
     let (pixel_a, sample_a) = (0u32, 0u32);
     let (pixel_b, sample_b) = (1_201_941u32, 1597u32);

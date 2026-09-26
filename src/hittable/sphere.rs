@@ -20,13 +20,11 @@ impl Sphere {
     /// moved and the radius scaled.
     ///
     /// Rotation carries the centre around the origin like any other point, but
-    /// a sphere's rotation about its own centre is geometrically nothing and is
-    /// *not* applied to the texture: `resolve_hit` in
+    /// is *not* applied to the texture: `resolve_hit` in
     /// `renderer/ray_trace.wgsl` derives the spherical coordinates from the
     /// world-space outward normal, so turning a texture on a sphere would need
     /// the rotation stored and undone there. A rotated texture on a sphere is
-    /// therefore not expressible; everything else a [`Transformer`] in this
-    /// crate can say is.
+    /// therefore not expressible.
     pub fn new(
         center: Vec3,
         radius: f64,
@@ -34,11 +32,10 @@ impl Sphere {
         transformation: &dyn Transformer,
     ) -> Sphere {
         let center = transformation.transform(center, false);
-        // The scale factor, read back off a unit vector with translation
-        // skipped: a rotation leaves its length alone and `Scale` multiplies
-        // it, so a composition of the two gives exactly the factor and any
-        // unit vector gives the same one. `Scale` is uniform-only, so the
-        // non-uniform case does not arise from anything in the crate.
+        // The scale factor, read off a unit vector with translation skipped: a
+        // rotation leaves its length alone and `Scale` multiplies it, so any
+        // unit vector gives the same factor. `Scale` is uniform-only, so the
+        // non-uniform case does not arise.
         let radius = radius * transformation.transform(UNIT_Y, true).length();
 
         let r_vec = Vec3::new(radius, radius, radius);

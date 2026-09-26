@@ -69,12 +69,10 @@ fn triangle_cloud(n: u32) -> Vec<Hittables> {
 
 /// Wraps [`triangle_cloud`] in a renderable scene lit by a *triangle* light.
 ///
-/// The light is the point. Every other `bvh_traversal` arm carries a sphere
-/// light, so a scene with no spheres in it at all is the only one on which a
-/// future `has_spheres` / `has_quads` pipeline specialisation could show
-/// anything -- and, since the cloud is spatially spread rather than colinear,
-/// the only one where a change to BVH quality is visible against a realistic
-/// distribution.
+/// The light is the point: every other `bvh_traversal` arm carries a sphere
+/// light, so this is the only all-triangle scene, and so the only one where
+/// `has_spheres` / `has_quads` specialisation shows anything. The cloud is
+/// spatially spread rather than colinear, so BVH quality shows too.
 fn triangle_cloud_scene(render_config: RenderConfig, n: u32) -> Scene {
     let extent = (n as f64).cbrt() * 2.0;
     let centre = extent / 2.;

@@ -8,8 +8,8 @@ struct Sphere {
     material_index: u32,
 }
 
-// Geometry read by the traversal inner loop. Edges rather than absolute
-// vertices, because that is what Moeller-Trumbore wants and what the CPU has.
+// Geometry for the traversal inner loop. Edges rather than absolute vertices,
+// which is what Moeller-Trumbore wants.
 struct TrianglePos {
     v0: vec3<f32>,
     _pad0: f32,
@@ -20,8 +20,6 @@ struct TrianglePos {
 }
 
 // Shading attributes, read once per ray after traversal has settled on a hit.
-// The three shading normals occupy what used to be padding: one word where
-// `_pad0` sat and two where `_pad1` did. Still 80 bytes.
 struct TriangleAttr {
     normal: vec3<f32>,
     material_index: u32,
@@ -80,32 +78,17 @@ const PRIM_TYPE_TRIANGLE = 1u;
 const PRIM_TYPE_QUAD = 2u;
 
 // Traversal defers only the farther child, so a tree of this depth pushes at
-// most one entry fewer than there are slots here. `Bvh::new` asserts its
-// depth against the matching MAX_TRAVERSAL_DEPTH, because overflowing this
-// array is not an error the GPU can report: the bounds-checking policy clamps
-// the store, the deferred subtree is lost, and geometry quietly vanishes.
+// most one entry fewer than there are slots here. `Bvh::new` asserts its depth
+// against the matching MAX_TRAVERSAL_DEPTH: an overflow is not an error the GPU
+// can report, the deferred subtree is simply lost and geometry vanishes.
 //
-// It is also the largest single lever on occupancy, and not through scratch.
-// Measured with `./shader-stats.sh` on a Radeon RX 5700 XT (RADV, Mesa 26.2.2),
-// varying only this constant:
-//
-//   depth   VGPRs   scratch   waves/SIMD   code size
-//       8      84         0           12       30548
-//      16     100         0           10       31912
-//      24     100         0           10       33268
-//      32     128         0            8       34772
-//
-// So ACO keeps the whole stack in registers -- `Scratch size` is 0 at every
-// depth and the ISA contains no `scratch_` instruction -- and 44 of the 128
-// registers at depth 32 go on it. That is 8 waves per SIMD against the wave32
-// cap of 20. Shrinking the stack is therefore worth real occupancy,
-// which is what makes a short-stack or stackless traversal worth attempting;
-// moving it to scratch or LDS would not be, since it is not there now.
+// ACO keeps the stack in registers, so this is also the largest single lever on
+// occupancy: 44 of 128 VGPRs at depth 32, giving 8 waves/SIMD against 12 at
+// depth 8. Shrinking the stack is worth real occupancy; moving it to scratch or
+// LDS would not be, since it is not there now.
 const MAX_TRAVERSAL_DEPTH = 32u;
 
-// One stack, shared by world_hit and occluded. They are never live at the same
-// time -- occluded is called from the NEE block of trace_sample, long after
-// world_hit has returned -- so two declarations only ever cost storage.
+// One stack, shared by world_hit and occluded: the two are never live at once.
 var<private> traversal_stack: array<u32, MAX_TRAVERSAL_DEPTH>;
 
 struct Material {
@@ -138,36 +121,23 @@ const MAT_MISS = 5u;
 
 // Depth recorded for a primary ray that hit nothing. Far enough that the
 // denoiser's relative depth weight reads background as identical to background
-// and as wildly different from any geometry, which preserves the silhouette
-// without needing a validity branch in the filter's inner loop.
+// and as unlike any geometry, so the silhouette survives without a validity
+// branch in the filter's inner loop.
 const GUIDE_FAR = 1e7;
 
 // Ceiling on the indirect radiance a single sample may carry, which is what
 // stops one improbable bright bounce from leaving a permanent speck.
 //
-// `min(X, t)` has an expectation strictly below `E[X]`, so a clamp always
-// biases the image darker, and the bias is only worth paying where the
-// variance it suppresses is real. Two things narrow it down to what is left
-// here, both measured on `create_test_scene` against an unclamped reference:
+// `min(X, t)` biases the image darker, so the clamp is confined to where the
+// variance it suppresses is real. Measured on `create_test_scene`: it applies
+// to depth >= 1 only, since clamping the first vertex ate 26% of the scene's
+// energy, and the threshold is 10 rather than 3.5, which cost a further 9% of
+// the energy without lowering the per-sample standard deviation at all once NEE
+// carried the direct lighting. What is left is a backstop for scenes that do
+// produce outliers.
 //
-// - It applies to depth >= 1 only (see `trace_sample`). The first path vertex
-//   has no firefly failure mode, and clamping it was eating 26% of the
-//   scene's energy -- most of that on diffuse surfaces, whose NEE estimate
-//   divides by a `pdf_light` that goes small for a light subtending a large
-//   solid angle, so a single legitimate direct sample lands far above any
-//   sane threshold.
-// - The threshold is 10, not the 3.5 it was before next-event estimation.
-//   With NEE carrying the direct lighting, no indirect sample in that scene
-//   reaches 10: per-sample standard deviation at 50 spp is 0.862 here and
-//   0.862 with the clamp removed altogether, while 3.5 cost a further 9% of
-//   the energy to buy that same 0.862 -> 0.672. What survives is a backstop
-//   for scenes that do produce outliers -- a small intense light, an emissive
-//   mesh -- priced so it does not tax the scenes that do not.
-//
-// An override rather than a const, and the one override here that does change
-// what a sample carries: it is what lets a test render the same scene with the
-// bias lifted, so the clamp cannot be mistaken for an error in the estimator.
-// See `Renderer::bsdf_only_reference`.
+// An override so a test can render the same scene with the bias lifted; see
+// `Renderer::bsdf_only_reference`.
 override clamping_threshold: f32 = 10.0;
 
 const PI = 3.14159265359;
@@ -184,24 +154,19 @@ const PAIR_PIXEL_JITTER = 0u;
 const PAIR_LENS = 1u;
 const PAIR_BOUNCE_BASE = 2u;
 const PAIRS_PER_BOUNCE = 3u;
-// Offsets within a bounce's three pairs. The point sampled on the light, the
-// BSDF direction, and a shared pair whose .x carries the bounce's one scalar
-// draw -- light selection wherever the lobe has a density, the Fresnel coin on
-// smooth glass, which are mutually exclusive because smooth glass samples no
-// light -- and whose .y carries Russian roulette.
+// Offsets within a bounce's three pairs: the point sampled on the light, the
+// BSDF direction, and a shared pair whose .x is the bounce's one scalar draw
+// -- light selection, or the Fresnel coin on smooth glass, which are mutually
+// exclusive -- and whose .y is Russian roulette.
 const PAIR_LIGHT_POINT = 0u;
 const PAIR_BSDF = 1u;
 const PAIR_SCALARS = 2u;
 
 // The rough dielectric's reflect-or-refract coin, one pair per bounce, indexed
-// as `PAIR_GLASS_COIN_BASE + bounce_pair`.
-//
-// Outside the budget above, because at a rough dielectric the shared scalar's
-// `.x` is already the light pick: the lobe gained a width, so it takes a shadow
-// ray, so the two draws stopped being mutually exclusive. A base far past
-// `2 + 3 * max_depth` keeps every existing scene's stream exactly where it was
-// -- a pair index only ever seeds a hash, so there is no array for a disjoint
-// range to overflow.
+// as `PAIR_GLASS_COIN_BASE + bounce_pair`. Outside the budget above because a
+// rough dielectric takes a shadow ray, so the shared scalar's `.x` is already
+// the light pick. A pair index only seeds a hash, so a disjoint range overflows
+// nothing.
 const PAIR_GLASS_COIN_BASE = 4096u;
 
 // Keeps sampler_extra's stream clear of the budgeted pairs'.
@@ -238,18 +203,15 @@ struct RenderConfig {
     // Relative standard-error threshold below which a pixel is converged.
     variance_threshold: f32,
     // Distinguishes successive accumulation restarts, and carries
-    // RenderConfig::seed as its initial value. Dragging the camera restarts the
-    // accumulation every frame, and without this the seed in trace_sample is a
-    // pure function of pixel and sample index, so every frame replays an
-    // identical sample sequence -- which reads as a static grain pinned to the
-    // screen rather than as noise.
+    // RenderConfig::seed as its initial value. Without it a dragged camera
+    // replays an identical sample sequence every frame, which reads as grain
+    // pinned to the screen rather than as noise.
     restart_index: u32,
 }
 
 // An emitter, plus its share of the scene's emitted power. `sample_light` and
-// light_hit_pdf both take the pick probability from `select_pdf` -- the same
-// field of the same entry -- so there is no second expression for the two to
-// disagree on. See `LightRef` and `build_alias_table` in the flattener.
+// `light_hit_pdf` both read the pick probability from `select_pdf`, so the two
+// cannot disagree. See `LightRef` and `build_alias_table` in the flattener.
 struct LightRef {
     // (prim_type << PRIM_TYPE_SHIFT) | prim_index, the packing prim_refs uses.
     prim: u32,
@@ -261,9 +223,9 @@ struct LightRef {
     alias_index: u32,
 }
 
-// What traversal actually tracks: enough to identify the winning primitive and
-// reconstruct its shading data afterwards, and nothing more. Keeping this
-// small is what removes the ~25-float HitRecord copy from the inner loop.
+// What traversal tracks: enough to identify the winning primitive and rebuild
+// its shading data afterwards. Keeping it small keeps the ~25-float HitRecord
+// copy out of the inner loop.
 struct HitRef {
     t: f32,
     prim_type: u32,
@@ -277,9 +239,8 @@ struct HitRecord {
     // Interpolated across a smooth triangle; what the BSDF and the normal map
     // are evaluated against.
     normal: vec3<f32>,
-    // What the surface actually is. Near a silhouette it can disagree with
-    // `normal` by most of a facet, so facing and the scattering gates in
-    // trace_sample key off this one.
+    // The facet. Near a silhouette it can disagree with `normal` by most of a
+    // facet, so facing and the scattering gates key off this one.
     geometric_normal: vec3<f32>,
     tangent: vec3<f32>,
     bi_tangent: vec3<f32>,
@@ -337,44 +298,32 @@ var<storage, read_write> sample_count_buffer: array<u32>;
 
 // Albedo, shading normal and camera distance of the first surface along the
 // view ray that is not a mirror or a lens, packed into 16 bytes. Written once
-// per accumulation run by trace_guide, and only when `writes_guide` says
-// something in the chain will read it. Read only by the denoiser, which
-// fetches it 125 times per pixel -- which is why it is packed rather than
-// stored as two plain vec4<f32>. See pack_guide below; the denoise shaders
-// carry a matching oct_decode that must stay in step with oct_encode here.
-// Three copies of that pair exist now: this shader's, denoise_atrous.wgsl's,
+// per accumulation run by trace_guide, and only when `writes_guide` is set.
+// Packed because the denoiser fetches it 125 times per pixel. Three copies of
+// the oct encode/decode pair must stay in step: this file's, denoise_atrous.wgsl's
 // and `pack_oct` in scene_flattener.rs.
 @group(0) @binding(15)
 var<storage, read_write> gbuffer: array<vec4<u32>>;
 
 // Single-scatter directional albedo of the rough dielectric, one 16x16 grid per
-// side per index of refraction, concatenated. See renderer/dielectric_energy.rs
-// for how it is built and why it is a table rather than a fit; `Material`'s
-// `energy_offset` says where a material's pair of grids starts.
-//
-// Empty and never read unless `has_rough_dielectrics`, which is the same
-// condition that compiles out the arm that reads it.
+// side per index of refraction, concatenated. Built by dielectric_energy.rs;
+// `Material::energy_offset` says where a material's pair of grids starts. Empty
+// unless `has_rough_dielectrics`.
 @group(0) @binding(16)
 var<storage, read> dielectric_energy: array<f32>;
 
 // ---------------------------------------------------------------------------
 // Pipeline specialisation
 //
-// Facts that hold for the whole life of a pipeline, handed to the shader as
-// override constants rather than as uniforms. naga substitutes these before it
-// emits SPIR-V, so a `false` here deletes the branch it guards and everything
-// under it, rather than merely making it predictable. `Renderer::new` already
-// builds the module and its one pipeline per render, so the only cost is a
-// shader-cache miss the first time a given combination is seen.
+// Facts that hold for the life of a pipeline, as override constants rather than
+// uniforms: naga substitutes them before emitting SPIR-V, so a `false` deletes
+// the branch it guards. Every flag below removes a branch the scene could never
+// have taken, so none of them changes a sample -- see `Specialisation` in
+// renderer/mod.rs.
 //
-// Every flag below removes a branch the scene could never have taken, so none
-// of them changes a single sample -- see `Specialisation` in renderer/mod.rs.
-//
-// `max_depth` is deliberately not among them. A constant trip count buys
-// unrolling and nothing else, and the loop body is the whole material switch
-// plus two full BVH traversals; unrolling that ten times is an instruction
-// cache disaster on a shader that is already latency-bound. It stays in the
-// uniform.
+// `max_depth` is deliberately not among them: a constant trip count only buys
+// unrolling, and unrolling the whole material switch plus two BVH traversals
+// ten times is an instruction cache disaster.
 // ---------------------------------------------------------------------------
 
 override width: u32 = 1u;
@@ -385,35 +334,28 @@ override height: u32 = 1u;
 override light_count: u32 = 0u;
 
 // Which primitive types the scene contains. Each `false` strips one arm from
-// hit_leaf, leaf_occluded, resolve_hit, sample_light and light_prim_pdf. There
-// is no flag for triangles: they are the arm the others fall through to, so on
-// an all-triangle scene those chains become straight-line code.
+// hit_leaf, leaf_occluded, resolve_hit, sample_light and light_prim_pdf.
+// Triangles are the fallback arm, so they need no flag.
 override has_spheres: bool = true;
 override has_quads: bool = true;
 
 // Whether `prim_refs` is the identity map, which it is exactly when every
 // primitive is a triangle. Worth the most of anything here: the innermost
 // traversal loop then reads the triangle's address straight out of the leaf
-// slot rather than chasing a reference to it, which removes one of the two
-// dependent loads per primitive test.
+// slot, removing one of the two dependent loads per primitive test.
 override identity_prim_refs: bool = false;
 
 // Which material kinds the scene contains, counting the ones inside blends.
-// `has_blends` is the one that fires on the widest range of scenes: without it
-// every bounce pays for resolve_surface's ten-iteration walk, a materials[]
-// fetch, a compare and a branch.
+// `has_blends` fires on the widest range of scenes: without it every bounce
+// pays for resolve_surface's ten-iteration walk.
 override has_blends: bool = true;
 override has_metal: bool = true;
 override has_dielectrics: bool = true;
 
 // Whether any dielectric in the scene has a roughness above zero. Separate from
-// `has_dielectrics` because the microfacet arm is the larger half of the
-// material code by some way -- two lobes, a transmission Jacobian and an
-// evaluation arm for next-event estimation -- while every scene that predates
-// it uses smooth glass and takes the Dirac path. Measured on `test_scene`,
-// leaving it in costs the tracer 128 -> 168 VGPRs and drops occupancy from 8
-// subgroups per SIMD to 6, for code that scene could never reach. A scene that
-// does use rough glass pays that 6, which is what the arm actually costs.
+// `has_dielectrics` because the microfacet arm is much the larger half of the
+// material code: on `test_scene` leaving it in costs 128 -> 168 VGPRs and drops
+// occupancy from 8 subgroups per SIMD to 6.
 override has_rough_dielectrics: bool = true;
 
 // Whether any material samples the atlas, for albedo and for normals. Strips
@@ -421,27 +363,20 @@ override has_rough_dielectrics: bool = true;
 override has_textures: bool = true;
 override has_normal_maps: bool = true;
 
-// Next-event estimation. Not a win in itself -- both arms of it are real work.
-// It is here so the estimator can be measured against plain BSDF sampling
-// without editing this file.
+// Next-event estimation. Here so the estimator can be measured against plain
+// BSDF sampling without editing this file.
 override nee_enabled: bool = true;
 
 // Selects the sampler backing: 1 draws from an Owen-scrambled Sobol sequence,
-// 0 from white noise. An override rather than a uniform because an override is
-// resolved at pipeline creation, where a uniform would cost a branch on every
-// single draw.
+// 0 from white noise. An override rather than a uniform, which would cost a
+// branch on every draw.
 override low_discrepancy: f32 = 1.0;
 
-// Whether the G-buffer is filled at all. Nothing but a denoising post-processor
-// reads it, so a chain without one pays a whole extra ray per pixel per
-// accumulation run for a buffer no one opens. Off strips trace_guide,
-// pack_guide, oct_encode and resolve_material_index_dominant from the module
-// entirely.
-//
-// Costs nothing worth measuring on a long render -- one restart against
-// thousands of sample paths, under 0.2% -- and 9% of a frame during a camera
-// drag, where every frame is a restart at one sample per pixel. See
-// `interactive_restart_frame_cost`, which is the only thing that measures it.
+// Whether the G-buffer is filled at all. Only a denoising post-processor reads
+// it, and filling it costs an extra ray per pixel per accumulation run: under
+// 0.2% of a long render, but 9% of a frame during a camera drag, where every
+// frame is a restart. Off strips trace_guide and its helpers from the module.
+// See `interactive_restart_frame_cost`.
 override writes_guide: bool = true;
 
 fn pcg_hash(input: u32) -> u32 {
@@ -450,13 +385,10 @@ fn pcg_hash(input: u32) -> u32 {
     return (word >> 22u) ^ word;
 }
 
-// Combining seed terms with a bare XOR collides. The seed used to be
-// `index ^ (sample_index * A) ^ (restart_index * B)`, which is not injective in
-// the triple: at 1920x1080 and 4096 samples that form gives pixel (0, 0) at
-// sample 0 and pixel (21, 626) at sample 1597 the identical seed, and two
-// thousand more such pairs. Those two pixels then trace identical relative
-// paths, which reads as low-frequency blotching -- invisible to `grain`, which
-// is a 3x3 high-pass. Hashing one side before the XOR removes the structure.
+// Combining seed terms with a bare XOR collides: `a ^ (b * A) ^ (c * B)` is not
+// injective in the triple, and two pixels that share a seed trace identical
+// relative paths, which reads as low-frequency blotching. Hashing one side
+// before the XOR removes the structure.
 fn hash_combine(a: u32, b: u32) -> u32 {
     return pcg_hash(a ^ pcg_hash(b));
 }
@@ -473,22 +405,18 @@ fn unit_float(x: u32) -> f32 {
 //
 // Owen-scrambled Sobol, hash-based and table-free, after Burley 2020.
 //
-// Why Owen and not stratification: adaptive sampling retires each pixel at its
-// own unpredictable n, and stratification needs N up front -- a jittered point
-// is uniform only *within* its stratum, so a partial set of strata is biased,
-// not merely noisier. Owen scrambling makes every individual point marginally
-// uniform, so a truncated prefix stays unbiased. That is what makes
-// low-discrepancy sampling usable here at all, rather than a nicety.
+// Owen rather than stratification: adaptive sampling retires each pixel at its
+// own unpredictable n, and a partial set of strata is biased, not merely
+// noisier. Owen scrambling makes every point marginally uniform, so a truncated
+// prefix stays unbiased.
 //
 // Everything down to sobol_1 is mirrored in Rust in renderer/sampler_test.rs,
-// which checks the bijection and the net property on the CPU in milliseconds.
-// Its constants are transcribed by hand, so it also pins them against this
-// file's text -- that drift is the one thing it could not otherwise see.
+// which checks the bijection and the net property on the CPU. Its constants are
+// transcribed by hand, so it also pins them against this file's text.
 
 // Laine-Karras permutation. Every multiplier is even, which makes each
 // `v ^= v * C` triangular with a unit diagonal and so a bijection on u32 -- the
-// property the whole scramble rests on, and the first thing to check if a
-// golden image ever fails.
+// property the whole scramble rests on.
 fn laine_karras_permutation(x: u32, seed: u32) -> u32 {
     var v = x + seed;
     v ^= v * 0x6c50b47cu;
@@ -511,17 +439,11 @@ fn sobol_0(index: u32) -> u32 {
     return reverseBits(index);
 }
 
-// Sobol dimension 1. The Antonov-Saleev recurrence gives direction numbers
-// v_0 = 1 << 31 and v_{i+1} = v_i ^ (v_i >> 1), XORed for every set bit of the
-// index -- a loop over ~16 set bits, which on a scrambled index is every draw's
-// dominant cost.
-//
-// The loop is not needed. Those direction numbers are the rows of Pascal's
-// triangle mod 2, so by Lucas' theorem bit j of the result is the parity of the
-// set bits of the index that are supersets of j. That is a superset zeta
-// transform over a 5-bit index, which is five shift-and-XOR layers on the word
-// itself. Sixteen branchless operations against roughly eighty, verified
-// exhaustively against the recurrence in renderer/sampler_test.rs.
+// Sobol dimension 1, without the Antonov-Saleev loop. Its direction numbers are
+// the rows of Pascal's triangle mod 2, so by Lucas' theorem bit j of the result
+// is the parity of the index bits that are supersets of j -- a superset zeta
+// transform, five shift-and-XOR layers. Verified exhaustively against the
+// recurrence in renderer/sampler_test.rs.
 fn sobol_1(index: u32) -> u32 {
     var g = index;
     g ^= (g >> 1u) & 0x55555555u;
@@ -535,17 +457,13 @@ fn sobol_1(index: u32) -> u32 {
 
 // Everything that identifies a sample, and nothing else.
 //
-// There is deliberately no running counter: a draw is a pure function of its
-// dimension, so a branch that skips a draw -- total internal reflection passing
-// over the Fresnel coin, Russian roulette not yet armed -- cannot shift the
-// dimensions of the draws after it.
+// Deliberately no running counter: a draw is a pure function of its dimension,
+// so a branch that skips a draw cannot shift the draws after it.
 //
-// The invariant, which is not visible from the code: the seed is a pure
-// function of (pixel, sample index, restart index), and the sequence of sample
-// indices a pixel traces is the prefix 0..n *regardless of how the CPU groups
-// them into batches*. That is what keeps the stream independent of
-// `samples_per_batch`, therefore of GPU timing, therefore of which arm of a
-// denoise test is running.
+// The invariant, not visible from the code: the seed is a pure function of
+// (pixel, sample index, restart index), and a pixel always traces the prefix
+// 0..n regardless of how the CPU groups those into batches. That keeps the
+// stream independent of `samples_per_batch`, and so of GPU timing.
 struct Sampler {
     pixel_seed: u32,
     index: u32,
@@ -558,32 +476,23 @@ fn sampler_new(pixel_index: u32, sample_index: u32) -> Sampler {
 // One 2D draw. `pair` indexes dimension *pairs*, not dimensions.
 //
 // Each pair gets its own scramble seed, so the budget is N independent 2D
-// (0,2)-sequences rather than one 2N-dimensional Sobol sequence. That padding
-// is deliberate: a high-dimensional sequence's later dimensions are poorly
-// stratified at any sample count a renderer reaches, and the integrand's smooth
-// low-dimensional structure lives *within* each pair -- a lens disc, a light's
-// surface, a cosine hemisphere -- not across them.
+// (0,2)-sequences rather than one 2N-dimensional Sobol sequence. A high-
+// dimensional sequence's later dimensions are poorly stratified at any sample
+// count a renderer reaches, and the integrand's smooth structure lives within
+// each pair -- a lens disc, a light's surface, a cosine hemisphere.
 fn sampler_2d(s: Sampler, pair: u32) -> vec2<f32> {
     let seed = hash_combine(s.pixel_seed, pair);
     if (low_discrepancy != 0.0) {
         // The sample index is shuffled per pair before the sequence is
-        // generated, not merely scrambled after.
+        // generated, not merely scrambled after. Scrambling the outputs alone
+        // leaves the pads walking in lockstep -- every dimension crosses into
+        // its other half on the same sample -- and the error then stops falling
+        // (RMSE flat at 0.17 from 64 spp up, rather than halving per 4x).
         //
-        // Scrambling the outputs alone does not decorrelate the pairs at all.
-        // The top bit of a scrambled dimension works out to the low bit of the
-        // sample index XOR a per-dimension constant, so every dimension of
-        // every pair crosses into its other half on the same sample: the pads
-        // walk in lockstep, and the error stops falling instead of converging.
-        // Measured on the test scene, linear RMSE against a converged reference
-        // flattened at 0.17 from 64 spp upward rather than halving per 4x --
-        // while still looking like a win at 8 spp.
-        //
-        // The shuffle is safe here for the same reason Owen scrambling is. It
-        // is a nested permutation, so it maps any prefix of 2^m samples onto a
-        // 2^m-aligned *contiguous block* of the sequence -- and every aligned
-        // block of a (0,2)-sequence is a (0,m,2)-net, exactly as a prefix is.
-        // No sample count has to be known up front, which is what adaptive
-        // sampling requires.
+        // Safe for the same reason Owen scrambling is: a nested permutation
+        // maps any prefix of 2^m samples onto a 2^m-aligned contiguous block,
+        // and every such block of a (0,2)-sequence is a (0,m,2)-net. No sample
+        // count has to be known up front, which adaptive sampling requires.
         let i = nested_uniform_scramble(s.index, seed);
         let seed_x = pcg_hash(seed);
         let seed_y = pcg_hash(seed_x);
@@ -611,8 +520,8 @@ fn sampler_1d(s: Sampler, dim: u32) -> f32 {
 }
 
 // A draw outside the budget, decorrelated from every budgeted dimension and
-// from every other tag. For the draws whose *count* is data-dependent and which
-// therefore cannot be given a fixed slot without reserving their worst case.
+// every other tag. For draws whose count is data-dependent, which cannot get a
+// fixed slot without reserving their worst case.
 fn sampler_extra(s: Sampler, tag: u32) -> f32 {
     return unit_float(hash_combine(hash_combine(s.pixel_seed, s.index), tag ^ EXTRA_TAG_SALT));
 }
@@ -621,21 +530,17 @@ fn ray_at(r: Ray, t: f32) -> vec3<f32> {
     return r.origin + t * r.direction;
 }
 
-// sRGB EOTF, the exact piecewise form with the linear toe rather than
-// `pow(x, 2.2)`: it is what the encoders that wrote these images used, and it
-// is the exact inverse of the OETF `buffer_to_image` encodes with. Mirrors
-// `srgb_to_linear` in `util/rgb_color.rs`, which the CPU fallback uses.
+// sRGB EOTF, the exact piecewise form rather than `pow(x, 2.2)`: it is what the
+// encoders that wrote these images used. Mirrors `srgb_to_linear` in
+// `util/rgb_color.rs`.
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let low = c / 12.92;
     let high = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
     return select(high, low, c <= vec3<f32>(0.04045));
 }
 
-// Closed-form samplers.
-//
-// These were rejection loops of up to 100 iterations. On a GPU every lane in a
-// wavefront waits for its unluckiest neighbour, so a loop with a ~48% per-
-// iteration rejection rate costs far more than the arithmetic below.
+// Closed-form samplers, rather than rejection loops: on a GPU every lane in a
+// wavefront waits for its unluckiest neighbour.
 
 fn random_in_unit_disk(u: vec2<f32>) -> vec3<f32> {
     // sqrt of a uniform variate makes the radius uniform by area.
@@ -711,12 +616,9 @@ fn triangle_random_direction(t: TrianglePos, origin: vec3<f32>, u: vec2<f32>) ->
 }
 
 // Where a sampled quad point becomes a direction, on both arms: `u` is the
-// point in the quad's own (u, v) parameters, which is what
-// `quad_solid_angle_uv` returns as well.
-//
-// On its own this is area sampling, the fallback for a quad the
-// spherical-rectangle parametrisation does not cover. The `d^2 / cos` its PDF
-// then needs varies across the light, and that variation is noise.
+// point in the quad's own (u, v) parameters, as `quad_solid_angle_uv` returns.
+// On its own this is area sampling, the fallback for a quad the spherical-
+// rectangle parametrisation does not cover.
 fn quad_random_direction(q: QuadPos, origin: vec3<f32>, u: vec2<f32>) -> vec3<f32> {
     let p = q.Q + q.u * u.x + q.v * u.y;
     return p - origin;
@@ -729,25 +631,22 @@ fn quad_random_direction(q: QuadPos, origin: vec3<f32>, u: vec2<f32>) -> vec3<f3
 const QUAD_ORTHOGONAL_EPS = 1e-4;
 
 // Smallest solid angle worth the parametrisation, and the numerical guard.
-// `solid_angle` below is four interior angles less 2*pi, so a small one is a
-// difference of quantities near pi: in f32 that leaves about 1e-6 of absolute
-// error however small the true value is. At 1e-3 that error is a thousandth of
-// the PDF, and below it area sampling is already within a few percent of
-// optimal -- nothing to win, and precision to lose.
+// `solid_angle` is four interior angles less 2*pi, a difference of quantities
+// near pi, which leaves about 1e-6 of absolute f32 error however small the true
+// value is. Below 1e-3 area sampling is already near-optimal anyway.
 const MIN_SOLID_ANGLE = 1e-3;
 
 // A quad seen from a shading point, in the frame the spherical-rectangle
 // parametrisation works in (Urena, Fajardo & King 2013, "An Area-Preserving
 // Parametrization for Spherical Rectangles").
 //
-// The frame's axes are not kept: everything downstream is a coordinate in it,
-// and the point the sampler produces leaves in the quad's own parameters. That
-// is what holds the tracer at 128 VGPRs -- carrying three more vec3s through
-// `sample_light` costs 40 and a quarter of the occupancy with it.
+// The frame's axes are not kept: everything downstream is a coordinate in it.
+// Carrying three more vec3s through `sample_light` costs 40 VGPRs and a quarter
+// of the occupancy.
 //
 // A zero `solid_angle` means this quad is not sampled that way from here, which
-// is what `quad_use_solid_angle` reads: one computation, so the sampler and the
-// PDF cannot come to different conclusions about which arm a quad is on.
+// is what `quad_use_solid_angle` reads -- one computation, so the sampler and
+// the PDF cannot disagree about which arm a quad is on.
 struct QuadSphericalRect {
     // Signed distance to the quad's plane, negative by construction.
     z0: f32,
@@ -786,11 +685,9 @@ fn quad_spherical(q: QuadPos, origin: vec3<f32>) -> QuadSphericalRect {
     sr.y1 = sr.y0 + vl;
 
     // Girard's theorem: the solid angle is the four interior angles less 2*pi.
-    // The paper builds those from normalised cross products of the corner
-    // vectors, but in this frame each of those normals has a zero component --
-    // the plane through two corners that share an x contains the frame's y axis
-    // -- so every cross product and vec3 normalize collapses into the four
-    // scalar reciprocal square roots below, and `b0` and `b1` with them.
+    // In this frame each of the paper's corner normals has a zero component, so
+    // its cross products and vec3 normalizes collapse into the four scalar
+    // reciprocal square roots below, and `b0` and `b1` with them.
     let z0sq = sr.z0 * sr.z0;
     let ix0 = inverseSqrt(z0sq + sr.x0 * sr.x0);
     let ix1 = inverseSqrt(z0sq + sr.x1 * sr.x1);
@@ -813,13 +710,11 @@ fn quad_use_solid_angle(sr: QuadSphericalRect) -> bool {
     return sr.solid_angle > MIN_SOLID_ANGLE;
 }
 
-// The one definition of a quad light's density, on either arm. `sample_light`
-// reaches it with the `sr` it sampled from and `light_prim_pdf` with one built
-// from the same origin, so neither the arm nor the density can drift from what
-// the other side believes.
+// The one definition of a quad light's density, on either arm, so the sampler
+// and the PDF cannot drift apart.
 //
-// `direction`, `distance` and `normal` are the area arm's conversion and are
-// unread on the solid-angle arm, which is already a density over directions.
+// `direction`, `distance` and `normal` are the area arm's conversion and unread
+// on the solid-angle arm, which is already a density over directions.
 fn quad_prim_pdf(
     sr: QuadSphericalRect,
     prim_index: u32,
@@ -870,23 +765,17 @@ fn sphere_random_direction(s: Sphere, origin: vec3<f32>, u: vec2<f32>) -> vec3<f
     return onb_local(uvw, random_to_sphere(radius, dot(direction, direction), u));
 }
 
-// The one definition of a light's solid-angle density. sample_light and the
-// BSDF-side MIS weight both call it, each from the `t` and the normal it
-// already has, which is what stops the two strategies drifting apart.
-//
+// The one definition of a light's solid-angle density, called by sample_light
+// and by the BSDF-side MIS weight, so the two strategies cannot drift apart.
 // Returns the density of this primitive alone; the caller multiplies by the
 // probability of having picked it.
 //
-// `direction` must be unit and `distance` in world units. The primary ray is
-// not normalised (issue #57) and never reaches either caller: the camera ray
-// counts as specular, so an emitter it lands on is taken at weight 1 without
-// consulting a light PDF, and trace_guide has no MIS at all. The next person
-// to touch trace_guide will not know that, hence this note.
+// `direction` must be unit and `distance` in world units -- the primary ray is
+// not normalised (issue #57) and never reaches either caller.
 //
-// `normal` is the primitive's geometric normal, not the shading normal: the
-// area-to-solid-angle Jacobian belongs to the facet the point was sampled on.
-// Unused for spheres, and for a quad on the solid-angle arm below: both are
-// sampled in the direction domain already and have no area term to convert.
+// `normal` is the geometric normal: the area-to-solid-angle Jacobian belongs to
+// the facet the point was sampled on. Unused for spheres, and for a quad on the
+// solid-angle arm, which are sampled in the direction domain already.
 fn light_prim_pdf(
     prim_type: u32,
     prim_index: u32,
@@ -922,18 +811,14 @@ fn light_prim_pdf(
 }
 
 // Which entry of `lights` a primitive is, or `light_count` if it is not an
-// emitter sample_light draws from.
+// emitter sample_light draws from. The index rather than a yes/no, because the
+// caller needs the entry's `select_pdf`.
 //
-// The index rather than a yes/no, because the caller needs the entry's
-// `select_pdf` -- reading the pick probability off the same record the sampler
-// picked by is what keeps the two sides of the MIS weight in step.
-//
-// `lights` is sorted by the packed `(prim_type, prim_index)` key that
-// `prim_refs` already uses, so this is a binary search: three iterations at
-// eight lights, ten at a thousand. The alternative -- a light index stored on
-// the primitive -- founders on QuadAttr being exactly 32 bytes with no slack,
-// and growing it by half to save three iterations is not worth it. It is the
-// escape hatch if a profile ever shows this search.
+// `lights` is sorted by the packed `(prim_type, prim_index)` key `prim_refs`
+// uses, so this is a binary search: three iterations at eight lights, ten at a
+// thousand. Storing a light index on the primitive is the escape hatch if a
+// profile ever shows this search, but QuadAttr is exactly 32 bytes with no
+// slack for one.
 fn find_light(prim_type: u32, prim_index: u32) -> u32 {
     let key = (prim_type << PRIM_TYPE_SHIFT) | prim_index;
     var lo = 0u;
@@ -951,18 +836,15 @@ fn find_light(prim_type: u32, prim_index: u32) -> u32 {
 }
 
 // The light strategy's density for a direction a BSDF path followed to an
-// emitter, which is the other half of the MIS weight at that vertex.
+// emitter: the other half of the MIS weight at that vertex.
 //
-// Only the emitter the path actually reached can have produced a light sample
-// along this direction: sample_light picks one emitter and the caller's
-// occluded() discards the sample unless that one is unblocked -- and any
-// emitter further along is blocked by this one. So the density is exactly
-// `P(pick this one) * p_this(w)`, with no sum over the rest of the scene and
-// no intersection test beyond the one the path already did.
+// Only the emitter the path reached can have produced a light sample along this
+// direction, since any emitter further along is blocked by this one. So the
+// density is exactly `P(pick this one) * p_this(w)`, with no sum over the scene
+// and no extra intersection test.
 //
 // A `Blend` holding a DiffuseLight is not in `lights`, so it lands here as 0
-// and the hit is taken at weight 1 -- which is what it got before, now for a
-// structural reason rather than as a coincidence of the sum.
+// and the hit is taken at weight 1.
 fn light_hit_pdf(
     prim_type: u32,
     prim_index: u32,
@@ -986,10 +868,8 @@ struct LightSample {
     direction: vec3<f32>,
     // Distance to the sampled point, so the shadow ray can stop short of it.
     distance: f32,
-    // Solid-angle density of this whole strategy at `direction`: the chance of
-    // having picked this light times the density of the point on it. Computed
-    // from the `t` and normal the probe below produces anyway, so it costs no
-    // intersection of its own.
+    // Solid-angle density of the whole strategy at `direction`: the chance of
+    // having picked this light times the density of the point on it.
     pdf: f32,
     emission: vec3<f32>,
     attenuation_factor: f32,
@@ -1000,11 +880,9 @@ struct LightSample {
 // stream, so a scene with one light draws the same pair as a scene with ten.
 //
 // Selection is power-proportional and costs that one scalar draw: `pick * L`
-// splits into a slot and a coin, and the alias table turns the pair into a
-// draw from the light distribution. Uniform selection is the special case where
-// every `alias_prob` is 1 and every `select_pdf` is `1 / L` -- what one light
-// gives trivially, and what the flattener falls back to when nothing in the
-// scene emits -- so a single-light scene traces what it always did.
+// splits into a slot and a coin, and the alias table turns the pair into a draw
+// from the light distribution. Uniform selection is the special case where
+// every `alias_prob` is 1 and every `select_pdf` is `1 / L`.
 fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     var ls: LightSample;
     ls.direction = vec3<f32>(0.0, 1.0, 0.0);
@@ -1048,13 +926,10 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     let dir = to_light * inverseSqrt(len_sq);
 
     // Intersect the chosen light itself: sphere sampling yields a direction
-    // rather than a point, and we need the distance either way so the shadow
-    // ray can stop just short of the light instead of hitting it.
-    //
-    // A solid-angle-sampled quad is guaranteed to be hit, so for that arm this
-    // is pure overhead -- and also the check that turns a parametrisation that
-    // has gone wrong into a lost sample rather than a bias. Worth its cost
-    // until the technique has been trusted for a while.
+    // rather than a point, and the distance is needed either way so the shadow
+    // ray can stop just short of the light. A solid-angle-sampled quad is
+    // always hit, so there it doubles as a guard against a parametrisation that
+    // has gone wrong, turning a bias into a lost sample.
     let probe = Ray(origin, dir);
     var t_hit = 0.0;
     var bary = vec2<f32>(0.0);
@@ -1113,26 +988,18 @@ fn refract(uv: vec3<f32>, n: vec3<f32>, etai_over_etat: f32) -> vec3<f32> {
 }
 
 // Fresnel reflectance at a dielectric interface, for unpolarised light: the
-// mean of the two polarisations, exactly, and 1 past the critical angle.
+// exact mean of the two polarisations, and 1 past the critical angle.
 //
 // `eta_it` is `Bsdf.ior`, the near medium's index over the far one's, and the
 // term-for-term counterpart of PBRT-v4's `FrDielectric` written with that
 // reciprocal.
 //
-// Schlick's approximation used to stand here, and it is wrong in the one place
-// a dielectric spends most of its bounces. Looking *out* from inside 1.5 glass
-// the exact term reaches 1 at the critical angle, 41.8 degrees; Schlick is
-// 0.041 there and only approaches 1 at a grazing 90. Between those it reports
-// a few per cent where the truth is most of the light, so the reflected and
-// transmitted lobes are mixed wrongly across the whole band that total internal
-// reflection dominates -- and a glass object's interior is nothing but that
-// band. Going out is what costs: from the *outside* the two agree to 0.006
-// everywhere, which is why the smooth goldens barely move.
-//
-// It costs a sqrt and two divides against Schlick's fifth power: 23 more
-// instructions out of 6266 on `test_scene`, with occupancy unchanged at 8
-// subgroups per SIMD. What it actually costs is sampling, not arithmetic --
-// see LIMITATIONS.md.
+// Exact rather than Schlick, which is wrong where a dielectric spends most of
+// its bounces: looking out from inside 1.5 glass, the exact term reaches 1 at
+// the critical angle of 41.8 degrees where Schlick reports 0.041, so the two
+// lobes are mixed wrongly across the whole band total internal reflection
+// dominates. From outside the two agree to 0.006. Costs 23 instructions out of
+// 6266 on `test_scene`, with occupancy unchanged.
 fn fresnel_dielectric(cos_i: f32, eta_it: f32) -> f32 {
     let c = clamp(cos_i, 0.0, 1.0);
     let sin2_t = eta_it * eta_it * (1.0 - c * c);
@@ -1156,8 +1023,8 @@ fn fresnel_dielectric(cos_i: f32, eta_it: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 // Below this alpha the lobe is narrower than the sampler can resolve and the
-// conductor is a mirror instead: a Dirac lobe with no pdf, which is what keeps
-// `Metal::new(.., 0.)` an exact mirror.
+// conductor becomes a Dirac lobe instead, which keeps `Metal::new(.., 0.)` an
+// exact mirror.
 const GGX_ALPHA_MIN = 1e-3;
 // The same cutoff in the user's units, since alpha = fuzz * fuzz.
 const FUZZ_SPECULAR_THRESHOLD = 0.0316227766;
@@ -1170,8 +1037,8 @@ fn ggx_d(cos_h: f32, alpha: f32) -> f32 {
 
 // Smith's Lambda for GGX, from which G1 = 1 / (1 + Lambda) and the height-
 // correlated G2 = 1 / (1 + Lambda(wo) + Lambda(wi)). Kept in Lambda form
-// because what the sampled weight wants is G2 / G1(wo), and in this form that
-// cancels to (1 + Lambda_o) / (1 + Lambda_o + Lambda_i) with no divisions.
+// because the sampled weight wants G2 / G1(wo), which then cancels to
+// (1 + Lambda_o) / (1 + Lambda_o + Lambda_i) with no divisions.
 fn smith_lambda(cos_w: f32, alpha: f32) -> f32 {
     let c2 = cos_w * cos_w;
     let tan2 = max(0.0, 1.0 - c2) / max(c2, 1e-8);
@@ -1179,9 +1046,8 @@ fn smith_lambda(cos_w: f32, alpha: f32) -> f32 {
 }
 
 // Schlick's approximation, with the conductor's normal-incidence reflectance as
-// f0. This is what makes a metal go white at a grazing angle instead of staying
-// its own colour, and it is why `Metal::albedo` means f0 rather than a flat
-// multiplier.
+// f0. What makes a metal go white at a grazing angle, and why `Metal::albedo`
+// means f0 rather than a flat multiplier.
 fn fresnel_schlick(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
     let m = clamp(1.0 - cos_theta, 0.0, 1.0);
     let m2 = m * m;
@@ -1189,24 +1055,16 @@ fn fresnel_schlick(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
 }
 
 // The directional albedo of the single-scatter lobe with F = 1: how much of
-// what arrives from a uniform environment at `cos_o` leaves again. Everything
-// it does not return is light a microfacet reflected onto another microfacet
-// and the single-scatter model then dropped.
+// what arrives from a uniform environment at `cos_o` leaves again. The rest is
+// light a microfacet reflected onto another microfacet and the single-scatter
+// model then dropped.
 //
-// A fit, because the alternative is Kulla-Conty's precomputed table and with it
-// the question of how naga handles a large `const` array initialiser. Fitted in
-// log space -- what matters is relative error, since the factor built on it
-// divides by E -- against E computed from the BRDF's own definition by
-// quadrature. In `fuzz` rather than `alpha`: the same sixteen terms are worth
-// 1.4% against 1.8% for cos_o >= 0.4, and 3.3% against 6.8% over the whole
-// range, because in `alpha` nearly all of the variation is crowded into the
-// first quarter.
-//
-// The residual 3.3% is the last few degrees of the silhouette, where E is
-// nearly 1 everywhere except a narrow dip no low-order polynomial follows and
-// the correction is a few per cent of a sliver. What the fit is worth end to
-// end is what the furnace test reads, and a disc average cancels errors of
-// both signs: better than 0.3%.
+// A fit rather than Kulla-Conty's precomputed table, which would mean a large
+// `const` array initialiser. Fitted in log space, since the factor built on it
+// divides by E, against E from quadrature over the BRDF's own definition. In
+// `fuzz` rather than `alpha`, where the same sixteen terms are worth 3.3%
+// against 6.8% over the range. The residual is the last few degrees of the
+// silhouette; end to end the furnace test reads better than 0.3%.
 fn ggx_directional_albedo(cos_o: f32, alpha: f32) -> f32 {
     let r = sqrt(alpha);
     let m = clamp(cos_o, 0.0, 1.0);
@@ -1225,10 +1083,9 @@ fn ggx_directional_albedo(cos_o: f32, alpha: f32) -> f32 {
 //
 //   f_ms = f_ss * (1 + f0 * (1 / E(cos_o, alpha) - 1))
 //
-// The f0 weighting is what makes a coloured metal saturate rather than merely
-// brighten: light that bounces twice between microfacets is tinted twice. It
-// multiplies `f` alone -- the sampling density is untouched, so MIS is
-// untouched, and both estimators of a vertex get the same factor.
+// The f0 weighting makes a coloured metal saturate rather than merely brighten:
+// light that bounces twice between microfacets is tinted twice. Multiplies `f`
+// alone, so the sampling density and MIS are untouched.
 fn ggx_multiscatter(f0: vec3<f32>, cos_o: f32, alpha: f32) -> vec3<f32> {
     return vec3<f32>(1.0) + f0 * (1.0 / ggx_directional_albedo(cos_o, alpha) - 1.0);
 }
@@ -1257,18 +1114,16 @@ fn sample_ggx_vndf(wo: vec3<f32>, alpha: f32, u: vec2<f32>) -> vec3<f32> {
 //
 // Walter et al. 2007, "Microfacet Models for Refraction through Rough
 // Surfaces", sampled with the same Dupuy & Benyoub visible-normal routine the
-// conductor uses. Everything above is shared: `ggx_d`, `smith_lambda`,
-// `sample_ggx_vndf`, `GGX_ALPHA_MIN` and `fresnel_dielectric`.
+// conductor uses, and sharing everything above it.
 //
-// Two things separate it from the conductor. The lobe has a transmission half,
-// which carries its own Jacobian, and the half vector may be on either side of
-// the shading normal -- so the arms below work in a frame flipped so that `wo`
-// is up, and flip the sampled direction back.
+// Two things separate it from the conductor: the lobe has a transmission half
+// carrying its own Jacobian, and the half vector may be on either side of the
+// shading normal -- so the arms below work in a frame flipped so `wo` is up,
+// and flip the sampled direction back.
 //
-// The relative index is written as `eta_ti`, the ratio of the far medium's
-// index to the near one's, which is PBRT-v4's `etap`: the transmission algebra
-// below then matches that reference term for term. `Bsdf.ior` is its
-// reciprocal, `eta_i / eta_t`, because that is what `refract` wants.
+// `eta_ti` is the far medium's index over the near one's, PBRT-v4's `etap`, so
+// the transmission algebra matches that reference term for term. `Bsdf.ior` is
+// its reciprocal, which is what `refract` wants.
 // ---------------------------------------------------------------------------
 
 // The half vector a transmitted pair implies, unnormalised: Walter's
@@ -1284,20 +1139,15 @@ const ENERGY_COS_STEPS = 16u;
 const ENERGY_ALPHA_STEPS = 16u;
 const ENERGY_SIDE_STRIDE = ENERGY_COS_STEPS * ENERGY_ALPHA_STEPS;
 
-// Turquin 2019's compensation for the dielectric: the single-scatter lobe drops
-// every ray a microfacet sends onto another microfacet, and dividing `f` by the
-// energy it *does* return puts that back.
+// Turquin 2019's compensation for the dielectric: dividing `f` by the energy
+// the single-scatter lobe does return puts back what it drops.
 //
-// Two differences from the conductor's. There is no `f0` weighting -- light
-// that bounces twice between microfacets is tinted twice on a metal, and a
-// dielectric interface tints nothing -- so the factor is a plain `1 / E`. And
-// `E` comes from a bilinear table rather than a polynomial, because it depends
-// on the index of refraction through the critical angle, which is a kink no
-// polynomial follows; making the index a per-material table removes it from the
-// fit entirely.
+// Two differences from the conductor's. No `f0` weighting, since a dielectric
+// interface tints nothing, so the factor is a plain `1 / E`. And `E` comes from
+// a bilinear table rather than a polynomial, because it depends on the index of
+// refraction through the critical angle, a kink no polynomial follows.
 //
-// Multiplies `f` alone. The sampling density is untouched, so MIS is untouched,
-// and both estimators of a vertex get the same factor.
+// Multiplies `f` alone, so the sampling density and MIS are untouched.
 fn dielectric_multiscatter(offset: u32, cos_o: f32, alpha: f32) -> f32 {
     let x = clamp(cos_o, 0.0, 1.0) * f32(ENERGY_COS_STEPS - 1u);
     let y = clamp(sqrt(alpha), 0.0, 1.0) * f32(ENERGY_ALPHA_STEPS - 1u);
@@ -1315,30 +1165,28 @@ fn dielectric_multiscatter(offset: u32, cos_o: f32, alpha: f32) -> f32 {
     return 1.0 / max(mix(lo, hi, fy), 0.05);
 }
 
-// d(w_h) / d(w_i) for the transmission lobe. The one factor in this whole
-// section that is easy to write upside down, which is why
-// `test_bsdf_only_sampling_converges_to_the_same_image` carries a rough glass
-// scene: a Jacobian wrong by any constant moves the BSDF-only mean and nothing
-// else in the suite.
+// d(w_h) / d(w_i) for the transmission lobe. Easy to write upside down, which
+// is why `test_bsdf_only_sampling_converges_to_the_same_image` carries a rough
+// glass scene: a Jacobian wrong by a constant moves the BSDF-only mean and
+// nothing else in the suite.
 fn dielectric_dwh_dwi(cos_ih: f32, cos_oh: f32, eta_ti: f32) -> f32 {
     let d = cos_ih + cos_oh / eta_ti;
     return abs(cos_ih) / max(d * d, 1e-12);
 }
 
 // What the pixel is looking at, before any light transport: the first surface
-// along the view ray that is not a mirror or a lens. Filled by trace_guide and
-// used only to guide the denoiser's edge-stopping functions -- it is a guide,
-// not a signal, which is what makes the lossy packing below acceptable.
+// along the view ray that is not a mirror or a lens. Only the denoiser's
+// edge-stopping functions read it -- a guide, not a signal, which is what makes
+// the lossy packing below acceptable.
 struct GuideSample {
-    // The surface's own albedo, tinted by whatever specular surfaces the guide
-    // ray passed through to reach it, so it describes the colour this pixel
-    // should end up rather than the colour of a surface it only sees in a
-    // mirror.
+    // Tinted by whatever specular surfaces the guide ray passed through, so it
+    // describes the colour this pixel should end up rather than the colour of a
+    // surface it only sees in a mirror.
     albedo: vec3<f32>,
     normal: vec3<f32>,
-    // Path length from the camera in world units, summed over the whole guide
-    // chain. The guide ray is normalised from the start, unlike the primary
-    // ray in trace_sample (see issue #57), so every segment is in the same units.
+    // Path length from the camera in world units, summed over the guide chain.
+    // The guide ray is normalised from the start, unlike the primary ray in
+    // trace_sample (issue #57), so the segments are in the same units.
     depth: f32,
     mat_type: u32,
     // How many specular bounces the guide ray took to get here. Lets the filter
@@ -1348,10 +1196,8 @@ struct GuideSample {
 }
 
 // Octahedral normal encoding. Two floats instead of three, with ~0.01 degrees of
-// error at 16-bit -- far below anything an edge-stop with exponent 128 resolves.
-//
-// oct_decode is below. Three copies of the pair exist -- this one,
-// post/denoise_atrous.wgsl's, and `pack_oct` in renderer/scene_flattener.rs --
+// error at 16-bit. Three copies of the encode/decode pair exist -- this one,
+// post/denoise_atrous.wgsl's and `pack_oct` in renderer/scene_flattener.rs --
 // and all must agree, including the `n.z <= 0.0` polarity of the fold.
 fn oct_encode(n: vec3<f32>) -> vec2<f32> {
     let p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));
@@ -1371,13 +1217,10 @@ fn oct_decode(e: vec2<f32>) -> vec3<f32> {
     return normalize(v);
 }
 
-// 16 bytes per pixel. The depth goes through bitcast rather than into an f32
-// slot alongside packed bits, because a packed bit pattern can land on a NaN
-// encoding and some drivers canonicalise NaN payloads across a store/load.
-// pack4x8unorm clamps, so an albedo above 1 degrades the guide but never the image.
-//
-// The material type needs three bits of the last slot, so the specular depth
-// rides in the byte above it. denoise_atrous.wgsl unpacks both.
+// 16 bytes per pixel. The depth goes through bitcast rather than sharing an f32
+// slot with packed bits, because a packed bit pattern can land on a NaN encoding
+// and some drivers canonicalise NaN payloads across a store/load. pack4x8unorm
+// clamps, so an albedo above 1 degrades the guide but never the image.
 fn pack_guide(g: GuideSample) -> vec4<u32> {
     return vec4<u32>(
         pack4x8unorm(vec4<f32>(g.albedo, 0.0)),
@@ -1407,9 +1250,8 @@ struct Surface {
 }
 
 // The blend walk nests to a data-dependent depth, so its coin flips go to
-// `sampler_extra` and are deliberately left out of the pair budget: a blend
-// coin is a discrete material choice whose stratification buys nothing
-// measurable, and reserving ten pairs per bounce for it would cost more in
+// `sampler_extra` rather than the pair budget: stratifying a discrete material
+// choice buys nothing, and reserving ten pairs per bounce would cost more in
 // decorrelation than it returns.
 fn resolve_surface(rec: HitRecord, smp: Sampler, depth: u32) -> Surface {
     var mat_idx = rec.material_index;
@@ -1432,14 +1274,9 @@ fn resolve_surface(rec: HitRecord, smp: Sampler, depth: u32) -> Surface {
 }
 
 // The blend walk above, resolved deterministically: the branch the coin flip
-// would take more often than not. Used only by trace_guide, where a stochastic
-// choice would make neighbouring pixels disagree about what surface they are
-// looking at, which is the one thing an edge stop cannot survive.
-//
-// Deliberately not shared with resolve_surface, even though the sampler no
-// longer makes that a matter of keeping a stream bit-identical: trace_guide
-// genuinely wants the dominant branch, because a stochastic one would make
-// neighbouring pixels disagree about the surface they are looking at.
+// would take more often than not. Only trace_guide wants this, because a
+// stochastic choice would make neighbouring pixels disagree about what surface
+// they are looking at, which is the one thing an edge stop cannot survive.
 fn resolve_material_index_dominant(start: u32) -> u32 {
     var mat_idx = start;
     if (has_blends) {
@@ -1478,11 +1315,9 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
         let uv = vec2<f32>(fract(abs(rec.uv.x)), 1.0 - fract(abs(rec.uv.y)));
         let uv_atlas = material.albedo_offset + uv * material.albedo_scale;
         // Decoded here rather than by the hardware, because the atlas is
-        // shared with normal maps, which must stay raw. Decoding after the
-        // filter rather than before it costs nothing while the sampler is
-        // `Nearest` on every axis; if mipmaps land (#60), switch to a second
-        // `Rgba8UnormSrgb` view over the same texture and sample albedo
-        // through that.
+        // shared with normal maps, which must stay raw. Free while the sampler
+        // is `Nearest`; if mipmaps land (#60), switch to a second
+        // `Rgba8UnormSrgb` view over the same texture.
         surface.albedo = srgb_to_linear(textureSampleLevel(texture_array, texture_sampler, uv_atlas, 0.0).rgb);
     }
 
@@ -1501,16 +1336,12 @@ fn surface_at(mat_idx: u32, rec: HitRecord) -> Surface {
 // Beer-Lambert absorption across `t` world units of glass.
 //
 // `transmission_per_unit` is a dielectric's albedo, read as the fraction that
-// survives one world unit of travel. `(1,1,1)` is an exact no-op: `pow(1.0, t)`
-// is 1 for every `t`. The floor keeps `pow` off `log2(0)`, where a zero-length
-// segment through a fully absorbing channel would come out NaN.
+// survives one world unit of travel; `(1,1,1)` is an exact no-op. The floor
+// keeps `pow` off `log2(0)`, which would be NaN.
 //
-// Callers apply it on a *back-face* dielectric hit, where `rec.t` is the length
-// of the segment that was inside the glass -- every segment but the camera ray
-// is normalised, and the camera is never inside the glass. That assumes the
-// entry and exit surfaces belong to the same material, which holds for any
-// closed glass object and is the only case where interior absorption means
-// anything.
+// Callers apply it on a back-face dielectric hit, where `rec.t` is the length
+// of the segment inside the glass. That assumes entry and exit belong to the
+// same material, which holds for any closed glass object.
 fn dielectric_transmittance(transmission_per_unit: vec3<f32>, t: f32) -> vec3<f32> {
     return pow(max(transmission_per_unit, vec3<f32>(1e-4)), vec3<f32>(t));
 }
@@ -1518,26 +1349,23 @@ fn dielectric_transmittance(transmission_per_unit: vec3<f32>, t: f32) -> vec3<f3
 // ---------------------------------------------------------------------------
 // BSDF
 //
-// One layer between the transport loop and the material arms, so that next-
-// event estimation and MIS are written once and are not a property of which
-// material happened to be hit. The loop asks three things of a surface -- is
-// this lobe sampleable by a light, what does it evaluate to in a given
-// direction, and where does the path go next -- and nothing below the
-// interface leaks above it.
+// One layer between the transport loop and the material arms, so next-event
+// estimation and MIS are written once rather than per material. The loop asks
+// three things of a surface: is this lobe sampleable by a light, what does it
+// evaluate to in a given direction, and where does the path go next.
 //
 // `wo` points *away* from the surface, `-normalize(r.direction)`, in all three
-// functions. It is the single most common source of sign bugs here.
+// functions.
 // ---------------------------------------------------------------------------
 
 const BSDF_DIFFUSE = 0u;
 const BSDF_CONDUCTOR = 1u;
 const BSDF_DIELECTRIC = 2u;
-// A surface that scatters nothing: today only a blend chain deeper than
-// `resolve_surface` walks, which leaves a material the loop cannot shade.
+// A surface that scatters nothing: only a blend chain deeper than
+// `resolve_surface` walks.
 const BSDF_NONE = 3u;
 
-// Everything the BSDF layer needs about one vertex, built once per bounce and
-// dead by the end of it. Nothing here survives into the next loop iteration.
+// Everything the BSDF layer needs about one vertex, built once per bounce.
 struct Bsdf {
     // Shading frame. `w` is the shading normal, and is what every cosine below
     // is taken against.
@@ -1545,25 +1373,23 @@ struct Bsdf {
     // The geometric normal, which the shading frame may disagree with wherever
     // an interpolated normal or a normal map has moved it.
     ng: vec3<f32>,
-    // The conductor's normal-incidence reflectance, f0, and the diffuse
-    // reflectance. Same field, different meaning per lobe.
+    // f0 for a conductor, the diffuse reflectance otherwise.
     base_color: vec3<f32>,
     // GGX roughness, the squared-roughness convention: alpha = fuzz * fuzz.
     alpha: f32,
     // Relative index of refraction, already resolved against which side of the
     // surface the ray is on.
     ior: f32,
-    // Start of the energy grid for *this side* of this material, resolved the
-    // same way `ior` is, so nothing below has to know which side it is on.
+    // Start of the energy grid for this side of this material, resolved the
+    // same way `ior` is.
     energy_offset: u32,
     kind: u32,
 }
 
 struct BsdfSample {
     wi: vec3<f32>,
-    // f * |cos| / pdf, already divided. Keeping the division inside is what
-    // lets a Dirac lobe return a weight with pdf = 0 and no special case
-    // above.
+    // f * |cos| / pdf, already divided, so a Dirac lobe can return a weight
+    // with pdf = 0 and no special case above.
     weight: vec3<f32>,
     // Solid-angle pdf; 0 for a Dirac lobe.
     pdf: f32,
@@ -1574,8 +1400,7 @@ struct BsdfSample {
 }
 
 struct BsdfEval {
-    // f(wo, wi) * |dot(ns, wi)| -- every caller wants the product, and the
-    // cosine convention is easy to get wrong twice.
+    // f(wo, wi) * |dot(ns, wi)|; every caller wants the product.
     f_cos: vec3<f32>,
     pdf: f32,
 }
@@ -1585,9 +1410,8 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
     b.frame = onb_from_w(surface.normal);
     b.ng = surface.geometric_normal;
     b.base_color = surface.albedo;
-    // Roughness squared, which is what every other renderer means by a
-    // roughness slider, and clamped because nothing stops a caller passing a
-    // fuzz above 1 where GGX stops being meaningful.
+    // Roughness squared, the usual convention, clamped because nothing stops a
+    // caller passing a fuzz above 1 where GGX stops being meaningful.
     b.alpha = clamp(surface.fuzz * surface.fuzz, 0.0, 1.0);
     b.ior = select(surface.refraction_index, 1.0 / surface.refraction_index, front_face);
     // Entering is the first half of the table, leaving the second.
@@ -1606,8 +1430,7 @@ fn bsdf_from_surface(surface: Surface, front_face: bool) -> Bsdf {
 }
 
 // Whether the lobe is a Dirac delta, and so has no density for a light sample
-// to land on. This is what gates next-event estimation -- not the material
-// type, which is the point of the whole layer.
+// to land on. What gates next-event estimation, rather than the material type.
 fn bsdf_is_specular(b: Bsdf) -> bool {
     if (has_metal && b.kind == BSDF_CONDUCTOR) {
         // A rough conductor has a density for a light sample to land on, so it
@@ -1615,18 +1438,13 @@ fn bsdf_is_specular(b: Bsdf) -> bool {
         // mirror end of the range is a delta.
         return b.alpha < GGX_ALPHA_MIN;
     }
-    // `has_rough_dielectrics` is in the condition rather than in the body, and
-    // deliberately: naga folds an override out of an `if` condition and deletes
-    // the arm, but leaves `!has_rough_dielectrics || ...` in the body as real
-    // code. Measured on `test_scene`, the difference between the two spellings
-    // of this one line is 8 subgroups per SIMD against 6. Without the flag a
-    // dielectric falls through to the `!= BSDF_DIFFUSE` below, which is the
-    // `true` it always returned.
+    // `has_rough_dielectrics` belongs in the condition, not the body: naga
+    // folds an override out of an `if` condition and deletes the arm, but
+    // leaves `!has_rough_dielectrics || ...` in the body as real code. On
+    // `test_scene` that is 8 subgroups per SIMD against 6.
     if (has_dielectrics && has_rough_dielectrics && b.kind == BSDF_DIELECTRIC) {
-        // Same shape as the conductor's, same reason. Smooth glass stays a
-        // Dirac delta and always will be: a shadow ray has zero probability of
-        // landing on it, which is why roughness had to exist before next-event
-        // estimation could reach glass at all.
+        // Smooth glass stays a Dirac delta: a shadow ray has zero probability
+        // of landing on it.
         return b.alpha < GGX_ALPHA_MIN;
     }
     return b.kind != BSDF_DIFFUSE;
@@ -1643,9 +1461,9 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
     if (b.kind == BSDF_DIFFUSE) {
         let cos_i = dot(b.frame.w, wi);
         // The geometric test is not redundant with the shading one: an
-        // interpolated normal near a silhouette can face a light the facet
-        // faces away from, and that sample carries light through the surface.
-        // Covers a steep normal map for the same reason.
+        // interpolated normal or a steep normal map near a silhouette can face
+        // a light the facet faces away from, carrying light through the
+        // surface.
         if (cos_i <= 0.0 || dot(b.ng, wi) <= 0.0) { return e; }
         e.f_cos = (b.base_color / PI) * cos_i;
         e.pdf = cos_i / PI;
@@ -1667,18 +1485,16 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
 
         // f * cos_i, with the BRDF's own 1 / cos_i already cancelled against it.
         e.f_cos = f * (d * g2 / (4.0 * wo_l.z)) * ggx_multiscatter(b.base_color, wo_l.z, b.alpha);
-        // The VNDF sampling density, G1(wo) * D(h) / (4 cos_o), which is what
-        // the MIS denominator needs: the pdf this lobe *would* have had for the
-        // light's direction.
+        // The VNDF sampling density, G1(wo) * D(h) / (4 cos_o): the pdf this
+        // lobe would have had for the light's direction, which is what MIS
+        // needs.
         e.pdf = d / ((1.0 + lambda_o) * 4.0 * wo_l.z);
     } else if (has_dielectrics && has_rough_dielectrics && b.kind == BSDF_DIELECTRIC) {
         // Smooth glass is a delta, as above.
         if (b.alpha < GGX_ALPHA_MIN) { return e; }
 
         // Into the frame where wo is up, so the microfacet normal the pair
-        // implies is the one `bsdf_sample` would have drawn. The frame change
-        // is linear, so flipping before it costs nothing and keeps the
-        // unflipped pair from staying live.
+        // implies is the one `bsdf_sample` would have drawn.
         let cos_no = dot(wo, b.frame.w);
         if (abs(cos_no) < 1e-6) { return e; }
         let flip = select(-1.0, 1.0, cos_no > 0.0);
@@ -1688,10 +1504,9 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         let is_reflect = wi_f.z > 0.0;
 
         // Sided, unlike the conductor's: refraction is supposed to cross the
-        // surface, so what the geometric normal rules out is a direction on the
-        // wrong side *for the lobe half it claims to be*. `dot(b.ng, wo)` is
-        // positive at every hit -- resolve_hit faces the geometric normal at
-        // the ray -- so the two halves split on the sign alone.
+        // surface, so the geometric normal rules out a direction on the wrong
+        // side for the lobe half it claims to be. resolve_hit faces the
+        // geometric normal at the ray, so the halves split on the sign alone.
         let cos_ng = dot(b.ng, wi);
         if (is_reflect != (cos_ng > 0.0)) { return e; }
 
@@ -1710,9 +1525,8 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
 
         let cos_oh = dot(wo_f, h);
         let cos_ih = dot(wi_f, h);
-        // A microfacet that faces away from either direction contributes
-        // nothing: it is a solution of the half-vector equation the surface
-        // cannot actually present.
+        // A microfacet facing away from either direction is a solution of the
+        // half-vector equation the surface cannot actually present.
         if (cos_oh <= 0.0 || cos_ih * wi_f.z <= 0.0) { return e; }
 
         let f = fresnel_dielectric(cos_oh, b.ior);
@@ -1724,9 +1538,8 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
         // both halves scale by their own Jacobian and lobe-selection chance.
         let d_vis = d * cos_oh / ((1.0 + lambda_o) * wo_f.z);
 
-        // Both halves are compensated by the same factor: what multiple
-        // scattering returns is energy, and which lobe it comes back through is
-        // not something the single-scatter model can say.
+        // Both halves get the same factor: the single-scatter model cannot say
+        // which lobe the returned energy comes back through.
         let comp = dielectric_multiscatter(b.energy_offset, wo_f.z, b.alpha);
 
         if (is_reflect) {
@@ -1737,9 +1550,9 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
             let t = 1.0 - f;
             if (t <= 0.0) { return e; }
             let jacobian = dielectric_dwh_dwi(cos_ih, cos_oh, eta_ti);
-            // No eta^2 radiance factor, here or in bsdf_sample: it cancels over
-            // a closed object, the smooth arm omits it, and what MIS requires
-            // is that the two estimators agree with each other.
+            // No eta^2 radiance factor, here or in bsdf_sample: it cancels
+            // over a closed object, and MIS only needs the two estimators to
+            // agree with each other.
             e.f_cos = vec3<f32>(comp * t * d * g2 * cos_oh * jacobian / wo_f.z);
             e.pdf = t * d_vis * jacobian;
         }
@@ -1749,9 +1562,8 @@ fn bsdf_eval(b: Bsdf, wo: vec3<f32>, wi: vec3<f32>) -> BsdfEval {
 }
 
 // Samples a continuation direction. The bounce's dimension pairs are passed in
-// rather than a stream state, so each lobe draws from its own fixed slots and
-// a lobe that skips a draw leaves a gap rather than shifting everything after
-// it.
+// rather than a stream state, so a lobe that skips a draw leaves a gap rather
+// than shifting everything after it.
 fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSample {
     var s: BsdfSample;
     s.wi = vec3<f32>(0.0);
@@ -1766,9 +1578,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
         let direction = onb_local(b.frame, random_cosine_direction(sampler_2d(smp, bounce_pair + PAIR_BSDF)));
         let cos_theta = dot(b.frame.w, direction);
         // Cosine sampling about the shading normal can aim below the geometry.
-        // Terminating rather than resampling keeps the sample stream
-        // deterministic; the lost energy is the shadow terminator, recorded in
-        // LIMITATIONS.md.
+        // Terminating rather than resampling keeps the stream deterministic;
+        // the lost energy is the shadow terminator, see LIMITATIONS.md.
         if (cos_theta <= 0.0 || dot(b.ng, direction) <= 0.0) { return s; }
 
         s.wi = normalize(direction);
@@ -1797,9 +1608,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             let h = sample_ggx_vndf(wo_l, b.alpha, sampler_2d(smp, bounce_pair + PAIR_BSDF));
             let wi_l = reflect(-wo_l, h);
             // A visible normal can still reflect below the horizon. Dropping
-            // that sample is not the old uncompensated `break`: it is the
-            // single-scatter shadowing term, and what it costs is the
-            // multiple-scattering energy the furnace test measures.
+            // that sample is the single-scatter shadowing term; what it costs
+            // is the multiple-scattering energy the furnace test measures.
             if (wi_l.z <= 0.0) { return s; }
 
             let direction = onb_local(b.frame, wi_l);
@@ -1819,8 +1629,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             s.valid = true;
         }
     } else if (has_dielectrics && b.kind == BSDF_DIELECTRIC) {
-        // Rough first, so the flag sits in a condition naga folds -- the
-        // same spelling `bsdf_is_specular` needs, for the same reason.
+        // Rough first, so the flag sits in a condition naga folds; see the
+        // note in `bsdf_is_specular`.
         if (has_rough_dielectrics && b.alpha >= GGX_ALPHA_MIN) {
             // Sample in the frame where wo is up, then flip the result back.
             // Unlike the conductor there is no hemisphere to reject against --
@@ -1839,9 +1649,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             let f = fresnel_dielectric(cos_oh, b.ior);
 
             // Its own slot rather than the bounce's shared scalar: a rough
-            // dielectric takes a shadow ray, and `dim_x(scalars)` is already
-            // the light pick at that vertex. The two were mutually exclusive
-            // only while glass had no lobe to sample a light against.
+            // dielectric takes a shadow ray, so `dim_x(scalars)` is already the
+            // light pick at that vertex.
             let coin = sampler_1d(smp, dim_x(PAIR_GLASS_COIN_BASE + bounce_pair));
 
             var wi_f: vec3<f32>;
@@ -1852,9 +1661,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             } else {
                 wi_f = refract(-wo_f, h, b.ior);
                 is_reflect = false;
-                // `refract` returns a mirror direction past the critical angle,
-                // but `fresnel_dielectric` is 1 there and this branch is then
-                // unreachable. The test stands as the guard for a half vector
+                // `fresnel_dielectric` is 1 past the critical angle, so this
+                // branch is unreachable there. The test guards a half vector
                 // that lands just inside it.
                 if (wi_f.z >= 0.0) { return s; }
             }
@@ -1867,10 +1675,9 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             let lambda_i = smith_lambda(wi_f.z, b.alpha);
 
             s.wi = normalize(direction);
-            // The VNDF cancellation, exactly the conductor's minus the Fresnel
-            // term -- which cancels here against the chance of having picked
-            // this half of the lobe. Both halves collapse to the same G2 / G1,
-            // times the multiple-scattering factor `bsdf_eval` also applies.
+            // The VNDF cancellation, the conductor's minus the Fresnel term,
+            // which cancels against the chance of having picked this half of
+            // the lobe. Both halves collapse to the same G2 / G1.
             s.weight = vec3<f32>(
                 dielectric_multiscatter(b.energy_offset, wo_f.z, b.alpha)
                     * (1.0 + lambda_o) / (1.0 + lambda_o + lambda_i)
@@ -1885,15 +1692,13 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             s.specular = false;
             s.valid = true;
         } else {
-            // Smooth glass: the Dirac path, unchanged and drawing from the same
-            // slot it always did, which is what keeps every existing dielectric
-            // bit-identical.
+            // Smooth glass: the Dirac path.
             let cos_theta = min(dot(wo, b.frame.w), 1.0);
             let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 
             var direction: vec3<f32>;
-            // Short-circuit: total internal reflection never makes the draw, and
-            // because the slot is fixed nothing after it moves.
+            // Total internal reflection never makes the draw; the slot is
+            // fixed, so nothing after it moves.
             if (b.ior * sin_theta > 1.0
                 || fresnel_dielectric(cos_theta, b.ior) > sampler_1d(smp, dim_x(scalars))) {
                 direction = reflect(-wo, b.frame.w);
@@ -1902,9 +1707,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
             }
 
             s.wi = normalize(direction);
-            // The interface itself tints nothing: a dielectric's albedo is an
-            // interior absorption, applied per unit travelled by the transport
-            // loop, not a reflectance this lobe can fold in.
+            // The interface tints nothing: a dielectric's albedo is interior
+            // absorption, applied per unit travelled by the transport loop.
             s.weight = vec3<f32>(1.0);
             s.valid = true;
         }
@@ -1917,9 +1721,8 @@ fn bsdf_sample(b: Bsdf, wo: vec3<f32>, smp: Sampler, bounce_pair: u32) -> BsdfSa
 // Intersection
 //
 // Traversal only needs the distance and (for triangles/quads) the surface
-// parameters. UVs, tangent frames and the sphere's acos/atan2 mapping used to
-// be computed for every candidate hit and then thrown away by the next closer
-// one; they are now derived once, in resolve_hit, from the winning primitive.
+// parameters. UVs, tangent frames and the sphere's acos/atan2 mapping are
+// derived once, in resolve_hit, from the winning primitive.
 // ---------------------------------------------------------------------------
 
 fn hit_sphere_t(r: Ray, s: Sphere, t_min: f32, t_max: f32, t_out: ptr<function, f32>) -> bool {
@@ -2003,12 +1806,9 @@ fn hit_quad_t(
     return true;
 }
 
-// Reciprocal of the ray direction, computed once per ray.
-//
-// Exact zeros are replaced by a tiny magnitude so the slab test cannot produce
-// 0 * inf -> NaN on an axis-parallel ray. The sign of the substitute does not
-// matter: t_near/t_far are a min/max pair, and both signs yield the correct
-// "inside the slab / never enters" answer for a direction that does not move.
+// Reciprocal of the ray direction, computed once per ray. Exact zeros become a
+// tiny magnitude so the slab test cannot produce 0 * inf -> NaN on an
+// axis-parallel ray; either sign of the substitute gives the right answer.
 fn ray_inv_dir(direction: vec3<f32>) -> vec3<f32> {
     let tiny = vec3<f32>(1e-20);
     return 1.0 / select(direction, tiny, abs(direction) < tiny);
@@ -2046,13 +1846,11 @@ struct PrimRef {
 
 // Reads leaf slot `slot`.
 //
-// The traversal inner loop used to do two dependent global loads per primitive
-// test: `prim_refs[slot]` and then the geometry it points at. On an all-
-// triangle scene the first is the identity -- `flatten_scene` walks the leaf
-// order and hands out per-type indices as it goes, so slot k holds triangle k
-// -- and dropping it makes the geometry's address known from the slot alone.
-// That is a whole round trip out of the innermost loop of a latency-bound
-// tracer, which is worth more than any of the arithmetic the other flags save.
+// On an all-triangle scene `prim_refs` is the identity -- `flatten_scene` walks
+// the leaf order handing out per-type indices, so slot k holds triangle k -- so
+// the geometry's address is known from the slot alone. That takes one of the
+// two dependent global loads out of the innermost loop of a latency-bound
+// tracer, which is worth more than the arithmetic the other flags save.
 fn prim_ref_at(slot: u32) -> PrimRef {
     if (identity_prim_refs) {
         return PrimRef(PRIM_TYPE_TRIANGLE, slot);
@@ -2186,12 +1984,9 @@ fn leaf_occluded(r: Ray, leaf: u32, t_max: f32) -> bool {
     return false;
 }
 
-// Any-hit traversal for shadow rays.
-//
-// Cheaper than world_hit in three ways: it returns on the first blocker instead
-// of tracking the closest, it never resolves shading attributes, and it needs
-// no front-to-back ordering because any hit is as good as any other. With NEE
-// roughly half of all rays are shadow rays, so this pays for itself.
+// Any-hit traversal for shadow rays: returns on the first blocker, resolves no
+// shading attributes, and needs no front-to-back ordering. With NEE roughly
+// half of all rays are shadow rays.
 fn occluded(origin: vec3<f32>, direction: vec3<f32>, t_max: f32) -> bool {
     if (arrayLength(&nodes) == 0u || t_max <= RAY_EPS) { return false; }
 
@@ -2268,11 +2063,9 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
         let phi = atan2(-outward_normal.z, outward_normal.x) + 3.14159265359;
         rec.uv = vec2<f32>(phi / (2.0 * 3.14159265359), theta / 3.14159265359);
 
-        // onb_from_w's guard, adapted: the default axis here is (0,1,0), so
-        // the test is on .y. Crossing against a fixed (0,1,0) was normalize(0)
-        // at the poles and ill-conditioned near them -- which is exactly where
-        // the spherical UV mapping puts its singularity. Away from the poles
-        // the frame is unchanged.
+        // onb_from_w's guard, adapted to a default axis of (0,1,0). A fixed
+        // axis would be normalize(0) at the poles, which is exactly where the
+        // spherical UV mapping puts its singularity.
         var a = vec3<f32>(0.0, 1.0, 0.0);
         if (abs(outward_normal.y) > 0.9) {
             a = vec3<f32>(1.0, 0.0, 0.0);
@@ -2297,18 +2090,16 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
         let v = hit_ref.bary.y;
         let w = 1.0 - u - v;
 
-        // The barycentrics traversal already produced, spent on the shading
-        // normal as well as the UVs. A flat triangle stores the same normal at
-        // all three corners, so this returns it unchanged.
+        // A flat triangle stores the same normal at all three corners, so this
+        // returns it unchanged.
         let shading_normal = normalize(
             w * oct_decode(unpack2x16snorm(attr.n0_oct))
             + u * oct_decode(unpack2x16snorm(attr.n1_oct))
             + v * oct_decode(unpack2x16snorm(attr.n2_oct))
         );
 
-        // Facing keyed off the geometric normal: letting the interpolated one
-        // decide makes a closed mesh report both faces along a silhouette
-        // edge, where the interpolated normal and the facet disagree.
+        // Facing keyed off the geometric normal: the interpolated one makes a
+        // closed mesh report both faces along a silhouette edge.
         rec.front_face = dot(r.direction, attr.normal) < 0.0;
         rec.geometric_normal = select(-attr.normal, attr.normal, rec.front_face);
         rec.normal = select(-shading_normal, shading_normal, rec.front_face);
@@ -2322,11 +2113,9 @@ fn resolve_hit(r: Ray, hit_ref: HitRef) -> HitRecord {
 }
 
 // Routes one radiance contribution to the direct or the indirect accumulator.
-//
-// Depth 0 is what the camera can see without an intervening bounce: the
-// visible surface's own emission, the shadow ray cast from it, and the
-// background behind it. None of those is a firefly, so none of them is
-// clamped. Everything deeper goes through `clamping_threshold`.
+// Depth 0 is what the camera sees without an intervening bounce -- emission,
+// the shadow ray cast from the visible surface, the background -- none of which
+// is a firefly. Everything deeper goes through `clamping_threshold`.
 fn add_contribution(
     direct: ptr<function, vec3<f32>>,
     indirect: ptr<function, vec3<f32>>,
@@ -2340,33 +2129,25 @@ fn add_contribution(
     }
 }
 
-// Ceiling on specular bounces the guide ray will follow. A guide chain longer
-// than this is describing a hall of mirrors the eye cannot follow either, and
-// every extra bounce is another ray per pixel.
+// Ceiling on specular bounces the guide ray will follow: past this it is
+// describing a hall of mirrors, and every bounce is another ray per pixel.
 const GUIDE_MAX_SPECULAR = 6u;
 
 // Traces the denoiser's guide ray: what does this pixel actually look at?
 //
-// Not the primary hit. On a mirror or a glass surface the primary hit describes
-// the surface rather than the image in or through it, so every tap across the
-// mirror looks like the same surface to the edge stop and the reflection is
-// smeared sideways along it. Following the specular chain to the first surface
-// that scatters is what gives the filter something to hold on to.
+// Not the primary hit. On a mirror or a glass surface that describes the
+// surface rather than the image in or through it, so every tap across the
+// mirror looks alike to the edge stop and the reflection smears sideways.
+// Following the specular chain to the first surface that scatters gives the
+// filter something to hold on to.
 //
-// Deliberately separate from trace_sample rather than gathered from one of its
-// samples. A sampled chain is stochastic -- the dielectric Fresnel coin flip,
-// metal fuzz -- so two neighbouring pixels on a glass sphere would record
-// unrelated guides, the edge stop would reject nearly every tap, and the filter
-// would stop working there instead of over-blurring. Everything below is
-// deterministic and shared with its neighbours: the pixel centre rather than a
-// jittered position, no lens offset, no fuzz, and the dominant Fresnel branch
-// rather than a coin flip.
+// Separate from trace_sample rather than gathered from one of its samples,
+// because a sampled chain is stochastic: neighbouring pixels on a glass sphere
+// would record unrelated guides and the edge stop would reject nearly every
+// tap. Everything below is deterministic and shared with its neighbours -- the
+// pixel centre, no lens offset, no fuzz, the dominant Fresnel branch.
 //
-// Costs one ray per pixel, and only on a restart dispatch, against
-// samples_per_pixel rays for the render itself -- which is nothing on a long
-// render and about a tenth of a frame during a camera drag, where every frame
-// is a restart at one sample. Hence `writes_guide`, which compiles this whole
-// function out when no post-processor reads what it writes.
+// Costs one ray per pixel on a restart dispatch only. See `writes_guide`.
 fn trace_guide(pixel: vec2<u32>) -> GuideSample {
     var out: GuideSample;
     out.specular_depth = 0u;
@@ -2374,7 +2155,7 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
     let u = (f32(pixel.x) + 0.5) / f32(width);
     let v = 1.0 - (f32(pixel.y) + 0.5) / f32(height);
     // Normalised, unlike the primary ray in trace_sample, so rec.t is in world
-    // units at every segment and the lengths below can simply be summed.
+    // units at every segment and the lengths below can be summed.
     var r = Ray(
         camera.origin,
         normalize(camera.lower_left_corner + u * camera.horizontal + v * camera.vertical - camera.origin),
@@ -2407,19 +2188,16 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
             tint *= dielectric_transmittance(surface.albedo, rec.t);
         }
 
-        // A *rough* metal or a *rough* glass ends the chain rather than
-        // continuing it. What either one passes on is not a sharp image, so
-        // following it would make neighbouring pixels record unrelated guides
-        // -- the one thing an edge stop cannot survive, and the same reason the
-        // Fresnel coin flip below is resolved deterministically. One test for
-        // both, since `fuzz` carries the roughness of either.
+        // A rough metal or a rough glass ends the chain: what it passes on is
+        // not a sharp image, so following it would make neighbouring pixels
+        // record unrelated guides. One test for both, since `fuzz` carries the
+        // roughness of either.
         let refractive_or_reflective = (has_metal && surface.mat_type == MAT_METAL)
             || (has_dielectrics && surface.mat_type == MAT_DIELECTRIC);
         let specular = refractive_or_reflective && surface.fuzz < FUZZ_SPECULAR_THRESHOLD;
         if (!specular || bounce == GUIDE_MAX_SPECULAR) {
-            // The first surface that scatters -- or, once the budget is spent,
-            // whatever specular surface the chain stalled on, which is the old
-            // primary-hit guide generalised.
+            // The first surface that scatters, or whatever the chain stalled
+            // on once the budget is spent.
             out.albedo = surface.albedo * tint;
             // The normal-mapped shading normal, so bump detail reaches the
             // edge stop rather than just the geometric silhouette.
@@ -2433,7 +2211,7 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
         var direction: vec3<f32>;
         if (has_metal && surface.mat_type == MAT_METAL) {
             // Only a near-mirror metal gets here, so the mirror direction is
-            // the whole lobe rather than the mean of one.
+            // the whole lobe.
             direction = reflect(unit_direction, surface.normal);
             tint *= surface.albedo;
         } else {
@@ -2443,9 +2221,8 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
             }
             let cos_theta = min(dot(-unit_direction, surface.normal), 1.0);
             let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-            // The branch the coin flip in trace_sample would take more often
-            // than not: refraction everywhere but total internal reflection and
-            // the grazing rim.
+            // The branch trace_sample's coin flip would take more often than
+            // not: refraction everywhere but TIR and the grazing rim.
             if (refraction_ratio * sin_theta > 1.0
                 || fresnel_dielectric(cos_theta, refraction_ratio) > 0.5) {
                 direction = reflect(unit_direction, surface.normal);
@@ -2458,8 +2235,7 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
         r = Ray(rec.p, normalize(direction));
     }
 
-    // Unreachable: the loop returns at bounce == GUIDE_MAX_SPECULAR at the
-    // latest. WGSL needs the function to end in a return all the same.
+    // Unreachable -- the loop always returns -- but WGSL wants a return here.
     return out;
 }
 
@@ -2467,16 +2243,14 @@ fn trace_guide(pixel: vec2<u32>) -> GuideSample {
 //
 // Next-event estimation with multiple importance sampling: at every
 // non-specular vertex the direct lighting is estimated with an explicit shadow
-// ray, and the BSDF-sampled continuation is weighted so that a path which
-// happens to land on a light is not counted twice. Both strategies use the
-// balance heuristic, for which `w / pdf` collapses to
-// `1 / (pdf_light + pdf_bsdf)`.
+// ray, and the BSDF-sampled continuation is weighted so a path that lands on a
+// light is not counted twice. Both strategies use the balance heuristic, whose
+// `w / pdf` collapses to `1 / (pdf_light + pdf_bsdf)`.
 //
 // A Dirac lobe has no light-sampling counterpart, so it skips NEE and the
-// emitter it reaches is taken at full weight. Which lobes those are is the
-// BSDF layer's business, not this loop's: everything below dispatches on
-// `Bsdf`, never on `mat_type`, except the emitter test and the absorption of
-// the segment just travelled, neither of which is a scattering question.
+// emitter it reaches is taken at full weight. Which lobes those are is the BSDF
+// layer's business: everything below dispatches on `Bsdf`, never on `mat_type`,
+// except the emitter test and the segment's absorption.
 fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     let index = pixel.y * width + pixel.x;
     let smp = sampler_new(index, sample_index);
@@ -2499,15 +2273,14 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     var throughput = vec3<f32>(1.0);
     var path_length = 0.0;
 
-    // State describing how the current ray was generated, needed to weight an
-    // emitter it may land on. The camera ray counts as specular: a directly
-    // visible light is seen at full brightness.
+    // How the current ray was generated, needed to weight an emitter it may
+    // land on. The camera ray counts as specular, so a directly visible light
+    // is seen at full brightness.
     var prev_specular = true;
     var prev_bsdf_pdf = 0.0;
 
     for (var depth = 0u; depth < config.max_depth; depth++) {
-        // This bounce's three pairs. Fixed slots, so a bounce that skips a draw
-        // leaves a gap rather than shifting everything after it.
+        // This bounce's three pairs, at fixed slots.
         let bounce_pair = PAIR_BOUNCE_BASE + PAIRS_PER_BOUNCE * depth;
         let scalars = bounce_pair + PAIR_SCALARS;
 
@@ -2521,9 +2294,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         let surface = resolve_surface(rec, smp, depth);
         path_length += rec.t;
 
-        // Absorption inside a dielectric, which is a property of the segment
-        // just travelled rather than of any lobe -- the one other place this
-        // loop has to know a material type.
+        // Absorption inside a dielectric: a property of the segment just
+        // travelled rather than of any lobe.
         if (has_dielectrics && surface.mat_type == MAT_DIELECTRIC && !rec.front_face) {
             throughput *= dielectric_transmittance(surface.albedo, rec.t);
         }
@@ -2536,13 +2308,11 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                 }
 
                 // Weight against the direct-lighting strategy that could also
-                // have produced this direction, unless there is no such
-                // strategy: the previous bounce was specular, or next-event
-                // estimation is off.
+                // have produced this direction, if there is one.
                 var weight = 1.0;
                 if (nee_enabled && !prev_specular) {
-                    // The geometric normal, not the shading one: the density
-                    // being weighed against is an area measure on the facet.
+                    // Geometric normal: the density being weighed against is
+                    // an area measure on the facet.
                     let pdf_light = light_hit_pdf(
                         hit_ref.prim_type,
                         hit_ref.prim_idx,
@@ -2564,8 +2334,8 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
 
         // --- Direct lighting (next-event estimation) ---
         //
-        // Gated on the lobe, not on the material: anything with a density a
-        // light sample can land on gets a shadow ray.
+        // Gated on the lobe, not the material: anything with a density a light
+        // sample can land on gets a shadow ray.
         if (nee_enabled && !bsdf_is_specular(b)) {
             let ls = sample_light(
                 rec.p,
@@ -2581,9 +2351,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                         if (ls.attenuation_factor > 0.0) {
                             emitted *= 1.0 / (1.0 + ls.attenuation_factor * (path_length + ls.distance));
                         }
-                        // The balance heuristic's w / pdf, collapsed. It holds
-                        // for any BSDF, because `e.pdf` is the pdf this lobe
-                        // would have had for the light's direction.
+                        // The balance heuristic's w / pdf, collapsed.
                         add_contribution(
                             &direct,
                             &indirect,
@@ -2610,8 +2378,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         }
 
         // Russian roulette: terminate dim paths early and scale the survivors
-        // up to compensate, which keeps the estimator unbiased while cutting
-        // the average path length.
+        // up, which keeps the estimator unbiased while cutting path length.
         if (depth >= RR_MIN_DEPTH) {
             let survival = clamp(max_throughput, RR_MIN_SURVIVAL, 1.0);
             if (sampler_1d(smp, dim_y(scalars)) > survival) {
@@ -2625,14 +2392,12 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
     return direct + min(indirect, vec3<f32>(clamping_threshold));
 }
 
-// Floor on the luminance used as the denominator of the relative variance
-// check, so a near-black pixel's tiny absolute noise doesn't look enormous
-// relative to it and keep the pixel sampling forever.
+// Floor on the denominator of the relative variance check, so a near-black
+// pixel's tiny absolute noise does not keep it sampling forever.
 const ADAPTIVE_LUMINANCE_FLOOR = 1e-4;
 
-// 8x8 tiles rather than 64 pixels of one scanline: neighbouring rays in a
-// workgroup then stay coherent through the first bounce or two, which is where
-// BVH traversal divergence actually costs.
+// 8x8 tiles rather than 64 pixels of a scanline, so neighbouring rays in a
+// workgroup stay coherent through the first bounce or two.
 @compute @workgroup_size(8, 8)
 fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (global_id.x >= width || global_id.y >= height) {
@@ -2646,15 +2411,11 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let restart = config.sample_count == 0u;
 
     // One guide ray per accumulation run, before the adaptive early-out below
-    // can return, so every pixel gets exactly one and the guide can never go
-    // stale: a camera change restarts the accumulation and rewrites the guide
-    // in the same dispatch that resets the accumulator. And only when something
-    // in the chain will read it.
+    // can return, so the guide can never go stale: a camera change restarts the
+    // accumulation and rewrites the guide in the same dispatch.
     //
-    // `writes_guide` leads the condition rather than sitting in the body, and
-    // deliberately: naga folds an override out of an `if` condition and deletes
-    // the arm, which is what takes trace_guide and its helpers out of the
-    // module. See the note on `has_rough_dielectrics` in bsdf_is_specular.
+    // `writes_guide` leads the condition rather than sitting in the body, so
+    // naga can delete the arm; see the note in bsdf_is_specular.
     if (writes_guide && restart) {
         gbuffer[index] = pack_guide(trace_guide(pixel));
     }
@@ -2662,8 +2423,8 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let n0 = select(sample_count_buffer[index], 0u, restart);
     let prev = select(output_buffer[index], vec4<f32>(0.0), restart);
     let prev_mean = prev.xyz;
-    // Sum of squared deviations from the running luminance mean, not a raw sum
-    // of squares. See the merge at the bottom for why.
+    // Sum of squared deviations from the running luminance mean; see the merge
+    // at the bottom.
     let prev_m2 = prev.w;
 
     // Skip pixels that have already converged: no trace_sample, no BVH
@@ -2675,25 +2436,20 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let mean_luminance = luminance(prev_mean);
         let variance = prev_m2 / f32(n0 - 1u);
 
-        // The variance is itself estimated from n0 samples, and that estimate
-        // has a relative standard deviation of sqrt(2/(n-1)) -- 36% at n = 16.
-        // Testing the raw point estimate therefore lets a pixel that merely
-        // drew an unlucky run of similar samples pass as converged, and the
-        // skip is effectively permanent: a pixel that stops sampling can never
-        // revise the numbers that silenced it, so the noise it happened to
-        // hold is frozen into the image.
+        // The variance is itself estimated from n0 samples, with a relative
+        // standard deviation of sqrt(2/(n-1)) -- 36% at n = 16. Testing the raw
+        // point estimate lets a pixel that drew an unlucky run of similar
+        // samples freeze permanently, since a pixel that stops sampling can
+        // never revise the numbers that silenced it.
         //
-        // Simulated on a pixel whose true relative standard error sat 11%
-        // above the threshold, 42% of runs froze it early at n = 16 on the
-        // point estimate; testing one standard deviation above the estimate
-        // instead cut that to 13%. The band this matters in is narrow -- by
-        // n = 64 the estimate is sharp enough that the bound changes almost
-        // nothing -- and it is paid for in extra samples on pixels that had in
-        // fact converged, which is the right way round for an artifact that
-        // never averages out.
+        // Simulated on a pixel 11% above the threshold, 42% of runs froze early
+        // at n = 16 on the point estimate against 13% on this bound. By n = 64
+        // the bound changes almost nothing, and what it costs is extra samples
+        // on pixels that had converged -- the right way round for an artifact
+        // that never averages out.
         //
-        // This is why min_samples_per_pixel wants to be a few dozen, not a
-        // handful: it is what sets the precision of the estimate being tested.
+        // Hence min_samples_per_pixel wanting to be a few dozen: it sets the
+        // precision of the estimate being tested.
         let estimator_uncertainty = sqrt(2.0 / f32(n0 - 1u));
         let variance_bound = variance * (1.0 + estimator_uncertainty);
 
@@ -2703,10 +2459,8 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    // Several samples per dispatch, accumulated in registers, so the
-    // accumulation buffers are read and written once per batch rather than
-    // once per sample. Welford within the batch, for the same reason it is
-    // used across batches below.
+    // Several samples per dispatch, accumulated in registers, so the buffers
+    // are read and written once per batch rather than once per sample.
     let batch = max(config.samples_per_batch, 1u);
     var batch_sum = vec3<f32>(0.0);
     var batch_mean = 0.0;
@@ -2726,20 +2480,11 @@ fn compute(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Chan's parallel Welford merge of the batch into the accumulated state.
     //
-    // The previous form stored a raw sum of squares and recovered the variance
-    // as E[L^2] - E[L]^2, a difference of two terms that each grow with the
-    // sample count while their difference does not. In practice that was less
-    // dire than it looks: measured against f64 on clamped lognormal samples,
-    // the f32 error was 0.4% at n = 256 and 0.01% by n = 16384. What the old
-    // form did get wrong systematically was the divisor -- it used the
-    // population form M2/n where the estimate wants M2/(n-1), understating the
-    // variance by exactly 1/n and so freezing pixels slightly early.
-    //
-    // The difference can still go negative for a genuinely low-variance pixel,
-    // and the clamp to zero then hands the test above a standard error of
-    // exactly zero, which always passes and freezes that pixel permanently.
-    // M2 never subtracts two large numbers, so it has no such failure mode,
-    // and the merge costs a handful of scalar ops per batch.
+    // Welford rather than a raw sum of squares with variance recovered as
+    // E[L^2] - E[L]^2: that difference can go negative for a genuinely
+    // low-variance pixel, and clamping it to zero hands the test above a
+    // standard error of exactly zero, which always passes and freezes the pixel
+    // permanently. M2 never subtracts two large numbers.
     //
     // luminance() is linear, so luminance(prev_mean) is exactly the running
     // mean of the per-sample luminances and needs no separate accumulator. At

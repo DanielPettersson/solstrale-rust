@@ -43,25 +43,18 @@ const _: () = assert!(MAX_LEAF_PRIMS as u32 <= LEAF_COUNT_MASK);
 /// Entries in the GPU traversal stack (`traversal_stack` in `ray_trace.wgsl`).
 ///
 /// Traversal only ever pushes the farther child, so a tree of depth `d` --
-/// counting levels of internal nodes -- needs at most `d - 1` entries: the
-/// deepest internal node has two leaves and pushes nothing. Asserting
-/// `d <= MAX_TRAVERSAL_DEPTH` therefore leaves one slot spare.
+/// counting levels of internal nodes -- needs at most `d - 1` entries.
 ///
 /// The bound has to be checked here because overflowing it on the GPU is
 /// silent: WGSL's bounds-checking policy clamps the out-of-range store, the
-/// deferred subtree is never visited, and geometry disappears from the image
-/// with no error at all. Nothing built a balanced tree, so nothing made this
-/// true by construction -- `split` can legitimately return a 1/N-1 split.
+/// deferred subtree is never visited, and geometry disappears with no error.
+/// Nothing makes the tree balanced, so `split` can legitimately return 1/N-1.
 ///
-/// 32 is kept because the measured excess over a balanced tree is what scales,
-/// not the depth itself -- but the slack is thinner than the synthetic cloud
-/// suggests, and shrinking it is not free. The `bvh_build` cloud reaches
-/// 14 / 17 / 21 at 10k / 100k / 1M, two to three levels over balanced.
-/// Clustered real geometry is what actually sets the bound: measured with
-/// `bvh_tree_quality`, sponza (262k triangles) reaches **27**, conference 25
-/// and a 1M-triangle gallery scene 24, against a balanced 18-20. Four or five
-/// levels is all the margin there is, so a change that deepens the tree has to
-/// be checked against real meshes and not against the cloud.
+/// The slack is thinner than the synthetic cloud suggests. `bvh_build` reaches
+/// 14 / 17 / 21 at 10k / 100k / 1M; clustered real geometry is what sets the
+/// bound, and per `bvh_tree_quality` sponza (262k triangles) reaches **27**,
+/// conference 25 and a 1M-triangle gallery 24, against a balanced 18-20. So a
+/// change that deepens the tree has to be checked against real meshes.
 pub const MAX_TRAVERSAL_DEPTH: u32 = 32;
 
 /// Packs an inline leaf: `count` primitives starting at `offset`.
@@ -108,12 +101,11 @@ impl Display for Bvh {
 impl Bvh {
     /// Creates a new hittable object from the given hittable list.
     ///
-    /// Nested [`Bvh`]s in `list` are expanded into their primitives and
-    /// included in this build, so the result is a single tree over every
-    /// primitive rather than a tree of trees. Nothing is attached to a nested
-    /// `Bvh` -- transformations are baked into vertices at construction -- so
-    /// there is nothing to preserve by keeping it separate, and one global tree
-    /// is strictly better than a parent that treats a whole subtree as one box.
+    /// Nested [`Bvh`]s in `list` are expanded into their primitives, so the
+    /// result is a single tree over every primitive rather than a tree of
+    /// trees. Nothing is attached to a nested `Bvh` -- transformations are
+    /// baked into vertices at construction -- and one global tree beats a
+    /// parent that treats a whole subtree as one box.
     pub fn new(list: Vec<Hittables>) -> Bvh {
         let mut prims = if list.iter().any(|h| matches!(h, Hittables::Bvh(_))) {
             let mut v = Vec::with_capacity(list.len());
@@ -215,18 +207,12 @@ fn collect_primitives(list: Vec<Hittables>, out: &mut Vec<Hittables>) {
     }
 }
 
-/// Reorders `prims` so that `prims[i]` ends up holding what `prims[indices[i]]` held.
+/// Reorders `prims` so that `prims[i]` ends up holding what `prims[indices[i]]`
+/// held, in place: no second array, and every primitive moves once.
 ///
-/// This allocates nothing and moves every primitive once. It replaced a gather through a
-/// staging `Vec<Option<Hittables>>`, which allocated a second full-size array and moved
-/// everything twice. Building a 1M-primitive BVH peaked at 736.7 MB RSS that way and
-/// peaks at 433.4 MB now -- 303 MB, almost exactly the one redundant copy of the
-/// primitive array.
-///
-/// The trade is deliberate and is not a win at every size: all the work here is
-/// random-access swaps, where the gather at least wrote sequentially, so this only runs
-/// faster while the primitive array still fits in last-level cache. Measured on
-/// `bvh_build` (a random spatial cloud, the worst case for locality) on a 96 MB-L3 part:
+/// The trade against a gather through a staging array is memory for time past
+/// roughly 400k primitives, where the random-access swaps stop fitting in
+/// last-level cache. Measured on `bvh_build` on a 96 MB-L3 part:
 ///
 /// | primitives | array | gather | in place |
 /// |---|---|---|---|
@@ -235,17 +221,15 @@ fn collect_primitives(list: Vec<Hittables>, out: &mut Vec<Hittables>) {
 /// | 500k | 156 MB | **158.7 ms** | 161.4 ms |
 /// | 1M | 312 MB | **376.3 ms** | 421.7 ms |
 ///
-/// So past roughly 400k primitives on that part -- sooner on one with a smaller
-/// last-level cache -- this costs ~11% of build time. That is the deliberate trade: build
-/// time is paid once at load, where the peak allocation is what decides whether a large
-/// scene fits at all.
+/// ~11% of build time at 1M, against 303 MB of peak RSS -- build time is paid
+/// once at load, where the peak is what decides whether a scene fits at all.
 ///
-/// Note the direction. `indices[i]` is the *source* slot for destination `i`. Once slot
-/// `i` has been written, a later `indices[j]` still pointing at it is stale, so the chase
-/// follows `indices` forward until it lands on a slot that has not been overwritten yet
-/// (`src >= i`). Swapping `prims` and `indices` together until `indices[k] == k` looks
-/// equivalent and is not -- it applies the inverse permutation, which the golden-image
-/// tests would happily accept at their 0.95 RMS threshold.
+/// Note the direction: `indices[i]` is the *source* slot for destination `i`.
+/// Once slot `i` has been written, a later `indices[j]` pointing at it is
+/// stale, so the chase follows `indices` forward until it lands on a slot that
+/// has not been overwritten (`src >= i`). Swapping `prims` and `indices`
+/// together until `indices[k] == k` looks equivalent and is not -- it applies
+/// the inverse permutation, which the golden-image tests would accept.
 fn permute_in_place(prims: &mut [Hittables], indices: &[u32]) {
     for i in 0..prims.len() {
         let mut src = indices[i] as usize;
@@ -340,8 +324,8 @@ fn build_parallel(
 /// Builds a subtree directly into `nodes`, returning its root index and its
 /// depth in levels of internal nodes.
 ///
-/// The recursion here is as deep as the tree, so the depth the caller asserts
-/// against [`MAX_TRAVERSAL_DEPTH`] also bounds this stack -- but only after the
+/// The recursion is as deep as the tree, so the depth the caller asserts
+/// against [`MAX_TRAVERSAL_DEPTH`] bounds this stack too -- but only after the
 /// fact: a distribution pathological enough to overflow the native stack does
 /// so before there is a depth to check.
 fn build_serial(
@@ -391,13 +375,11 @@ fn build_serial(
 /// Returns an index into `indices`, which is partitioned in place. Always
 /// returns a value in `1..indices.len()` so neither side is empty.
 ///
-/// Sweeping all three rather than only the widest is the textbook improvement:
-/// the widest *centroid* axis is a proxy for the axis that best separates the
-/// primitives' boxes, and a plate or a shell spread along a wide axis is where
-/// the proxy is wrong. The three axes are binned in one pass rather than three
-/// because that pass is a gather through `centroids` and `boxes`, which is what
-/// the build's time actually goes on -- the two extra bucket updates per
-/// primitive run on data already in registers.
+/// All three rather than only the widest: the widest centroid axis is a proxy
+/// for the axis that best separates the boxes, and a plate or a shell spread
+/// along a wide axis is where the proxy is wrong. Binned in one pass, because
+/// that pass is a gather through `centroids` and `boxes` and the extra bucket
+/// updates run on data already in registers.
 fn split(indices: &mut [u32], boxes: &[Aabb32], centroids: &[[f32; 3]]) -> usize {
     let n = indices.len();
 
@@ -781,14 +763,12 @@ mod tests {
 
     /// Node count, depth, mean leaf size and the SAH cost of the whole tree.
     ///
-    /// The cost is the quantity the build's greedy heuristic approximates one
-    /// level at a time: every internal node charges [`TRAVERSAL_COST`] for its
-    /// box and every leaf charges one intersection per primitive, each weighted
-    /// by the conditional probability that a ray hitting the root box also hits
-    /// that node's -- its surface area over the root's. It is the one number
-    /// that says a change to `split` built a *better* tree rather than a
-    /// different one, and it says so deterministically, on the CPU, in a
-    /// second. Read it before spending minutes on a GPU traversal benchmark.
+    /// The cost is what the build's greedy heuristic approximates one level at
+    /// a time: every internal node charges [`TRAVERSAL_COST`] for its box and
+    /// every leaf one intersection per primitive, each weighted by its surface
+    /// area over the root's. It is the one number that says a change to `split`
+    /// built a better tree rather than a different one, and it says so
+    /// deterministically on the CPU in a second.
     #[derive(Default)]
     struct TreeStats {
         nodes: usize,
@@ -895,14 +875,11 @@ mod tests {
         .into()
     }
 
-    /// The widest centroid axis is only a proxy for the axis that separates the
-    /// boxes, and this is a shape where the proxy is wrong: two thin rows of
-    /// triangles spread along x but separated along z. Splitting on x -- the
-    /// widest centroid axis, extent 7 against z's 4 -- cuts both rows and
-    /// leaves both children spanning the whole z gap, at a swept cost of ~243.
-    /// Splitting on z separates the rows into two flat plates, at ~11. Only a
-    /// sweep that tries all three axes finds it, so this is the test that fails
-    /// if `split` goes back to the widest axis alone.
+    /// A shape where the widest-centroid-axis proxy is wrong: two thin rows of
+    /// triangles spread along x but separated along z. Splitting on x (extent 7
+    /// against z's 4) cuts both rows and leaves both children spanning the z
+    /// gap, at a swept cost of ~243; splitting on z gives two flat plates at
+    /// ~11. Fails if `split` goes back to the widest axis alone.
     #[test]
     fn split_picks_the_cheapest_axis_not_the_widest() {
         let prims: Vec<Hittables> = (0..8)

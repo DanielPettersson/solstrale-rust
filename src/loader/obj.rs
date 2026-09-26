@@ -24,11 +24,9 @@ use crate::util::luminance::luminance;
 ///
 /// Measured corner-normal against face-normal (see
 /// [`Obj::with_generated_normals`]), so it has to sit above a coarse curved
-/// surface and below a box. Measured on the two resources: `sphere.obj`, a
-/// 10-by-6 UV sphere, reads 13.5 to 23.8 degrees, and `box.obj` reads 48.2 to
-/// 70.5 -- the spread is the triangulation, which gives a cube corner an uneven
-/// fan rather than the clean 54.7 of three whole faces. 40 leaves 16 degrees of
-/// margin on one and 8 on the other.
+/// surface and below a box. `sphere.obj` reads 13.5 to 23.8 degrees and
+/// `box.obj` 48.2 to 70.5, so 40 leaves 16 degrees of margin on one and 8 on
+/// the other.
 pub const DEFAULT_CREASE_ANGLE_DEGREES: f64 = 40.;
 
 /// Contains file information about the obj to load
@@ -146,9 +144,8 @@ impl Loader for Obj {
         let materials =
             materials.map_err(|_| format!("failed to load MTL file for {}", filepath))?;
 
-        // Indexed by tobj's material id. This used to be a `HashMap<i8, Materials>` with
-        // the default material parked at key -1, so `id as i8` made material 128 alias
-        // onto the default and every 256th material alias onto another.
+        // Indexed by tobj's material id. A map keyed on `i8` would make material
+        // 128 alias onto the default and every 256th onto another.
         let mut mats: Vec<Materials> = Vec::with_capacity(materials.len());
         for m in materials.iter() {
             let albedo_texture: Textures = match &m.diffuse_texture {
@@ -170,13 +167,11 @@ impl Loader for Obj {
             mats.push(material_from_mtl(m, albedo_texture, normal_texture));
         }
 
-        // The total is known up front, so the vector never has to grow. At 376 bytes per
-        // `Hittables::Triangle` a 250k-triangle mesh is ~94 MB, and growing that by
-        // doubling from zero copied about twice that much for nothing.
-        //
-        // 376 rather than 312: the three shading normals are 72 bytes, 8 of
-        // which came out of padding. Host memory only -- the GPU copy is
-        // octahedral and fits in `TriangleAttr`'s existing padding.
+        // The total is known up front, so the vector never has to grow. At 376
+        // bytes per `Hittables::Triangle` a 250k-triangle mesh is ~94 MB, and
+        // doubling from zero copies about twice that for nothing. Host memory
+        // only -- the GPU copy is octahedral and fits in `TriangleAttr`'s
+        // existing padding.
         let face_count: usize = models.iter().map(|m| m.mesh.indices.len() / 3).sum();
         let mut triangles: Vec<Hittables> = Vec::with_capacity(face_count);
 
@@ -191,18 +186,16 @@ impl Loader for Obj {
                 .and_then(|id| mats.get(id))
                 .unwrap_or(&default_material);
 
-            // Transform once per vertex instead of once per triangle corner. A closed
-            // mesh shares each vertex between ~6 faces, so the old code applied the
-            // transformation ~6 times over. It also keeps the rayon closure below from
-            // needing to capture `&dyn Transformer`, which `Transformer` does not require
-            // to be `Sync` -- adding that bound would be a breaking change to the public
-            // `Loader`, `Triangle` and `Quad` signatures.
+            // Once per vertex rather than once per triangle corner: a closed
+            // mesh shares each vertex between ~6 faces. It also keeps the rayon
+            // closure below from capturing `&dyn Transformer`, which
+            // `Transformer` is not required to be `Sync` -- adding that bound
+            // would break the public `Loader`, `Triangle` and `Quad`
+            // signatures.
             //
-            // Results are bit-identical: every `Transformer` in this crate is a pure
-            // function of its argument, so transforming a vertex once and reusing it
-            // produces exactly the bits the per-corner version did. Only the *number* of
-            // `transform` calls changes, which an implementor with interior mutability
-            // would notice.
+            // Only an implementor with interior mutability could notice: every
+            // `Transformer` here is a pure function of its argument, so the
+            // resulting vertices are bit-identical.
             let positions: Vec<Vec3> = (0..mesh.positions.len() / 3)
                 .map(|v| {
                     transformation.transform(vec3_from_mesh_vec(&mesh.positions, v * 3), false)
@@ -235,10 +228,10 @@ impl Loader for Obj {
                 }
             };
 
-            // `(0..n).into_par_iter()` is indexed, so `par_extend` reserves exactly and
-            // writes each triangle into its own slot: the output order is identical to
-            // the serial loop's. That matters -- `Bvh::new` splits on input order, so a
-            // reordering here would change every leaf and every rendered image.
+            // `(0..n).into_par_iter()` is indexed, so `par_extend` writes each
+            // triangle into its own slot and the output order matches a serial
+            // loop's. `Bvh::new` splits on input order, so a reordering here
+            // would change every leaf and every rendered image.
             triangles.par_extend(
                 (0..mesh.indices.len() / 3)
                     .into_par_iter()
@@ -321,21 +314,19 @@ fn parse_f32_3(s: &str) -> Option<[f32; 3]> {
 
 /// Maps one MTL material onto the material types this crate has.
 ///
-/// Three things decide, in this order, because each is more specific than the
-/// next:
+/// Three things decide, in this order, each more specific than the next:
 ///
-/// 1. `Ke`, when non-zero. [`DiffuseLight`] has no diffuse lobe to share with,
-///    and a file that declares emission means the surface to emit.
+/// 1. `Ke`, when non-zero. A file that declares emission means the surface to
+///    emit, and [`DiffuseLight`] has no diffuse lobe to share with.
 /// 2. `d` / `Tr`, when they say the surface is not opaque. Opacity is data
 ///    about the surface, where `illum` is only a hint about which model to
 ///    shade it with.
 /// 3. `illum`, when the file states one. Heuristics otherwise.
 ///
-/// `map_Ks`, `map_Ns` and `map_d` are dropped. [`crate::renderer::gpu_data`]'s
-/// `Material` carries one albedo slot and one normal slot; a third texture
-/// needs an index plus an offset/scale pair, 16 bytes, taking the struct from
-/// 96 to 112 and moving the layout `tests/gpu_data_test.rs` pins. `Tf` is
-/// dropped too, for want of anything to map a transmission filter onto.
+/// `map_Ks`, `map_Ns` and `map_d` are dropped: [`crate::renderer::gpu_data`]'s
+/// `Material` carries one albedo slot and one normal slot, and a third texture
+/// would take the struct from 96 to 112 bytes. `Tf` is dropped for want of
+/// anything to map a transmission filter onto.
 fn material_from_mtl(m: &tobj::Material, albedo: Textures, normal: Option<Textures>) -> Materials {
     if let Some(ke) = m.unknown_param.get("Ke").and_then(|s| parse_f32_3(s))
         && ke.iter().any(|&c| c > 0.)
@@ -393,15 +384,14 @@ fn material_from_mtl(m: &tobj::Material, albedo: Textures, normal: Option<Textur
         .into()
     };
 
-    // `Blend` is a stochastic choice between two materials, not a layer. It
-    // gets the energy right in expectation and the variance wrong against a
-    // real layered BSDF, which is the price of covering `Kd` + `Ks` without a
-    // new material type. `blend_factor` is the chance of the second material.
+    // `Blend` is a stochastic choice between two materials, not a layer: right
+    // in expectation, wrong in variance against a real layered BSDF, which is
+    // the price of covering `Kd` + `Ks` without a new material type.
+    // `blend_factor` is the chance of the second material.
     //
-    // Collapsing at the ends is what keeps every `Ks 0` model in the repo
-    // byte-identical to what the loader produced before: a zero weight has to
-    // come out as a plain `Lambertian`, not a `Blend` that never picks its
-    // second arm, or every such model would pay for `has_blends`.
+    // A zero weight has to collapse to a plain `Lambertian` rather than a
+    // `Blend` that never picks its second arm, or every `Ks 0` model would pay
+    // for `has_blends`.
     let plastic = || -> Materials {
         let total = ks_luminance + kd_luminance;
         let w = if total > 0. { ks_luminance / total } else { 0. };
@@ -421,15 +411,13 @@ fn material_from_mtl(m: &tobj::Material, albedo: Textures, normal: Option<Textur
     match m.illumination_model {
         Some(0 | 1) => diffuse(),
         Some(3 | 5) => specular(),
-        // 2 is the highlight model this blend exists for. 4, 6, 7 and 9 are the
-        // transparent family, and reach here only on a surface that `d` called
-        // opaque -- which is the common case, not a corner: of the seven scenes
-        // this was checked against, `fireplace_room` marks 21 of its 22
-        // materials `illum 4` or `illum 7`, floor and dirt and leaves included,
-        // and declares `d` on none of them. Taking `illum` as the authority
-        // there would turn a whole room to glass. 8 disables ray-traced
+        // 2 is the highlight model this blend exists for. 4, 6, 7 and 9 are
+        // the transparent family, and reach here only on a surface `d` called
+        // opaque -- the common case, not a corner: `fireplace_room` marks 21 of
+        // its 22 materials `illum 4` or `illum 7`, floor and dirt and leaves
+        // included, and declares `d` on none of them. 8 disables ray-traced
         // reflection and 10 is a shadow-matte flag, neither of which describes
-        // the surface, so both fall through with everything else.
+        // the surface, so both fall through.
         _ => plastic(),
     }
 }
@@ -444,16 +432,15 @@ fn vec3_from_mesh_vec(positions: &[f32], offset: usize) -> Vec3 {
 
 /// Per-corner shading normals for a mesh that ships none.
 ///
-/// Area-weighted, for free: `(v1-v0) x (v2-v0)` has twice the triangle's area
-/// as its magnitude, so accumulating un-normalised is the weighting. It is
+/// Area-weighted for free: `(v1-v0) x (v2-v0)` has twice the triangle's area as
+/// its magnitude, so accumulating un-normalised is the weighting. That makes it
 /// invariant to how a flat region happens to be triangulated, where an
 /// unweighted mean lets a sliver pull the vertex normal toward itself.
 ///
-/// The crease test runs per corner after the accumulation, comparing the
-/// vertex normal to that corner's own face. A sharp edge then comes out
-/// faceted on both sides while a smooth region sharing the vertex stays
-/// smooth. One pass, no adjacency structure -- hence per corner rather than
-/// per vertex.
+/// The crease test runs per corner after the accumulation, comparing the vertex
+/// normal to that corner's own face, so a sharp edge comes out faceted on both
+/// sides while a smooth region sharing the vertex stays smooth. One pass, no
+/// adjacency structure.
 fn generate_normals(mesh: &tobj::Mesh, positions: &[Vec3], crease_cos: f64) -> Vec<Vec3> {
     let face_count = mesh.indices.len() / 3;
     let mut face_normals: Vec<Vec3> = Vec::with_capacity(face_count);
@@ -516,13 +503,13 @@ mod tests {
 
     use super::*;
 
-    /// FNV-1a over every geometric field of every loaded triangle, in `prims` order.
+    /// FNV-1a over every geometric field of every loaded triangle, in `prims`
+    /// order.
     ///
-    /// The golden-image tests are stochastic GPU renders compared at 0.95 RMS, so they
-    /// happily absorb a reordering or a drifted transform. This is the oracle that does
-    /// not: it pins the exact bytes the loader produces, in the exact order the BVH build
-    /// sees them. Any change to `Obj::load` that leaves these constants alone is
-    /// geometrically a no-op.
+    /// The golden-image tests compare at 0.95 RMS, so they absorb a reordering
+    /// or a drifted transform. This pins the exact bytes the loader produces in
+    /// the exact order the BVH build sees them, so any change to `Obj::load`
+    /// that leaves these constants alone is geometrically a no-op.
     fn geometry_checksum(bvh: &Bvh) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut eat = |bytes: &[u8]| {
@@ -582,10 +569,10 @@ mod tests {
 
     /// How many distinct decoded images the loaded triangles point at.
     ///
-    /// `spider.mtl` has 19 `usemtl` groups over 4 JPEGs, so this is what proves that
-    /// resolving the material once per *mesh* still hands every triangle the same shared
-    /// `Arc` the per-triangle lookup did -- the flattener dedups textures by
-    /// `Arc::ptr_eq`, so collapsing or splitting those Arcs is observable downstream.
+    /// `spider.mtl` has 19 `usemtl` groups over 4 JPEGs, so this proves that
+    /// resolving the material once per mesh still hands every triangle the same
+    /// shared `Arc`. The flattener dedups textures by `Arc::ptr_eq`, so
+    /// collapsing or splitting those Arcs is observable downstream.
     fn distinct_albedo_images(bvh: &Bvh) -> usize {
         let mut ptrs: Vec<usize> = bvh
             .prims
@@ -649,10 +636,10 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
 
-        // spider.obj ships 747 `vn` records, and before this they were all
-        // discarded. A smooth triangle is one whose three corners disagree with
-        // each other and with the face -- either alone would pass on a mesh
-        // that had merely been handed the geometric normal three times.
+        // A smooth triangle is one whose three corners disagree with each
+        // other and with the face -- either test alone would pass on a mesh
+        // handed the geometric normal three times. spider.obj ships 747 `vn`
+        // records.
         let smooth = bvh
             .prims
             .iter()
@@ -672,15 +659,11 @@ mod tests {
             bvh.prims.len()
         );
 
-        // Every normal is a unit vector, which is what the octahedral packing in
-        // the flattener assumes.
-        //
-        // Except on the 56 zero-area faces spider.obj ships, whose geometric
-        // normal is the NaN that `unit()` of a zero cross product gives and has
-        // been since long before shading normals existed. Those faces are
-        // rejected by Moeller-Trumbore's determinant test and never reach
-        // `resolve_hit`, so the assertion excludes them rather than pretending
-        // this change could have fixed them.
+        // Every normal is a unit vector, which the octahedral packing in the
+        // flattener assumes -- except on the 56 zero-area faces spider.obj
+        // ships, whose geometric normal is the NaN `unit()` gives for a zero
+        // cross product. Those are rejected by Moeller-Trumbore's determinant
+        // test and never reach `resolve_hit`, so the assertion excludes them.
         for prim in &bvh.prims {
             if let Hittables::Triangle(t) = prim {
                 if t.normal.x.is_nan() {
@@ -722,7 +705,7 @@ mod tests {
 
     #[test]
     fn with_flat_shading_is_exactly_the_geometric_normal() {
-        // Not the same as the crease deciding not to smooth: that routes the
+        // Not the same as the crease deciding not to smooth, which routes the
         // face normal through an accumulate and two `unit()` calls. Only this
         // path is bit-exact, which is what makes the GPU's unconditional
         // interpolation reproduce flat shading rather than approximate it.
@@ -979,10 +962,9 @@ mod tests {
     #[test]
     fn map_kd_outweighs_the_kd_beside_it() {
         // `Kd 0 0 0` next to a `map_Kd` is what an exporter writes when the
-        // texture is the whole diffuse answer, and the loader already drops
-        // that `Kd` for the albedo. Weighing the blend with it instead would
-        // read the surface as pure specular and lose the texture -- which is
-        // what `fireplace_room`'s wooden table is written like.
+        // texture is the whole diffuse answer. Weighing the blend with that
+        // `Kd` would read the surface as pure specular and lose the texture --
+        // which is how `fireplace_room`'s wooden table is written.
         match material_at(&materials_fixture(), 8) {
             Materials::Blend(b) => {
                 // Ks 0.04 against the texture taken as white.
@@ -1004,10 +986,9 @@ mod tests {
 
     #[test]
     fn spider_materials_stay_lambertian() {
-        // Every material the repo ships has `Ks 0 0 0` or no `Ks` at all, so
-        // the mapping has to leave all of them exactly where they were. A blend
-        // weight of zero collapsing to a `Blend` rather than to a `Lambertian`
-        // would fail here, and would cost every such scene the blend walk.
+        // Every material the repo ships has `Ks 0 0 0` or no `Ks` at all, so a
+        // blend weight of zero has to collapse to a `Lambertian` -- otherwise
+        // every such scene pays for the blend walk.
         for (path, file) in [
             ("resources/spider/", "spider.obj"),
             ("resources/obj/", "boxWithMat.obj"),

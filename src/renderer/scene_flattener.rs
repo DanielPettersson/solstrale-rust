@@ -23,10 +23,9 @@ use std::sync::Arc;
 
 /// Interning caches used while flattening.
 ///
-/// Without these the flattener emits one `GpuMaterial` per *primitive* and
-/// re-scans the texture list linearly per material, so a large mesh sharing a
-/// single material produced megabytes of duplicate material records that
-/// thrashed the material fetch in `scatter`.
+/// Without these the flattener emits one `GpuMaterial` per primitive and
+/// re-scans the texture list per material, so a large mesh sharing a single
+/// material produces megabytes of duplicate records.
 #[derive(Default)]
 struct FlattenCaches {
     /// Byte image of an already-emitted `GpuMaterial` -> its index.
@@ -47,11 +46,10 @@ struct FlattenCaches {
 
 /// The multiply-xor hash rustc uses internally, over 64-bit words.
 ///
-/// These two maps are probed once per *primitive* -- 348k times for a scene with a
-/// couple of imported meshes -- and the material key is the 96-byte image of a
-/// `GpuMaterial`. SipHash's per-byte work is the wrong trade for interning our own bytes
-/// into a table that never leaves this function, so it is not exposed to anything that
-/// could choose keys adversarially.
+/// These maps are probed once per primitive -- 348k times for a scene with a
+/// couple of imported meshes -- on a 96-byte material key. SipHash's per-byte
+/// work is the wrong trade for a table that never leaves this function and
+/// whose keys nothing external can choose.
 #[derive(Default)]
 struct FxHasher {
     hash: u64,
@@ -135,11 +133,10 @@ pub struct SceneData {
     /// Whether `prim_refs[k]` is `(PRIM_TYPE_TRIANGLE << 30) | k` at every `k`.
     ///
     /// True exactly when the scene is nothing but triangles: every primitive
-    /// contributes one reference and one entry to its own type's array, and
-    /// both are appended in the same pass, so equal lengths leave no room for a
-    /// sphere or a quad. The tracer is compiled against this, and then the
-    /// innermost traversal loop reads the triangle's address straight out of
-    /// the leaf slot instead of chasing a reference to it.
+    /// appends one reference and one entry to its own type's array in the same
+    /// pass, so equal lengths leave no room for a sphere or a quad. The tracer
+    /// is compiled against this, and the innermost traversal loop then reads the
+    /// triangle's address straight out of the leaf slot.
     pub prim_refs_are_identity: bool,
 }
 
@@ -216,8 +213,8 @@ pub fn flatten_scene(scene: &Scene) -> SceneData {
         }
     }
 
-    // Hand the renderer the shared Arcs and the layout we already computed above;
-    // it used to deep-copy every decoded image and re-run the identical packing.
+    // Hand the renderer the shared Arcs and the layout computed above, rather
+    // than leaving it to deep-copy the images and re-run the same packing.
     data.textures = atlas_textures;
     data.atlas_layout = atlas_layout;
 
@@ -391,10 +388,8 @@ fn light_ref(
 ///
 /// The one radiance a textured emitter gets: `add_material` puts it in the
 /// GPU's `emission` slot and `light_ref` ranks the light's power by it. Every
-/// texel is averaged, sRGB-decoded per texel to match `ImageMap::color`,
-/// rather than the texture being flattened to whichever texel sits at UV
-/// (0, 0) -- a corner pixel is the kind of silent wrongness that never shows
-/// up as a crash.
+/// texel is averaged, sRGB-decoded per texel to match `ImageMap::color`, rather
+/// than the texture being flattened to whichever texel sits at UV (0, 0).
 fn mean_color(tex: &Textures, caches: &mut FlattenCaches) -> Vec3 {
     let Textures::ImageMap(im) = tex else {
         return sample_texture(tex);
@@ -418,16 +413,14 @@ fn mean_color(tex: &Textures, caches: &mut FlattenCaches) -> Vec3 {
 /// Turns the raw powers sitting in `select_pdf` into the normalised selection
 /// distribution and Vose's alias table over it, in O(L).
 ///
-/// The alias table is what keeps selection at one 1D draw as the light count
-/// grows: `sample_light` scales its draw by `L`, takes the integer part as a
-/// slot and the fraction as the coin that decides between that slot and its
-/// alias. A linear CDF scan would cost the dimension budget nothing either, but
-/// it costs O(L) per bounce, which is the thing an emissive mesh makes matter.
+/// The alias table keeps selection at one 1D draw as the light count grows:
+/// `sample_light` scales its draw by `L`, takes the integer part as a slot and
+/// the fraction as the coin between that slot and its alias. A linear CDF scan
+/// would cost O(L) per bounce, which is what an emissive mesh makes matter.
 ///
-/// Falls back to uniform when nothing emits -- a `DiffuseLight` may be black,
-/// and is still a light as far as `is_light` is concerned. A distribution of
-/// zeroes has no normalisation, and every direction to such a light carries no
-/// radiance anyway.
+/// Falls back to uniform when nothing emits -- a black `DiffuseLight` is still
+/// a light as far as `is_light` is concerned, and a distribution of zeroes has
+/// no normalisation.
 fn build_alias_table(lights: &mut [LightRef]) {
     let n = lights.len();
     if n == 0 {
@@ -513,8 +506,7 @@ fn add_primitive(
         Hittables::Triangle(t) => {
             let index = data.triangle_pos.len() as u32;
             let mat_idx = add_material(&t.mat, data, unique_textures, atlas_layout, caches);
-            // Edges go to the GPU as-is; the shader used to re-derive them from
-            // absolute vertices that this function had reconstructed from edges.
+            // Edges go to the GPU as-is, which is what Moeller-Trumbore wants.
             data.triangle_pos.push(TrianglePos {
                 v0: to_array(t.v0),
                 _pad0: 0.0,
@@ -654,21 +646,17 @@ fn add_material(
 
     let albedo = albedo_tex.map(sample_texture).unwrap_or(ZERO_VECTOR);
 
-    // The mean of the texture, not the texel at UV (0, 0). `emission` is the
-    // whole of what the shader knows about a light's radiance -- `surface_at`
-    // and `sample_light` both read this one value, neither of them samples a
-    // texture for it -- so a textured emitter is a flat light of its average
-    // colour. That is the same number `light_ref` ranks its power by, which is
-    // what keeps the shading and the selection from describing two different
-    // lights.
+    // The mean of the texture, not the texel at UV (0, 0). `emission` is all
+    // the shader knows about a light's radiance -- neither `surface_at` nor
+    // `sample_light` samples a texture for it -- so a textured emitter is a
+    // flat light of its average colour, and `light_ref` ranks its power by the
+    // same number.
     let emission = emission_tex
         .map(|t| mean_color(t, caches))
         .unwrap_or(ZERO_VECTOR);
 
-    // Albedo only. This used to fall back to the emission texture, which put an
-    // emitter's image in the albedo slot -- where `surface_at` samples it into
-    // `surface.albedo`, a field no emitter arm reads, while the light stayed
-    // flat.
+    // Albedo only, deliberately: falling back to the emission texture would put
+    // an emitter's image in the albedo slot, which no emitter arm reads.
     let (texture_index, albedo_offset, albedo_scale) = albedo_tex
         .map(|t| get_texture_info(t, unique_textures, atlas_layout, caches))
         .unwrap_or((-1, [0.0; 2], [1.0; 2]));
@@ -787,9 +775,9 @@ fn to_array(v: Vec3) -> [f32; 3] {
 /// only decodes, so a disagreement would mirror normals on the hemisphere
 /// straddling the branch with nothing on the GPU side to catch it.
 ///
-/// `snorm` rather than the G-buffer's `pack2x16float`: the parameters live in
-/// exactly `[-1, 1]`, where a half-float's exponent range is wasted. Worth
-/// 0.0036 degrees at worst, pinned by `pack_oct_round_trip`.
+/// `snorm` rather than the G-buffer's `pack2x16float`, since the parameters
+/// live in exactly `[-1, 1]`. Worth 0.0036 degrees at worst, pinned by
+/// `pack_oct_round_trip`.
 pub(crate) fn pack_oct(n: Vec3) -> u32 {
     // f32 throughout: the precision the shader decodes in.
     let (x, y, z) = (n.x as f32, n.y as f32, n.z as f32);
@@ -888,12 +876,10 @@ mod tests {
 
     /// Who gets an energy table and who does not.
     ///
-    /// Building one is the most expensive thing the flattener does per
-    /// material -- half a million evaluations of the microfacet model -- and it
-    /// is wasted on a scene whose glass is smooth, which is every scene that
-    /// predates the microfacet dielectric. The shader agrees:
-    /// `has_rough_dielectrics` is false under the same condition and compiles
-    /// out the arm that would read it.
+    /// Building one is the most expensive thing the flattener does per material
+    /// -- half a million evaluations of the microfacet model -- and it is
+    /// wasted on a scene whose glass is smooth. The shader agrees:
+    /// `has_rough_dielectrics` is false under the same condition.
     #[test]
     fn a_table_is_built_only_for_a_rough_dielectric() {
         assert!(
@@ -971,10 +957,9 @@ mod tests {
     /// Draws a light the way `sample_light` does: one uniform scalar, split
     /// into a slot and the coin that decides between that slot and its alias.
     ///
-    /// A transcription of the shader, which is the point -- the GPU side is
-    /// three lines and untestable without a device, so the thing worth pinning
-    /// is that the table those three lines read produces the distribution the
-    /// MIS weight is told it produces.
+    /// A transcription of the shader, which is the point: what is worth pinning
+    /// is that the table produces the distribution the MIS weight is told it
+    /// produces.
     fn alias_draw(lights: &[LightRef], x: f64) -> usize {
         let scaled = x * lights.len() as f64;
         let slot = (scaled as usize).min(lights.len() - 1);
@@ -1003,9 +988,8 @@ mod tests {
     /// These two are the whole bias risk in power-proportional selection: the
     /// sampler draws from the table, while the PDF it is divided by is
     /// `select_pdf` times the density of the point on the light. A Vose bug
-    /// that leaves the two disagreeing is an image that is quietly wrong rather
-    /// than one that crashes, and nothing on the GPU can see it -- a wrong
-    /// distribution and a wrong weight make a plausible picture together.
+    /// that leaves them disagreeing is a quietly wrong image, and nothing on
+    /// the GPU can see it.
     #[test]
     fn alias_table_matches_its_pdf() {
         // Three orders of magnitude, the range an emissive mesh spans, with the
@@ -1245,8 +1229,8 @@ mod tests {
         use crate::material::texture::ImageMap;
 
         let tex: Textures = ImageMap::new(half_white_image()).into();
-        // The value the flat slot used to carry, and what makes this test more
-        // than a tautology: the mean has to differ from it.
+        // What makes this more than a tautology: the mean has to differ from
+        // the texel at UV (0, 0).
         assert_eq!(Vec3::new(1., 1., 1.), sample_texture(&tex));
 
         let data = flatten_scene(&scene_of(
@@ -1261,10 +1245,9 @@ mod tests {
         assert_eq!([0.5, 0.5, 0.5], data.materials[0].emission);
     }
 
-    /// An emission image is never sampled on the device, so it takes no
-    /// texture slot and no atlas area. It used to take both -- `texture_index`
-    /// fell back to the emission texture, which is the albedo slot, where
-    /// `surface_at` sampled it into a field no emitter arm reads.
+    /// An emission image is never sampled on the device, so it must take no
+    /// texture slot and no atlas area. The trap is `texture_index` falling back
+    /// to the emission texture, which is the albedo slot.
     #[test]
     fn an_emission_texture_reaches_neither_the_albedo_slot_nor_the_atlas() {
         use crate::material::texture::ImageMap;

@@ -32,12 +32,10 @@ mod specialisation_test;
 
 /// How the tracer is compiled when it is not compiled as a reference.
 ///
-/// Neither is a [`RenderConfig`] field. Next-event estimation does not change
-/// what the image converges to, only how fast; the firefly clamp is a bias the
-/// renderer takes deliberately and documents in LIMITATIONS.md. Neither is a
-/// knob a caller should be reaching for, and the one thing that does reach for
-/// them is [`Renderer::bsdf_only_reference`]. See issue #47 for the depth
-/// cutoff that will eventually replace the first of them.
+/// Neither is a [`RenderConfig`] field: next-event estimation does not change
+/// what the image converges to, and the firefly clamp is a bias documented in
+/// LIMITATIONS.md. The one thing that reaches for them is
+/// [`Renderer::bsdf_only_reference`].
 const SHIPPED_ESTIMATOR: Estimator = Estimator {
     nee_enabled: true,
     clamping_threshold: 10.,
@@ -59,15 +57,11 @@ struct Estimator {
 /// What the tracer is compiled against for one scene.
 ///
 /// Every field is a fact that holds for the life of a [`Renderer`], so it
-/// reaches the shader as an override constant rather than as a uniform: naga
-/// substitutes overrides before it emits SPIR-V, so a `false` here deletes the
-/// branch it guards instead of merely making it predictable. `Renderer::new`
-/// already builds the module and its one pipeline per render, so the only cost
-/// is a shader-cache miss the first time a given combination is seen.
-///
-/// Each flag removes a branch the scene could never have taken, which is why
-/// none of them changes a single sample -- the invariant `specialisation_test`
-/// holds the whole thing to.
+/// reaches the shader as an override constant rather than a uniform: naga
+/// substitutes overrides before emitting SPIR-V, so a `false` deletes the
+/// branch it guards. Each flag removes a branch the scene could never have
+/// taken, so none of them changes a sample -- the invariant
+/// `specialisation_test` holds the whole thing to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Specialisation {
     has_spheres: bool,
@@ -99,10 +93,9 @@ impl Specialisation {
             has_blends: any(|m| m.mat_type == MAT_BLEND),
             has_metal: any(|m| m.mat_type == MAT_METAL),
             has_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC),
-            // Any roughness at all, not a threshold: the shader still routes a
-            // roughness below `GGX_ALPHA_MIN` down the Dirac path, so this only
-            // has to be conservative, and a duplicated cutoff on this side is a
-            // thing to keep in step for no gain.
+            // Any roughness at all, not a threshold: the shader still routes
+            // a roughness below `GGX_ALPHA_MIN` down the Dirac path, so this
+            // only has to be conservative.
             has_rough_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC && m.fuzz > 0.),
             has_textures: any(|m| m.texture_index >= 0),
             has_normal_maps: any(|m| m.normal_texture_index >= 0),
@@ -182,13 +175,12 @@ pub struct RenderConfig {
     /// `TARGET_DISPATCH`.
     pub samples_per_batch: u32,
     /// Minimum samples a pixel must accumulate before adaptive sampling can
-    /// consider it converged and stop sampling it further.
+    /// consider it converged.
     ///
     /// Skipping is effectively permanent -- a pixel that stops sampling can no
     /// longer revise the variance estimate that silenced it -- so this wants to
-    /// be high enough that the estimate is trustworthy. Path-traced luminance
-    /// is heavy-tailed, and a couple of dozen samples is not much to judge it
-    /// on. Set above `samples_per_pixel` to disable adaptive sampling.
+    /// be high enough that the estimate is trustworthy. Set above
+    /// `samples_per_pixel` to disable adaptive sampling.
     pub min_samples_per_pixel: u32,
     /// Relative standard-error threshold below which a pixel is considered
     /// converged and skipped by adaptive sampling. Lower is stricter: less
@@ -196,39 +188,25 @@ pub struct RenderConfig {
     ///
     /// This is the render's noise floor, not merely a speed knob. Skipping is
     /// permanent, so a pixel retires holding whatever error it had when it
-    /// passed this test, and no amount of `samples_per_pixel` can push it
-    /// lower -- more samples only retire more pixels sooner. Measured on the
-    /// 200x100 test scene against a 32k-spp reference, the relative RMSE at
-    /// the old default of 0.05 sat at 0.059 / 0.057 / 0.058 for 1024 / 4096 /
-    /// 16384 spp: flat, while the same renders with adaptive sampling off ran
-    /// 0.037 / 0.018 / 0.007, halving per 4x samples as Monte Carlo should.
+    /// passed this test, and more `samples_per_pixel` only retires more pixels
+    /// sooner. Measured on the 200x100 test scene against a 32k-spp reference,
+    /// the relative RMSE at 0.05 sat flat at 0.059 / 0.057 / 0.058 for 1024 /
+    /// 4096 / 16384 spp, where the same renders with adaptive sampling off ran
+    /// 0.037 / 0.018 / 0.007.
     ///
-    /// 0.05 is a 5% relative luminance error, well above the ~1% contrast the
-    /// eye resolves in a smooth gradient, and it reads as grain that never
-    /// sands out. The denoiser used to agree with it and leave it there, since
-    /// `denoise_resolve` faded the filter on this same relative error and
-    /// reached full strength only at 0.4, so a pixel retired at 0.05 took an
-    /// eighth of the filtered result. That is no longer true, and the division
-    /// of labour is better for it: that pass now fades on how visible the
-    /// residue would be rather than on how converged the estimate is, and even
-    /// at the 0.01 default a retired pixel still carries 0.4 to 0.8 code values
-    /// of grain. Adaptive sampling stops spending samples; the denoiser cleans
-    /// up what it left.
-    ///
-    /// At 0.01 the floor lands below what 4096 spp reaches anyway (0.021
-    /// against 0.020 with adaptive sampling off), for roughly 2x the time of
-    /// 0.05. Going stricter than that buys nothing. Adaptive sampling earns
-    /// its keep in the interactive viewport, where the alternative is a
-    /// blurrier frame, rather than in a long offline render.
+    /// At the 0.01 default the floor lands below what 4096 spp reaches anyway
+    /// (0.021 against 0.020 with adaptive sampling off), for roughly 2x the
+    /// time of 0.05; stricter than that buys nothing. A retired pixel still
+    /// carries 0.4 to 0.8 code values of grain, which is the denoiser's job.
+    /// Adaptive sampling earns its keep in the interactive viewport rather than
+    /// in a long offline render.
     pub variance_threshold: f32,
     /// Whether samples are drawn from an Owen-scrambled Sobol sequence rather
     /// than from white noise.
     ///
-    /// Resolved into the tracing pipeline as an override constant, so switching
-    /// it off costs nothing at run time. It changes nothing about what the
-    /// converged image is -- only how many samples it takes to get there -- and
-    /// is on by default. Off is for measuring what it buys;
-    /// `sampler_convergence_sweep` is what does the measuring.
+    /// An override constant, so switching it off costs nothing at run time. It
+    /// changes only how many samples the converged image takes, not what it is.
+    /// Off is for measuring what it buys; see `sampler_convergence_sweep`.
     ///
     /// One second-order cost, recorded in LIMITATIONS.md: low-discrepancy
     /// samples are negatively correlated, so the Welford estimator behind
@@ -241,42 +219,35 @@ pub struct RenderConfig {
     /// sampler seed. Equal seeds give bit-identical images; different seeds
     /// give the same image with independent noise.
     ///
-    /// This matters for reference renders. A converged reference that shares
-    /// its seed with the render being measured against it shares the sample
-    /// stream too -- with `low_discrepancy` on, an 8-sample render is literally
-    /// a sub-net of a 4000-sample reference -- so the error between them is
-    /// correlated and biased low. Give references a different seed.
+    /// Give a reference render a different seed: sharing one means sharing the
+    /// sample stream -- with `low_discrepancy` on, an 8-sample render is
+    /// literally a sub-net of a 4000-sample reference -- so the error between
+    /// them is correlated and biased low.
     pub seed: u32,
     /// Post processor to apply to the rendered image
     pub post_processors: Vec<PostProcessors>,
     /// Whether the post-processors that declare themselves preview processors
     /// run on every batch, or only on the last one.
     ///
-    /// Off, the default: the chain runs once, on the final batch, as it always
-    /// did. The buffer published on [`RenderProgress`] still follows the
-    /// accumulation, it is just raw until the end.
+    /// Off, the default: the chain runs once, on the final batch. The buffer
+    /// published on [`RenderProgress`] still follows the accumulation, it is
+    /// just raw until the end.
     ///
-    /// On: every batch gets a processed image. **Turn this on for an
-    /// interactive viewport**, which is the case it exists for -- a camera drag
-    /// restarts the accumulation on every frame and so never reaches a last
-    /// batch at all, which made the one regime a denoiser is built for the one
-    /// regime it never ran in. A drag frame on `create_test_scene` at 800x600
-    /// goes from 2.7 ms to 4.8 ms and stops being a one-sample image; see
-    /// `interactive_restart_frame_cost` in `tests/interactive_test.rs`.
+    /// **Turn this on for an interactive viewport**, which is the case it
+    /// exists for: a camera drag restarts the accumulation every frame and so
+    /// never reaches a last batch. A drag frame on `create_test_scene` at
+    /// 800x600 goes from 2.7 ms to 4.8 ms and stops being a one-sample image;
+    /// see `interactive_restart_frame_cost` in `tests/interactive_test.rs`.
     ///
     /// Default off because the cost is charged per batch whether or not anyone
-    /// is looking. The only expensive preview processor is the denoiser,
-    /// measured on a Radeon RX 5700 XT at 800x600 as 1.8 ms of GPU time per
-    /// batch against the 12 ms a batch of samples is sized to fill, so a
-    /// denoised batch render would pay something like a sixth of its time for
-    /// previews nobody reads. A viewport renders one batch per frame and reads
-    /// every one of them; a batch render reads the last.
+    /// is looking: the denoiser measures 1.8 ms of GPU time per batch at
+    /// 800x600 against the 12 ms a batch is sized to fill, and a batch render
+    /// reads only the last one.
     ///
     /// Which processors those are is [`crate::post::PostProcessor::preview`]:
     /// the denoiser and the saturation grade, not bloom. Nothing about the
-    /// final image depends on this. The chain always runs on a fresh copy of
-    /// the accumulator, so running it four times over a render and running it
-    /// once produce the same last batch.
+    /// final image depends on this, since the chain always runs on a fresh copy
+    /// of the accumulator.
     pub preview: bool,
 }
 
@@ -322,14 +293,12 @@ pub struct RenderProgress {
     pub output_buffer: wgpu::Buffer,
 }
 
-/// Wall clock budget for the *work* a single dispatch adds.
+/// Wall clock budget for the *work* a single dispatch adds, roughly one vsync
+/// interval: an interactive caller shares its device and queue with us, so a
+/// dispatch that overruns a display frame is a dropped frame for it.
 ///
-/// A caller that renders interactively hands us the same device and queue its
-/// user interface draws on, so a dispatch that overruns a display frame is a
-/// dropped frame for whoever is waiting behind us. Roughly one vsync interval.
-///
-/// This budgets the sample-proportional part of a dispatch only -- see
-/// [`DispatchCost`] for why the fixed part is deliberately left out of it.
+/// Budgets the sample-proportional part of a dispatch only -- see
+/// [`DispatchCost`] for why the fixed part is left out.
 const TARGET_DISPATCH: Duration = Duration::from_millis(12);
 
 /// Ceiling on the adaptive batch size, so a very cheap scene does not end up
@@ -339,23 +308,19 @@ const MAX_BATCH: u32 = 64;
 /// What a dispatch costs in wall clock time: a fixed per-dispatch term plus a
 /// per-sample one.
 ///
-/// Both terms are needed, because the fixed one is not ours. A caller that
-/// renders interactively shares its queue with a vsync-throttled presenter, so
-/// our submission is regularly serialised behind a swapchain acquire and a
-/// dispatch takes a display frame longer than the work in it -- measured at
-/// 1384x784 on a 60 Hz display, one batch of 8 samples costs 22.4 ms against a
-/// marginal cost of 2.5 ms per sample.
+/// Both terms are needed, because the fixed one is not ours. An interactive
+/// caller shares its queue with a vsync-throttled presenter, so our submission
+/// is regularly serialised behind a swapchain acquire and a dispatch takes a
+/// display frame longer than the work in it -- measured at 1384x784 on a 60 Hz
+/// display, one batch of 8 samples costs 22.4 ms against a marginal 2.5 ms per
+/// sample.
 ///
-/// Dividing the whole dispatch by its batch size, which is what a single
-/// milliseconds-per-sample figure amounts to, charges that latency to the
-/// samples. Every batch size is then its own fixed point: at a batch of one the
-/// measurement above reads 8.3 ms per sample, [`TARGET_DISPATCH`] divided by
-/// that asks for a batch of one, and a batch of one is what it stays at --
-/// while shrinking the batch is the one thing that cannot make the dispatch
-/// shorter, so nothing ever contradicts the estimate. The render then runs at
-/// a third of the throughput the same machine reaches when the estimate
-/// happens to settle higher instead, which is why the reported speed used to
-/// vary several-fold between runs of the same scene.
+/// A single milliseconds-per-sample figure charges that latency to the samples,
+/// and every batch size is then its own fixed point: at a batch of one the
+/// measurement above reads 8.3 ms per sample, which asks for a batch of one,
+/// and shrinking the batch cannot make the dispatch shorter, so nothing
+/// contradicts the estimate. The render then runs at a third of the throughput
+/// the same machine reaches from a higher fixed point.
 ///
 /// Fitting the two terms apart keeps the budget on the work a dispatch adds
 /// rather than on the latency it merely waits through.
@@ -470,11 +435,9 @@ impl DispatchCost {
     /// Whether the batch size has to be moved before the fit can say anything.
     ///
     /// A window measured at a single batch size cannot separate the two terms,
-    /// and the fallback in [`Self::fit`] then charges everything above the
-    /// standing fixed part to the samples -- which reproduces whatever estimate
+    /// and the fallback in [`Self::fit`] then reproduces whatever estimate
     /// pinned the batch size there, right or wrong. Nothing else in the loop
-    /// moves the batch size, so the model has to ask for the measurement it is
-    /// missing.
+    /// moves the batch size, so the model has to ask.
     fn needs_probe(&self) -> bool {
         self.history.len() == COST_HISTORY && self.batch_variance() < MIN_BATCH_VARIANCE
     }
@@ -543,10 +506,9 @@ fn wait_for_submission(
 /// Renderer is a central part of the raytracer responsible for controlling the
 /// process reporting back progress to the caller
 pub struct Renderer<'a> {
-    /// Only the sample count is retained from the scene. Holding the whole
-    /// `Scene` kept the entire CPU scene graph and every decoded texture
-    /// resident for the life of the render -- on an integrated GPU that is
-    /// the GPU's memory too.
+    /// Only the sample count is retained from the scene: holding the whole
+    /// `Scene` would keep the CPU scene graph and every decoded texture
+    /// resident for the life of the render.
     samples_per_pixel: u32,
     samples_per_batch: u32,
     width: u32,
@@ -589,13 +551,11 @@ pub struct Renderer<'a> {
     post_processors: Vec<PostProcessors>,
     render_config: GpuRenderConfig,
     /// Per-pass GPU timing. `None` unless `SOLSTRALE_GPU_TIMING` is set and the
-    /// device supports timestamp queries, so the ordinary render allocates
-    /// nothing and encodes nothing for it -- see [`GpuTimer`].
+    /// device supports timestamp queries, so the ordinary render allocates and
+    /// encodes nothing for it -- see [`GpuTimer`].
     ///
-    /// Deliberately not surfaced on [`RenderProgress`]: that type
-    /// is public, the field would be an `Option` forever, and filling it would
-    /// oblige a map and a poll every batch for a number no library consumer
-    /// asked for.
+    /// Deliberately not on [`RenderProgress`]: filling it would oblige a map
+    /// and a poll every batch for a number no library consumer asked for.
     timer: Option<GpuTimer>,
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
@@ -612,18 +572,15 @@ impl<'a> Renderer<'a> {
     }
 
     /// As [`Renderer::new`], but compiled as a reference estimator: next-event
-    /// estimation off, so no light is ever sampled or weighed and every emitter
-    /// a BSDF path lands on is taken at full weight, and the firefly clamp
-    /// lifted, so nothing is thrown away on the way.
+    /// estimation off, so every emitter a BSDF path lands on is taken at full
+    /// weight, and the firefly clamp lifted.
     ///
     /// The same integral as [`Renderer::new`] by a route that shares none of
-    /// its light PDFs, none of its MIS weights and none of its bias. Converged,
-    /// the two have to agree -- and that is the only check the suite has on
-    /// those PDFs that does not go through the very PDFs it is checking, which
-    /// is why this is reachable from outside the crate at all.
+    /// its light PDFs, MIS weights or bias. Converged, the two have to agree --
+    /// the only check the suite has on those PDFs that does not go through the
+    /// PDFs it is checking, which is why this is public at all.
     ///
-    /// Far noisier per sample on a scene lit by discrete lights, which is the
-    /// whole reason `SHIPPED_ESTIMATOR` is what it is. For converged
+    /// Far noisier per sample on a scene lit by discrete lights. For converged
     /// comparisons, not for rendering.
     pub fn bsdf_only_reference(
         scene: Scene,
@@ -663,10 +620,9 @@ impl<'a> Renderer<'a> {
         specialisation: Option<Specialisation>,
         estimator: Estimator,
     ) -> Result<Self, Box<dyn Error>> {
-        // A scene lit only by its background is a scene -- a uniform
-        // environment is what a furnace test is made of, and next-event
-        // estimation simply has nothing to sample there. What is rejected is a
-        // scene with no light of either kind, which can only render black.
+        // A scene lit only by its background is fine -- a furnace test is made
+        // of one, and NEE simply has nothing to sample there. What is rejected
+        // is a scene with no light of either kind, which can only render black.
         if !scene.world.has_lights() && scene.background_color.near_zero() {
             return Err(Box::new(SimpleError::new(
                 "Scene should have at least one light or a non-black background",
@@ -759,8 +715,6 @@ impl<'a> Renderer<'a> {
         );
 
         // Blit the atlas using the layout `flatten_scene` already computed.
-        // This used to re-run the identical packing here and rely on it being
-        // deterministic.
         let mut atlas_image;
 
         if let Some(layout) = scene_data.atlas_layout.as_ref() {
@@ -891,11 +845,10 @@ impl<'a> Renderer<'a> {
         // what each one strips.
         let specialisation =
             specialisation.unwrap_or_else(|| Specialisation::from_scene_data(&scene_data));
-        // Nothing but a denoising post-processor opens the G-buffer, so a chain
-        // without one is a whole extra ray per pixel per accumulation run spent
-        // on a buffer that is never read. Asked of the chain rather than
-        // inferred from it, so a post-processor added later cannot silently get
-        // zeroes.
+        // Only a denoising post-processor opens the G-buffer, and filling it
+        // is an extra ray per pixel per accumulation run. Asked of the chain
+        // rather than inferred from it, so a post-processor added later cannot
+        // silently get zeroes.
         let writes_guide = scene
             .render_config
             .post_processors
@@ -973,11 +926,10 @@ impl<'a> Renderer<'a> {
             p.initialize(device, queue, width, height);
         }
 
-        // The post-processing chain runs on a copy, never on the accumulator.
-        // See the comment on PostProcessContext::accumulator for why: a
-        // post-processor writing into output_buffer would feed its own output
-        // back into the next batch's Welford merge. Only allocated when there is
-        // a chain to run, so the default path costs nothing.
+        // The post-processing chain runs on a copy, never on the accumulator:
+        // writing into output_buffer would feed a processor's own output back
+        // into the next batch's Welford merge. Only allocated when there is a
+        // chain to run.
         let post_buffer = if post_processors.is_empty() {
             None
         } else {
@@ -1070,11 +1022,10 @@ impl<'a> Renderer<'a> {
 
             if let Some(config) = latest_camera_config {
                 self.update_camera(&config);
-                // Restart the accumulation. The output buffer deliberately is
+                // Restart the accumulation. The output buffer is deliberately
                 // not cleared: the shader overwrites every pixel it covers when
                 // sample_count is zero, so clearing only costs a dispatch and
-                // leaves a window in which a caller blitting the buffer sees
-                // black.
+                // leaves a window where a caller sees black.
                 completed = 0;
                 // Sample indices restart at zero too, so without a fresh
                 // restart_index the RNG would hand every frame of a camera
@@ -1129,11 +1080,9 @@ impl<'a> Renderer<'a> {
             let last_batch = completed + batch >= samples_per_pixel;
 
             // Refreshed every batch, not just the one the whole chain runs on:
-            // the post buffer is what gets published on RenderProgress, so a
-            // caller watching an unfinished render has to see the accumulated
-            // image there rather than whatever the allocation came with. It is
-            // cheap enough not to be worth a way out -- 0.05 ms of a 10 ms
-            // dispatch at 800x600, which is what `post_copy` is timed for.
+            // the post buffer is what RenderProgress publishes, so a caller
+            // watching an unfinished render has to see the accumulated image
+            // there. 0.05 ms of a 10 ms dispatch at 800x600; see `post_copy`.
             if let Some(post_buffer) = &self.post_buffer {
                 let size = (self.width * self.height) as u64 * crate::post::PIXEL_SIZE;
                 let src = &self.output_buffer;
@@ -1176,12 +1125,10 @@ impl<'a> Renderer<'a> {
             let dispatch_start = Instant::now();
             let submission = self.queue.submit([command_buffer]);
 
-            // Back-pressure. Submissions on a queue execute in order, so
-            // anything left queued here is added directly to the frame latency
-            // of a caller sharing the device -- and without a wait this loop
-            // runs thousands of iterations ahead of the GPU. Waiting also means
-            // the progress reported below describes work that has actually
-            // completed.
+            // Back-pressure. Queued submissions add directly to the frame
+            // latency of a caller sharing the device, and without a wait this
+            // loop runs thousands of iterations ahead of the GPU. Waiting also
+            // makes the progress reported below describe completed work.
             if !wait_for_submission(self.device, &submission, abort)? {
                 return Ok(());
             }
@@ -1216,10 +1163,8 @@ impl<'a> Renderer<'a> {
                     ms_per_sample,
                     samples_per_pixel - completed,
                 ),
-                // Stable for the life of the render -- always the post buffer
-                // when there is a chain, always the accumulator when there is
-                // not -- so a caller caching a bind group per buffer handle
-                // never has to rebuild it between batches.
+                // Stable for the life of the render, so a caller caching a
+                // bind group per buffer handle never rebuilds it.
                 output_buffer: self
                     .post_buffer
                     .as_ref()
@@ -1376,9 +1321,8 @@ mod test {
 
     #[test]
     fn test_dispatch_cost_does_not_collapse_under_queue_latency() {
-        // The measured curve at 1384x784 on a 60 Hz display, where charging the
-        // latency to the samples used to pin the batch size at one and run the
-        // render at a third of the throughput the same machine reaches.
+        // The measured curve at 1384x784 on a 60 Hz display, where charging
+        // the latency to the samples pins the batch size at one.
         let cost_ms = |b: u32, _: usize| 6.0 + 2.5 * b as f64;
         let peak = 1. / 2.5;
 
@@ -1403,11 +1347,9 @@ mod test {
 
     #[test]
     fn test_dispatch_cost_recovers_from_a_warm_up_dispatch() {
-        // The first dispatches of a run pay for shader and allocation warm-up,
-        // and an estimate taken from those alone asks for the smallest batch
-        // there is. Reaching that batch size must not be the end of it: the
-        // dispatch time does not follow the batch size down, and the model has
-        // to keep asking until something says so.
+        // The first dispatches pay for warm-up, and an estimate from those
+        // alone asks for the smallest batch there is. The model has to keep
+        // probing until the dispatch time contradicts it.
         let cost_ms = |b: u32, dispatch: usize| {
             if dispatch < 2 {
                 200.
@@ -1560,9 +1502,8 @@ mod test {
     }
 
     /// A chain that reads the guide, which is what makes the tracer fill it.
-    /// The filter's own output is beside the point here -- both G-buffer tests
-    /// read `Renderer::gbuffer` directly -- but `writes_guide` is compiled from
-    /// what the chain declares, so without one there is nothing to read.
+    /// `writes_guide` is compiled from what the chain declares, so without one
+    /// there is nothing to read back.
     fn guide_reader(device: &wgpu::Device) -> crate::post::PostProcessors {
         crate::post::DenoisePostProcessor::new(1., None, None, device)
             .unwrap()
@@ -1582,11 +1523,10 @@ mod test {
         [v[0] / len, v[1] / len, v[2] / len]
     }
 
-    /// The guide the denoiser reads has to describe the geometry the camera
-    /// actually sees. This pins all four packed slots against a scene whose
-    /// answer is known analytically, which is what catches the two traps in the
-    /// encoding: the octahedral round trip, and using `rec.t` (in units of the
-    /// unnormalised primary ray) where a world-space distance is meant.
+    /// Pins all four packed slots against a scene whose answer is known
+    /// analytically, which catches the two traps in the encoding: the
+    /// octahedral round trip, and using `rec.t` (in units of the unnormalised
+    /// primary ray) where a world-space distance is meant.
     #[test]
     fn test_gbuffer_direct_hit() {
         use crate::camera::CameraConfig;
@@ -1718,17 +1658,13 @@ mod test {
     /// The other half of the same contract: with nothing in the chain reading
     /// the guide, the tracer must not trace it.
     ///
-    /// A guide ray is a whole extra ray per pixel, and a specular one is up to
-    /// seven. On a long render that is one restart against thousands of sample
-    /// paths and no benchmark will ever see it; during a camera drag every
-    /// frame is a restart at one sample per pixel, and it measures 9% of a
-    /// frame on `create_test_scene` at 800x600.
-    /// `interactive_restart_frame_cost` is where that number comes from; this
-    /// pins the mechanism, which is that the override takes `trace_guide` out
-    /// of the module rather than merely skipping a store.
+    /// A guide ray is an extra ray per pixel, and a specular one up to seven --
+    /// 9% of a drag frame on `create_test_scene` at 800x600, per
+    /// `interactive_restart_frame_cost`. This pins the mechanism: the override
+    /// takes `trace_guide` out of the module rather than skipping a store.
     ///
-    /// `ColorOnly` is in here too because it is the trap: it is a denoiser, it
-    /// is bound to the G-buffer, and it reads nothing from it.
+    /// `ColorOnly` is the trap: a denoiser bound to the G-buffer that reads
+    /// nothing from it.
     #[test]
     fn test_guide_is_not_written_without_a_reader() {
         use crate::camera::CameraConfig;
@@ -1832,10 +1768,9 @@ mod test {
         }
     }
 
-    /// The point of `trace_guide`: on a mirror the guide has to describe what is
-    /// reflected, not the mirror. Same analytic approach as above, folded once
-    /// through a mirror so every slot has a different right answer than the
-    /// primary hit would have given.
+    /// The point of `trace_guide`: on a mirror the guide describes what is
+    /// reflected, not the mirror. Folded once through a mirror so every slot
+    /// has a different answer than the primary hit would have given.
     #[test]
     fn test_gbuffer_follows_specular_chain() {
         use crate::camera::CameraConfig;

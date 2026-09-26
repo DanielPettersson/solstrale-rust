@@ -36,12 +36,11 @@ pub struct PostProcessContext<'a> {
     /// and `w` the Welford M2 of the per-sample luminance.
     ///
     /// Read-only, and the reason the chain runs on a copy at all. The render
-    /// loop keeps accumulating into this buffer after post-processing, so a
-    /// write here would feed a filtered mean back into the next batch's Welford
-    /// merge -- blurring the accumulator a little more every batch, destroying
-    /// the variance estimate, and leaving adaptive sampling to retire pixels on
-    /// a fabricated number. That failure is silent and gets worse the longer
-    /// you render.
+    /// loop keeps accumulating into this buffer, so a write here would feed a
+    /// filtered mean back into the next batch's Welford merge: a little more
+    /// blur every batch, a destroyed variance estimate, and adaptive sampling
+    /// retiring pixels on a fabricated number. Silent, and worse the longer you
+    /// render.
     pub accumulator: &'a wgpu::Buffer,
     /// Samples actually accumulated per pixel, `array<u32>`. Diverges from
     /// `samples_completed` wherever adaptive sampling has retired a pixel.
@@ -59,11 +58,9 @@ pub struct PostProcessContext<'a> {
     /// [`GpuTimer`].
     ///
     /// A post-processor passes this down to each of its compute passes, which
-    /// is what names them separately in the report. One that ignores it is
-    /// simply invisible in the numbers, and that is the reason the field is
-    /// here rather than the chain being timed as a single block: the denoiser's
-    /// cost is not one number, it is a prepare, a prefilter, five iterations
-    /// and a resolve.
+    /// is what names them separately in the report. Per-processor rather than
+    /// one block around the chain, because the denoiser's cost is not one
+    /// number: a prepare, a prefilter, five iterations and a resolve.
     pub timer: Option<&'a mut GpuTimer>,
 }
 
@@ -81,10 +78,9 @@ pub trait PostProcessor {
     ///
     /// Only consulted when [`RenderConfig::preview`] is on. Costs a full run of
     /// the processor per batch, so it is for the ones whose absence makes the
-    /// preview misleading rather than merely unstyled -- and the denoiser is
-    /// the case the flag exists for: a camera drag restarts the accumulation
-    /// every frame, so without this the one regime a denoiser is built for is
-    /// the one regime it never ran in.
+    /// preview misleading rather than merely unstyled. The denoiser is the case
+    /// it exists for: a camera drag restarts the accumulation every frame, so
+    /// the preview is always a one-sample image.
     ///
     /// [`RenderConfig::preview`]: crate::renderer::RenderConfig::preview
     fn preview(&self) -> bool {
