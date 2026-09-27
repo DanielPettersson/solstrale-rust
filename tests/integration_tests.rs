@@ -58,14 +58,16 @@ fn test_scene_bloom() {
         width: 200,
         height: 100,
         samples_per_pixel: 100,
+        ..Default::default()
+    };
+    let scene = Scene {
         post_processors: vec![
             BloomPostProcessor::new(0.1, None, Some(3.0), &device)
                 .unwrap()
                 .into(),
         ],
-        ..Default::default()
+        ..create_test_scene(render_config)
     };
-    let scene = create_test_scene(render_config);
 
     render_and_compare_output(scene, "test_scene_bloom", 0.95)
 }
@@ -77,10 +79,12 @@ fn test_scene_saturation() {
         width: 200,
         height: 100,
         samples_per_pixel: 100,
-        post_processors: vec![SaturationPostProcessor::new(-0.7, &device).unwrap().into()],
         ..Default::default()
     };
-    let scene = create_test_scene(render_config);
+    let scene = Scene {
+        post_processors: vec![SaturationPostProcessor::new(-0.7, &device).unwrap().into()],
+        ..create_test_scene(render_config)
+    };
 
     render_and_compare_output(scene, "test_scene_sat", 0.95)
 }
@@ -92,15 +96,17 @@ fn test_scene_bloom_and_saturation() {
         width: 200,
         height: 100,
         samples_per_pixel: 100,
+        ..Default::default()
+    };
+    let scene = Scene {
         post_processors: vec![
             SaturationPostProcessor::new(-0.7, &device).unwrap().into(),
             BloomPostProcessor::new(0.1, None, Some(3.0), &device)
                 .unwrap()
                 .into(),
         ],
-        ..Default::default()
+        ..create_test_scene(render_config)
     };
-    let scene = create_test_scene(render_config);
 
     render_and_compare_output(scene, "test_scene_bloom_sat", 0.95)
 }
@@ -420,6 +426,7 @@ fn test_gpu_scene_sphere() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_sphere", 0.95);
@@ -470,6 +477,7 @@ fn test_gpu_scene_box() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_box", 0.95);
@@ -521,6 +529,7 @@ fn test_gpu_scene_quad() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_quad", 0.95);
@@ -563,6 +572,7 @@ fn test_gpu_scene_sphere2() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_sphere2", 0.95);
@@ -625,6 +635,7 @@ fn test_gpu_scene_sphere_quad_and_triangle() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_sphere_quad_and_triangle", 0.95);
@@ -696,6 +707,7 @@ fn test_gpu_scene_triangle3() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_triangle3", 0.95);
@@ -745,6 +757,7 @@ fn test_gpu_scene_nested_bvh() {
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     };
 
     render_and_compare_output(scene, "gpu_nested_bvh", 0.95);
@@ -1396,15 +1409,6 @@ fn test_post_processors_above_the_1d_dispatch_limit() {
         width,
         height,
         samples_per_pixel: 1,
-        post_processors: vec![
-            DenoisePostProcessor::new(1., Some(1), None, device)
-                .unwrap()
-                .into(),
-            SaturationPostProcessor::new(-0.5, device).unwrap().into(),
-            BloomPostProcessor::new(0.002, None, Some(3.0), device)
-                .unwrap()
-                .into(),
-        ],
         ..Default::default()
     };
 
@@ -1412,7 +1416,18 @@ fn test_post_processors_above_the_1d_dispatch_limit() {
     let (_c, camera_config_receiver) = channel();
     let (_a, abort_receiver) = channel();
     ray_trace(
-        create_test_scene(render_config),
+        Scene {
+            post_processors: vec![
+                DenoisePostProcessor::new(1., Some(1), None, device)
+                    .unwrap()
+                    .into(),
+                SaturationPostProcessor::new(-0.5, device).unwrap().into(),
+                BloomPostProcessor::new(0.002, None, Some(3.0), device)
+                    .unwrap()
+                    .into(),
+            ],
+            ..create_test_scene(render_config)
+        },
         &output_sender,
         &camera_config_receiver,
         &abort_receiver,
@@ -1450,14 +1465,20 @@ fn test_scene_denoise() {
         width: 200,
         height: 100,
         samples_per_pixel: 16,
-        post_processors: vec![
-            DenoisePostProcessor::new(1., None, None, device)
-                .unwrap()
-                .into(),
-        ],
         ..Default::default()
     };
-    render_and_compare_output(create_test_scene(render_config), "denoise", 0.95);
+    render_and_compare_output(
+        Scene {
+            post_processors: vec![
+                DenoisePostProcessor::new(1., None, None, device)
+                    .unwrap()
+                    .into(),
+            ],
+            ..create_test_scene(render_config)
+        },
+        "denoise",
+        0.95,
+    );
 }
 
 #[test]
@@ -1467,17 +1488,23 @@ fn test_scene_denoise_and_bloom() {
         width: 200,
         height: 100,
         samples_per_pixel: 16,
-        post_processors: vec![
-            DenoisePostProcessor::new(1., None, None, device)
-                .unwrap()
-                .into(),
-            BloomPostProcessor::new(0.1, None, None, device)
-                .unwrap()
-                .into(),
-        ],
         ..Default::default()
     };
-    render_and_compare_output(create_test_scene(render_config), "denoise_and_bloom", 0.95);
+    render_and_compare_output(
+        Scene {
+            post_processors: vec![
+                DenoisePostProcessor::new(1., None, None, device)
+                    .unwrap()
+                    .into(),
+                BloomPostProcessor::new(0.1, None, None, device)
+                    .unwrap()
+                    .into(),
+            ],
+            ..create_test_scene(render_config)
+        },
+        "denoise_and_bloom",
+        0.95,
+    );
 }
 
 /// Regression net for the specular guide: most of this frame is a mirror or a
@@ -1491,15 +1518,17 @@ fn test_scene_specular_denoise() {
         width: 200,
         height: 100,
         samples_per_pixel: 16,
-        post_processors: vec![
-            DenoisePostProcessor::new(1., None, None, device)
-                .unwrap()
-                .into(),
-        ],
         ..Default::default()
     };
     render_and_compare_output(
-        create_specular_scene(render_config),
+        Scene {
+            post_processors: vec![
+                DenoisePostProcessor::new(1., None, None, device)
+                    .unwrap()
+                    .into(),
+            ],
+            ..create_specular_scene(render_config)
+        },
         "specular_denoise",
         0.95,
     );
@@ -1517,15 +1546,17 @@ fn denoise_scene(samples_per_pixel: u32, strength: Option<f64>, adaptive: bool) 
         ],
         None => vec![],
     };
-    create_test_scene(RenderConfig {
-        width: 200,
-        height: 100,
-        samples_per_pixel,
-        // Above samples_per_pixel disables adaptive sampling, as the benches do.
-        min_samples_per_pixel: if adaptive { 32 } else { u32::MAX },
+    Scene {
         post_processors,
-        ..Default::default()
-    })
+        ..create_test_scene(RenderConfig {
+            width: 200,
+            height: 100,
+            samples_per_pixel,
+            // Above samples_per_pixel disables adaptive sampling, as the benches do.
+            min_samples_per_pixel: if adaptive { 32 } else { u32::MAX },
+            ..Default::default()
+        })
+    }
 }
 
 /// `denoise_scene`'s counterpart on the specular scene. Adaptive sampling is
@@ -1540,14 +1571,16 @@ fn specular_denoise_scene(samples_per_pixel: u32, strength: Option<f64>) -> Scen
         ],
         None => vec![],
     };
-    create_specular_scene(RenderConfig {
-        width: 200,
-        height: 100,
-        samples_per_pixel,
-        min_samples_per_pixel: 32,
+    Scene {
         post_processors,
-        ..Default::default()
-    })
+        ..create_specular_scene(RenderConfig {
+            width: 200,
+            height: 100,
+            samples_per_pixel,
+            min_samples_per_pixel: 32,
+            ..Default::default()
+        })
+    }
 }
 
 /// `denoise_scene`'s counterpart on the Cornell box, which is the scene that
@@ -1573,14 +1606,16 @@ fn cornell_denoise_scene_at(
         ],
         None => vec![],
     };
-    create_cornell_scene(RenderConfig {
-        width,
-        height,
-        samples_per_pixel,
-        min_samples_per_pixel: u32::MAX,
+    Scene {
         post_processors,
-        ..Default::default()
-    })
+        ..create_cornell_scene(RenderConfig {
+            width,
+            height,
+            samples_per_pixel,
+            min_samples_per_pixel: u32::MAX,
+            ..Default::default()
+        })
+    }
 }
 
 /// The objective gate: denoising a low-sample render must land it measurably
@@ -2568,14 +2603,16 @@ fn gpu_pass_timings() {
     ];
 
     for (spp, name, post_processors, preview) in arms {
-        let scene = create_test_scene(RenderConfig {
-            width: 800,
-            height: 600,
-            samples_per_pixel: spp,
+        let scene = Scene {
             post_processors,
-            preview,
-            ..Default::default()
-        });
+            ..create_test_scene(RenderConfig {
+                width: 800,
+                height: 600,
+                samples_per_pixel: spp,
+                preview,
+                ..Default::default()
+            })
+        };
 
         // Whatever the arm before this one left behind.
         drain_totals();

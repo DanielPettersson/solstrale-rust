@@ -1,8 +1,13 @@
 //! The renderer takes a [`Scene`] as input, renders it and reports [`RenderProgress`]
+//!
+//! A running render also takes [`SceneUpdate`]s, and applies each at the next
+//! batch boundary for what that part of the scene costs to change: a new
+//! sample count may cost nothing, a new camera a restart, and a moved mesh a
+//! re-bake of that mesh and nothing else.
 
 use crate::hittable::Hittable;
 use crate::post::PostProcessor;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -11,14 +16,16 @@ use crate::camera::{Camera, CameraConfig};
 use crate::geo::vec3::Vec3;
 use crate::hittable::Hittables;
 use crate::post::PostProcessors;
-use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig, MAT_BLEND, MAT_DIELECTRIC, MAT_METAL};
-use crate::renderer::scene_flattener::{SceneData, flatten_scene};
+use crate::renderer::gpu_data::{GpuCamera, GpuRenderConfig};
+use crate::renderer::scene_flattener::Features;
+#[cfg(test)]
+use crate::renderer::scene_flattener::SceneData;
+use crate::renderer::world_buffers::GpuWorld;
 use crate::util::gpu_timing::{GpuTimer, report_dispatch};
 use crate::util::wgpu_util::{
     add_compute_pass_2d, bind_group, bind_group_layout, compute_pipeline, sampler_binding,
     shader_module_with_luminance, storage_binding, texture_binding, uniform_binding,
 };
-use image::{DynamicImage, Rgb, RgbImage};
 use simple_error::SimpleError;
 use wgpu::BufferUsages;
 
@@ -29,6 +36,9 @@ mod sampler_test;
 pub mod scene_flattener;
 #[cfg(test)]
 mod specialisation_test;
+#[cfg(test)]
+mod update_test;
+mod world_buffers;
 
 /// How the tracer is compiled when it is not compiled as a reference.
 ///
@@ -56,17 +66,23 @@ struct Estimator {
 
 /// What the tracer is compiled against for one scene.
 ///
-/// Every field is a fact that holds for the life of a [`Renderer`], so it
-/// reaches the shader as an override constant rather than a uniform: naga
-/// substitutes overrides before emitting SPIR-V, so a `false` deletes the
-/// branch it guards. Each flag removes a branch the scene could never have
-/// taken, so none of them changes a sample -- the invariant
-/// `specialisation_test` holds the whole thing to.
+/// Every field is a fact about the world being traced, so it reaches the
+/// shader as an override constant rather than a uniform: naga substitutes
+/// overrides before emitting SPIR-V, so a `false` deletes the branch it guards.
+/// Each flag removes a branch the scene could never have taken, so none of them
+/// changes a sample -- the invariant `specialisation_test` holds the whole
+/// thing to.
+///
+/// A world update that changes any of them takes a pipeline compiled for the
+/// new set, from [`Renderer`]'s cache when it has been seen before. There is no
+/// reusing a pipeline compiled for a superset: a stale rough-dielectric arm
+/// alone takes `test_scene` from 128 to 168 VGPRs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Specialisation {
     has_spheres: bool,
     has_quads: bool,
-    /// See [`SceneData::prim_refs_are_identity`], which this is taken from.
+    /// See [`SceneData::prim_refs_are_identity`](scene_flattener::SceneData::prim_refs_are_identity),
+    /// which this agrees with.
     identity_prim_refs: bool,
     has_blends: bool,
     has_metal: bool,
@@ -76,37 +92,36 @@ struct Specialisation {
     has_rough_dielectrics: bool,
     has_textures: bool,
     has_normal_maps: bool,
-    light_count: u32,
+    /// Whether next-event estimation has anything to sample. The count itself
+    /// is a uniform, so adding a light to a lit scene compiles nothing.
+    has_lights: bool,
 }
 
 impl Specialisation {
-    fn from_scene_data(data: &SceneData) -> Self {
-        // Blend children are flattened into `materials` by `add_material`, so
-        // one pass over it sees the materials inside a blend as well as the
-        // ones a primitive names directly.
-        let any = |f: fn(&gpu_data::Material) -> bool| data.materials.iter().any(f);
-
+    fn from_features(f: Features, light_count: u32) -> Self {
         Specialisation {
-            has_spheres: !data.spheres.is_empty(),
-            has_quads: !data.quad_pos.is_empty(),
-            identity_prim_refs: data.prim_refs_are_identity,
-            has_blends: any(|m| m.mat_type == MAT_BLEND),
-            has_metal: any(|m| m.mat_type == MAT_METAL),
-            has_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC),
-            // Any roughness at all, not a threshold: the shader still routes
-            // a roughness below `GGX_ALPHA_MIN` down the Dirac path, so this
-            // only has to be conservative.
-            has_rough_dielectrics: any(|m| m.mat_type == MAT_DIELECTRIC && m.fuzz > 0.),
-            has_textures: any(|m| m.texture_index >= 0),
-            has_normal_maps: any(|m| m.normal_texture_index >= 0),
-            light_count: data.lights.len() as u32,
+            has_spheres: f.has(Features::SPHERES),
+            has_quads: f.has(Features::QUADS),
+            identity_prim_refs: !f.has(Features::SPHERES) && !f.has(Features::QUADS),
+            has_blends: f.has(Features::BLENDS),
+            has_metal: f.has(Features::METAL),
+            has_dielectrics: f.has(Features::DIELECTRICS),
+            has_rough_dielectrics: f.has(Features::ROUGH_DIELECTRICS),
+            has_textures: f.has(Features::TEXTURES),
+            has_normal_maps: f.has(Features::NORMAL_MAPS),
+            has_lights: light_count > 0,
         }
+    }
+
+    #[cfg(test)]
+    fn from_scene_data(data: &SceneData) -> Self {
+        Self::from_features(data.features, data.lights.len() as u32)
     }
 
     /// The tracer with nothing stripped: every branch left in, which is what
     /// the defaults in `ray_trace.wgsl` already are.
     #[cfg(test)]
-    fn unspecialised(light_count: u32) -> Self {
+    fn unspecialised() -> Self {
         Specialisation {
             has_spheres: true,
             has_quads: true,
@@ -117,7 +132,7 @@ impl Specialisation {
             has_rough_dielectrics: true,
             has_textures: true,
             has_normal_maps: true,
-            light_count,
+            has_lights: true,
         }
     }
 
@@ -136,7 +151,7 @@ impl Specialisation {
         vec![
             ("width", width as f64),
             ("height", height as f64),
-            ("light_count", self.light_count as f64),
+            ("has_lights", flag(self.has_lights)),
             ("has_spheres", flag(self.has_spheres)),
             ("has_quads", flag(self.has_quads)),
             ("identity_prim_refs", flag(self.identity_prim_refs)),
@@ -155,7 +170,7 @@ impl Specialisation {
 }
 
 ///Input to the ray tracer for how the image should be rendered
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderConfig {
     /// Width in pixels of the rendered image
     pub width: usize,
@@ -223,9 +238,10 @@ pub struct RenderConfig {
     /// sample stream -- with `low_discrepancy` on, an 8-sample render is
     /// literally a sub-net of a 4000-sample reference -- so the error between
     /// them is correlated and biased low.
+    ///
+    /// Updating a running render to a new seed renders what building one with
+    /// that seed would.
     pub seed: u32,
-    /// Post processor to apply to the rendered image
-    pub post_processors: Vec<PostProcessors>,
     /// Whether the post-processors that declare themselves preview processors
     /// run on every batch, or only on the last one.
     ///
@@ -263,7 +279,6 @@ impl Default for RenderConfig {
             variance_threshold: 0.01,
             low_discrepancy: true,
             seed: 0,
-            post_processors: vec![],
             preview: false,
         }
     }
@@ -279,6 +294,100 @@ pub struct Scene {
     pub background_color: Vec3,
     /// Render configuration
     pub render_config: RenderConfig,
+    /// Post processors to apply to the rendered image, in order.
+    ///
+    /// Beside [`RenderConfig`] rather than in it: a processor's parameters are
+    /// baked into its pipelines when it is built, so a chain cannot be compared,
+    /// only replaced, and a new sample count should not have to replace it.
+    pub post_processors: Vec<PostProcessors>,
+}
+
+/// A change to the scene a render is running on, sent to it while it runs.
+///
+/// Every part left `None` stays as it is. Parts are applied together, at the
+/// next batch boundary, each for what it costs to change:
+///
+/// | outcome | parts |
+/// |---|---|
+/// | nothing | `samples_per_batch`, `preview` |
+/// | the accumulation continues | `samples_per_pixel` raised, `min_samples_per_pixel`, `variance_threshold` |
+/// | the finished image is republished through the full chain | `samples_per_pixel` lowered to what is already done, `post_processors` |
+/// | the accumulation restarts | `camera`, `background_color`, `max_depth`, `low_discrepancy`, `seed`, `width`, `height`, `world` |
+///
+/// A new chain that reads the denoiser's guide restarts too, since the guide
+/// is only traced on a restart.
+///
+/// A `world` is uploaded for what changed in it rather than whole: a subtree
+/// [`Bvh`](crate::hittable::Bvh) the render already has costs nothing, and one
+/// made by [`Bvh::transformed`](crate::hittable::Bvh::transformed) from it is
+/// written over it in place. The primitives outside every subtree are laid out
+/// again on every world update.
+///
+/// A world that leaves the scene with no light and a black background renders
+/// black, rather than ending the render as [`Renderer::new`] would refuse it:
+/// an editor passes through that state every time its last light is deleted.
+///
+/// ```
+/// # use solstrale::camera::CameraConfig;
+/// # use solstrale::geo::vec3::Vec3;
+/// # use solstrale::renderer::SceneUpdate;
+/// let camera_only: SceneUpdate = CameraConfig::default().into();
+///
+/// let mut background = SceneUpdate::default();
+/// background.background_color = Some(Vec3::new(0.1, 0.1, 0.1));
+/// ```
+#[derive(Default)]
+#[non_exhaustive]
+pub struct SceneUpdate {
+    /// A new camera.
+    pub camera: Option<CameraConfig>,
+    /// A new background colour.
+    pub background_color: Option<Vec3>,
+    /// A new render configuration, compared field by field against the one
+    /// the render has.
+    pub render_config: Option<RenderConfig>,
+    /// A new post-processing chain.
+    pub post_processors: Option<Vec<PostProcessors>>,
+    /// A new world.
+    pub world: Option<Hittables>,
+}
+
+impl SceneUpdate {
+    /// Folds a later update into this one, the later one winning wherever both
+    /// set a part.
+    pub fn merge(&mut self, later: SceneUpdate) {
+        fn take<T>(into: &mut Option<T>, later: Option<T>) {
+            if later.is_some() {
+                *into = later;
+            }
+        }
+        take(&mut self.camera, later.camera);
+        take(&mut self.background_color, later.background_color);
+        take(&mut self.render_config, later.render_config);
+        take(&mut self.post_processors, later.post_processors);
+        take(&mut self.world, later.world);
+    }
+}
+
+impl From<CameraConfig> for SceneUpdate {
+    fn from(camera: CameraConfig) -> Self {
+        SceneUpdate {
+            camera: Some(camera),
+            ..Default::default()
+        }
+    }
+}
+
+impl From<Scene> for SceneUpdate {
+    fn from(scene: Scene) -> Self {
+        SceneUpdate {
+            camera: Some(scene.camera),
+            background_color: Some(scene.background_color),
+            render_config: Some(scene.render_config),
+            post_processors: Some(scene.post_processors),
+            world: Some(scene.world),
+        }
+    }
 }
 
 /// Progress reported back to the caller of the raytrace function
@@ -289,8 +398,19 @@ pub struct RenderProgress {
     pub fps: Option<f64>,
     /// Estimated time left until rendering is complete
     pub estimated_time_left: Duration,
-    /// Output buffer containing the image data
+    /// Output buffer containing the image data, `width * height` pixels of
+    /// `vec4<f32>`.
+    ///
+    /// The same buffer from one progress report to the next, so a caller
+    /// caching a bind group per buffer handle rarely rebuilds it -- but not for
+    /// the life of the render: a new size, or a chain that becomes empty or
+    /// stops being so, publishes a different buffer.
     pub output_buffer: wgpu::Buffer,
+    /// Width of the image in `output_buffer`, which is what a caller should
+    /// take its stride from rather than from what it asked for.
+    pub width: u32,
+    /// Height of the image in `output_buffer`.
+    pub height: u32,
 }
 
 /// Wall clock budget for the *work* a single dispatch adds, roughly one vsync
@@ -503,51 +623,55 @@ fn wait_for_submission(
     }
 }
 
+/// Pipelines a renderer keeps compiled, keyed on their full override set. A
+/// drag that toggles a light on and off, or a resize back and forth, then
+/// compiles each set once.
+const PIPELINE_CACHE: usize = 16;
+
+/// What applying a [`SceneUpdate`] asks of the render loop.
+#[derive(Default)]
+struct Outcome {
+    /// The accumulation starts again from nothing.
+    restart: bool,
+    /// What a dispatch costs has changed enough that the model should start
+    /// again too. Not on a camera or background change, which the model
+    /// deliberately survives: it is dominated by the scene, not the view.
+    reset_cost: bool,
+    /// The chain runs once on the accumulator as it is, if it is finished.
+    republish: bool,
+}
+
 /// Renderer is a central part of the raytracer responsible for controlling the
 /// process reporting back progress to the caller
+///
+/// Nothing of the CPU scene is kept: holding it would keep the scene graph and
+/// every decoded texture resident for the life of the render. What a
+/// [`SceneUpdate`] needs to recognise an unchanged subtree is held weakly.
 pub struct Renderer<'a> {
-    /// Only the sample count is retained from the scene: holding the whole
-    /// `Scene` would keep the CPU scene graph and every decoded texture
-    /// resident for the life of the render.
-    samples_per_pixel: u32,
-    samples_per_batch: u32,
+    config: RenderConfig,
+    camera: CameraConfig,
     width: u32,
     height: u32,
-    #[allow(dead_code)]
+    estimator: Estimator,
+    /// What the tracer is compiled against instead of what the world says;
+    /// only `specialisation_test` sets it.
+    forced_specialisation: Option<Specialisation>,
+    module: wgpu::ShaderModule,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
+    pipeline_key: Vec<(&'static str, u64)>,
+    pipelines: HashMap<Vec<(&'static str, u64)>, wgpu::ComputePipeline>,
+    world: GpuWorld,
+    sampler: wgpu::Sampler,
     output_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
     sample_count_buffer: wgpu::Buffer,
     gbuffer: wgpu::Buffer,
     /// Scratch copy the post-processing chain runs on, so the accumulator is
     /// never written by a post-processor. `None` when there is no chain.
     post_buffer: Option<wgpu::Buffer>,
-    /// See [`RenderConfig::preview`].
-    preview: bool,
     bind_group: wgpu::BindGroup,
-    #[allow(dead_code)]
-    nodes_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    spheres_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    triangle_pos_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    triangle_attr_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    quad_pos_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    quad_attr_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    materials_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
     camera_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
     config_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    lights_buffer: wgpu::Buffer,
-    #[allow(dead_code)]
-    prim_refs_buffer: wgpu::Buffer,
     post_processors: Vec<PostProcessors>,
     render_config: GpuRenderConfig,
     /// Per-pass GPU timing. `None` unless `SOLSTRALE_GPU_TIMING` is set and the
@@ -557,6 +681,9 @@ pub struct Renderer<'a> {
     /// Deliberately not on [`RenderProgress`]: filling it would oblige a map
     /// and a poll every batch for a number no library consumer asked for.
     timer: Option<GpuTimer>,
+    /// Times the whole chain has run, for the tests that say how often it must.
+    #[cfg(test)]
+    chain_runs: u32,
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
 }
@@ -617,162 +744,34 @@ impl<'a> Renderer<'a> {
         scene: Scene,
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
-        specialisation: Option<Specialisation>,
+        forced_specialisation: Option<Specialisation>,
         estimator: Estimator,
     ) -> Result<Self, Box<dyn Error>> {
         // A scene lit only by its background is fine -- a furnace test is made
         // of one, and NEE simply has nothing to sample there. What is rejected
         // is a scene with no light of either kind, which can only render black.
+        // Only here: an update to such a scene renders it black instead.
         if !scene.world.has_lights() && scene.background_color.near_zero() {
             return Err(Box::new(SimpleError::new(
                 "Scene should have at least one light or a non-black background",
             )));
         }
 
-        let width = scene.render_config.width as u32;
-        let height = scene.render_config.height as u32;
+        let Scene {
+            world,
+            camera,
+            background_color,
+            render_config: config,
+            post_processors,
+        } = scene;
+        let width = config.width as u32;
+        let height = config.height as u32;
 
         let module =
             shader_module_with_luminance(device, "ray_trace.wgsl", include_str!("ray_trace.wgsl"));
 
-        // Flatten scene
-        let scene_data = flatten_scene(&scene);
-
-        // Create buffers
-        let nodes_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Nodes Buffer",
-            &scene_data.nodes,
-            BufferUsages::STORAGE,
-        );
-        let prim_refs_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Prim Refs Buffer",
-            &scene_data.prim_refs,
-            BufferUsages::STORAGE,
-        );
-        let spheres_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Spheres Buffer",
-            &scene_data.spheres,
-            BufferUsages::STORAGE,
-        );
-        let triangle_pos_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Triangle Positions Buffer",
-            &scene_data.triangle_pos,
-            BufferUsages::STORAGE,
-        );
-        let triangle_attr_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Triangle Attributes Buffer",
-            &scene_data.triangle_attr,
-            BufferUsages::STORAGE,
-        );
-        let quad_pos_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Quad Positions Buffer",
-            &scene_data.quad_pos,
-            BufferUsages::STORAGE,
-        );
-        // Empty unless the scene can present a rough dielectric, in which case
-        // it is one 512-entry table per distinct index of refraction.
-        // `create_and_upload_buffer` pads an empty slice up to a valid binding.
-        let dielectric_energy_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Dielectric Energy Buffer",
-            &scene_data.dielectric_energy,
-            BufferUsages::STORAGE,
-        );
-
-        let quad_attr_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Quad Attributes Buffer",
-            &scene_data.quad_attr,
-            BufferUsages::STORAGE,
-        );
-        let materials_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Materials Buffer",
-            &scene_data.materials,
-            BufferUsages::STORAGE,
-        );
-        let lights_buffer = create_and_upload_buffer(
-            device,
-            queue,
-            "Lights Buffer",
-            &scene_data.lights,
-            BufferUsages::STORAGE,
-        );
-
-        // Blit the atlas using the layout `flatten_scene` already computed.
-        let mut atlas_image;
-
-        if let Some(layout) = scene_data.atlas_layout.as_ref() {
-            atlas_image = RgbImage::new(layout.width, layout.height);
-
-            for placement in layout.placements.iter() {
-                let texture = &scene_data.textures[placement.original_index];
-                image::imageops::replace(
-                    &mut atlas_image,
-                    texture.as_ref(),
-                    placement.x as i64,
-                    placement.y as i64,
-                );
-            }
-        } else {
-            // Create a 1x1 white pixel if no textures, just to have valid binding
-            atlas_image = RgbImage::from_pixel(1, 1, Rgb([255, 255, 255]));
-        }
-
-        let texture_extent = wgpu::Extent3d {
-            width: atlas_image.width(),
-            height: atlas_image.height(),
-            depth_or_array_layers: 1,
-        };
-
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Texture Atlas"),
-            size: texture_extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let atlas_rgba = DynamicImage::ImageRgb8(atlas_image).to_rgba8();
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &atlas_rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * atlas_rgba.width()),
-                rows_per_image: Some(atlas_rgba.height()),
-            },
-            texture_extent,
-        );
-
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2),
-            ..Default::default()
-        });
+        let world_buffers = GpuWorld::new(device, queue, &world);
+        drop_elsewhere(world);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -784,30 +783,32 @@ impl<'a> Renderer<'a> {
             ..Default::default()
         });
 
-        let camera_inst = Camera::new(width as usize, height as usize, &scene.camera);
-
-        let gpu_camera = camera_to_gpu(&camera_inst);
         let camera_buffer = create_and_upload_buffer(
             device,
             queue,
             "Camera Buffer",
-            &[gpu_camera],
+            &[camera_to_gpu(&Camera::new(
+                width as usize,
+                height as usize,
+                &camera,
+            ))],
             BufferUsages::UNIFORM | BufferUsages::COPY_SRC,
         );
 
         let render_config = GpuRenderConfig {
             sample_count: 0,
-            max_depth: scene.render_config.max_depth.max(1),
-            samples_per_batch: scene.render_config.samples_per_batch.max(1),
-            min_samples_per_pixel: scene.render_config.min_samples_per_pixel,
+            max_depth: config.max_depth.max(1),
+            samples_per_batch: config.samples_per_batch.max(1),
+            min_samples_per_pixel: config.min_samples_per_pixel,
             background_color: [
-                scene.background_color.x as f32,
-                scene.background_color.y as f32,
-                scene.background_color.z as f32,
+                background_color.x as f32,
+                background_color.y as f32,
+                background_color.z as f32,
             ],
-            variance_threshold: scene.render_config.variance_threshold,
-            restart_index: scene.render_config.seed,
-            _padding: [0; 3],
+            variance_threshold: config.variance_threshold,
+            restart_index: config.seed,
+            light_count: world_buffers.light_count,
+            _padding: [0; 2],
         };
         let config_buffer = create_and_upload_buffer(
             device,
@@ -840,213 +841,461 @@ impl<'a> Renderer<'a> {
             ],
         );
 
-        // Everything the tracer is specialised on. See [`Specialisation`] for
-        // why these are overrides and not uniforms, and `ray_trace.wgsl` for
-        // what each one strips.
-        let specialisation =
-            specialisation.unwrap_or_else(|| Specialisation::from_scene_data(&scene_data));
-        // Only a denoising post-processor opens the G-buffer, and filling it
-        // is an extra ray per pixel per accumulation run. Asked of the chain
-        // rather than inferred from it, so a post-processor added later cannot
-        // silently get zeroes.
-        let writes_guide = scene
-            .render_config
-            .post_processors
-            .iter()
-            .any(|p| p.needs_guide());
-        let pipeline = compute_pipeline(
-            device,
-            &bind_group_layout,
-            &module,
-            &specialisation.constants(
-                width,
-                height,
-                scene.render_config.low_discrepancy,
-                estimator,
-                writes_guide,
-            ),
+        let (output_buffer, sample_count_buffer, gbuffer) = pixel_buffers(device, width, height);
+
+        let specialisation = forced_specialisation.unwrap_or_else(|| {
+            Specialisation::from_features(world_buffers.features, world_buffers.light_count)
+        });
+        // Only a denoising post-processor opens the G-buffer; see `writes_guide`.
+        let writes_guide = post_processors.iter().any(|p| p.needs_guide());
+        let constants = specialisation.constants(
+            width,
+            height,
+            config.low_discrepancy,
+            estimator,
+            writes_guide,
         );
-
-        let size = (width * height * 16) as u64; // vec3 is 16 bytes aligned (as vec4 effectively)
-
-        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Output Buffer"),
-            size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Actual accumulated sample count per pixel, used by adaptive sampling
-        // to skip converged pixels. Its initial contents are never read as-is:
-        // the shader always resets a pixel's count when `sample_count == 0`.
-        let sample_count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Sample Count Buffer"),
-            size: (width * height * 4) as u64,
-            usage: BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        // Primary-hit albedo, normal and camera distance, packed 16 bytes per
-        // pixel. Written by the tracer on the first dispatch of an accumulation
-        // run and read only by a denoising post-processor. COPY_SRC so tests can
-        // read it back.
-        let gbuffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Guide Buffer"),
-            size: (width * height * 16) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let pipeline = compute_pipeline(device, &bind_group_layout, &module, &constants);
+        let pipeline_key = key_of(&constants);
 
         let bind_group = bind_group(
             device,
             &bind_group_layout,
-            &[
-                wgpu::BindingResource::Buffer(output_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(nodes_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(spheres_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(triangle_pos_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(quad_pos_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(materials_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(camera_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(config_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::TextureView(&texture_view),
-                wgpu::BindingResource::Sampler(&sampler),
-                wgpu::BindingResource::Buffer(lights_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(prim_refs_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(triangle_attr_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(quad_attr_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(sample_count_buffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(gbuffer.as_entire_buffer_binding()),
-                wgpu::BindingResource::Buffer(dielectric_energy_buffer.as_entire_buffer_binding()),
-            ],
+            &bindings(
+                &world_buffers,
+                &sampler,
+                &output_buffer,
+                &sample_count_buffer,
+                &gbuffer,
+                &camera_buffer,
+                &config_buffer,
+            ),
         );
 
-        let mut post_processors = scene.render_config.post_processors.clone();
-        for p in &mut post_processors {
-            p.initialize(device, queue, width, height);
-        }
-
-        // The post-processing chain runs on a copy, never on the accumulator:
-        // writing into output_buffer would feed a processor's own output back
-        // into the next batch's Welford merge. Only allocated when there is a
-        // chain to run.
-        let post_buffer = if post_processors.is_empty() {
-            None
-        } else {
-            Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Post Process Buffer"),
-                size,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }))
-        };
-
-        Ok(Renderer {
+        let mut renderer = Renderer {
+            config,
+            camera,
             width,
             height,
+            estimator,
+            forced_specialisation,
+            module,
             bind_group_layout,
-            samples_per_pixel: scene.render_config.samples_per_pixel,
-            samples_per_batch: scene.render_config.samples_per_batch.max(1),
+            pipelines: HashMap::from([(pipeline_key.clone(), pipeline.clone())]),
             pipeline,
+            pipeline_key,
+            world: world_buffers,
+            sampler,
             output_buffer,
             sample_count_buffer,
             gbuffer,
-            post_buffer,
-            preview: scene.render_config.preview,
+            post_buffer: None,
             bind_group,
-            nodes_buffer,
-            spheres_buffer,
-            triangle_pos_buffer,
-            triangle_attr_buffer,
-            quad_pos_buffer,
-            quad_attr_buffer,
-            materials_buffer,
             camera_buffer,
             config_buffer,
-            lights_buffer,
-            prim_refs_buffer,
-            post_processors,
+            post_processors: Vec::new(),
             render_config,
             timer: GpuTimer::new(device, queue),
+            #[cfg(test)]
+            chain_runs: 0,
             device,
             queue,
-        })
+        };
+        renderer.set_post_processors(post_processors);
+        // Everything above was written through the queue, which wgpu stages
+        // until the next submit and keeps pinned until then: a sponza-sized
+        // scene is ~270 MB of VRAM and ~200 MB of staging. A renderer dropped
+        // without rendering would otherwise hold it until someone else
+        // submits, and a loop of them runs a shared GPU out of memory -- the
+        // compositor's included.
+        queue.submit([]);
+        Ok(renderer)
     }
 
     /// Updates the camera buffer with a new camera configuration
     pub fn update_camera(&mut self, camera_config: &CameraConfig) {
-        let camera_inst = Camera::new(self.width as usize, self.height as usize, camera_config);
+        self.camera = *camera_config;
+        self.write_camera();
+    }
+
+    fn write_camera(&self) {
+        let camera_inst = Camera::new(self.width as usize, self.height as usize, &self.camera);
         let gpu_camera = camera_to_gpu(&camera_inst);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[gpu_camera]));
     }
 
+    /// Only a denoising post-processor opens the G-buffer, and filling it is
+    /// an extra ray per pixel per accumulation run. Asked of the chain rather
+    /// than inferred from it, so a post-processor added later cannot silently
+    /// get zeroes.
+    fn writes_guide(&self) -> bool {
+        self.post_processors.iter().any(|p| p.needs_guide())
+    }
+
+    /// Takes the pipeline for the current world, size and chain, compiling it
+    /// only if no earlier one was compiled for the same override set. Returns
+    /// whether it changed.
+    fn select_pipeline(&mut self) -> bool {
+        let specialisation = self.forced_specialisation.unwrap_or_else(|| {
+            Specialisation::from_features(self.world.features, self.world.light_count)
+        });
+        // Everything the tracer is specialised on. See [`Specialisation`] for
+        // why these are overrides and not uniforms, and `ray_trace.wgsl` for
+        // what each one strips.
+        let constants = specialisation.constants(
+            self.width,
+            self.height,
+            self.config.low_discrepancy,
+            self.estimator,
+            self.writes_guide(),
+        );
+        let key = key_of(&constants);
+        if key == self.pipeline_key {
+            return false;
+        }
+
+        let pipeline = match self.pipelines.get(&key) {
+            Some(p) => p.clone(),
+            None => {
+                let p = compute_pipeline(
+                    self.device,
+                    &self.bind_group_layout,
+                    &self.module,
+                    &constants,
+                );
+                if self.pipelines.len() >= PIPELINE_CACHE {
+                    let current = &self.pipeline_key;
+                    let evict = self.pipelines.keys().find(|k| *k != current).cloned();
+                    if let Some(evict) = evict {
+                        self.pipelines.remove(&evict);
+                    }
+                }
+                self.pipelines.insert(key.clone(), p.clone());
+                p
+            }
+        };
+        self.pipeline = pipeline;
+        self.pipeline_key = key;
+        true
+    }
+
+    fn rebuild_bind_group(&mut self) {
+        self.bind_group = bind_group(
+            self.device,
+            &self.bind_group_layout,
+            &bindings(
+                &self.world,
+                &self.sampler,
+                &self.output_buffer,
+                &self.sample_count_buffer,
+                &self.gbuffer,
+                &self.camera_buffer,
+                &self.config_buffer,
+            ),
+        );
+    }
+
+    /// Replaces the chain, initialised at the current size, and keeps the
+    /// scratch buffer it runs on in step with whether there is one.
+    fn set_post_processors(&mut self, mut chain: Vec<PostProcessors>) {
+        for p in &mut chain {
+            p.initialize(self.device, self.queue, self.width, self.height);
+        }
+        self.post_processors = chain;
+        // The post-processing chain runs on a copy, never on the accumulator:
+        // writing into output_buffer would feed a processor's own output back
+        // into the next batch's Welford merge. Only allocated when there is a
+        // chain to run.
+        if self.post_processors.is_empty() {
+            self.post_buffer = None;
+        } else if self.post_buffer.is_none() {
+            self.post_buffer = Some(post_buffer(self.device, self.width, self.height));
+        }
+    }
+
+    /// Applies an update, in dependency order: the size first, then the
+    /// camera, whose projection needs the aspect ratio.
+    fn apply(&mut self, update: SceneUpdate, completed: u32) -> Outcome {
+        let mut outcome = Outcome::default();
+        let mut camera_dirty = false;
+        let mut rebind = false;
+        let mut pipeline_dirty = false;
+        let mut seeded = false;
+
+        if let Some(config) = update.render_config {
+            let old = std::mem::replace(&mut self.config, config);
+            let new = &self.config;
+            if (new.width, new.height) != (old.width, old.height) {
+                self.width = new.width as u32;
+                self.height = new.height as u32;
+                (self.output_buffer, self.sample_count_buffer, self.gbuffer) =
+                    pixel_buffers(self.device, self.width, self.height);
+                if self.post_buffer.is_some() {
+                    self.post_buffer = Some(post_buffer(self.device, self.width, self.height));
+                }
+                // Width and height are override constants of every
+                // post-processor's pipelines too.
+                for p in &mut self.post_processors {
+                    p.initialize(self.device, self.queue, self.width, self.height);
+                }
+                camera_dirty = true;
+                rebind = true;
+                pipeline_dirty = true;
+                outcome.restart = true;
+                outcome.reset_cost = true;
+            }
+            if new.max_depth != old.max_depth {
+                self.render_config.max_depth = new.max_depth.max(1);
+                outcome.restart = true;
+                outcome.reset_cost = true;
+            }
+            if new.low_discrepancy != old.low_discrepancy {
+                pipeline_dirty = true;
+                outcome.restart = true;
+            }
+            if new.seed != old.seed {
+                self.render_config.restart_index = new.seed;
+                seeded = true;
+                outcome.restart = true;
+            }
+            // The Welford state stays valid under both, and adaptive skipping
+            // is decided again on every dispatch.
+            self.render_config.min_samples_per_pixel = new.min_samples_per_pixel;
+            self.render_config.variance_threshold = new.variance_threshold;
+            // A render already past its new sample count would otherwise go
+            // idle without ever running the last batch's chain.
+            if new.samples_per_pixel < old.samples_per_pixel && new.samples_per_pixel <= completed {
+                outcome.republish = true;
+            }
+        }
+
+        if let Some(camera) = update.camera {
+            self.camera = camera;
+            camera_dirty = true;
+            outcome.restart = true;
+        }
+        if camera_dirty {
+            self.write_camera();
+        }
+
+        if let Some(background) = update.background_color {
+            self.render_config.background_color = [
+                background.x as f32,
+                background.y as f32,
+                background.z as f32,
+            ];
+            outcome.restart = true;
+        }
+
+        if let Some(chain) = update.post_processors {
+            let guided = self.writes_guide();
+            self.set_post_processors(chain);
+            let guide = self.writes_guide();
+            if guide != guided {
+                pipeline_dirty = true;
+            }
+            // The guide is only traced on a restart.
+            if guide && !guided {
+                outcome.restart = true;
+            }
+            outcome.republish = true;
+        }
+
+        if let Some(world) = update.world {
+            self.world.update(self.device, self.queue, &world);
+            drop_elsewhere(world);
+            self.render_config.light_count = self.world.light_count;
+            rebind = true;
+            pipeline_dirty = true;
+            outcome.restart = true;
+            outcome.reset_cost = true;
+        }
+
+        if pipeline_dirty && self.select_pipeline() {
+            outcome.reset_cost = true;
+        }
+        if rebind {
+            self.rebuild_bind_group();
+        }
+        if outcome.restart && !seeded {
+            // Sample indices restart at zero too, so without a fresh
+            // restart_index the RNG would hand every frame of a camera drag the
+            // identical sample sequence.
+            self.render_config.restart_index = self.render_config.restart_index.wrapping_add(1);
+        }
+        outcome
+    }
+
+    /// Records the chain onto `encoder`, on a fresh copy of the accumulator.
+    /// `full` runs every processor, which is what the last batch does;
+    /// otherwise only the preview ones run, and only with `preview` on.
+    fn encode_chain(&mut self, encoder: &mut wgpu::CommandEncoder, completed: u32, full: bool) {
+        let Some(post_buffer) = &self.post_buffer else {
+            return;
+        };
+        // Refreshed every batch, not just the one the whole chain runs on: the
+        // post buffer is what RenderProgress publishes, so a caller watching an
+        // unfinished render has to see the accumulated image there. 0.05 ms of
+        // a 10 ms dispatch at 800x600; see `post_copy`.
+        let size = (self.width * self.height) as u64 * crate::post::PIXEL_SIZE;
+        let src = &self.output_buffer;
+        let copy = |encoder: &mut wgpu::CommandEncoder| {
+            encoder.copy_buffer_to_buffer(src, 0, post_buffer, 0, size);
+        };
+        match self.timer.as_mut() {
+            Some(timer) => timer.encoder_scope(encoder, "post_copy", copy),
+            None => copy(encoder),
+        }
+
+        let mut ctx = crate::post::PostProcessContext {
+            encoder,
+            buffer: post_buffer,
+            accumulator: &self.output_buffer,
+            sample_count_buffer: &self.sample_count_buffer,
+            gbuffer: &self.gbuffer,
+            samples_completed: completed,
+            device: self.device,
+            timer: self.timer.as_mut(),
+        };
+        // On any batch but the last, only the processors that say they belong
+        // in a preview. A drag never reaches a last batch: every frame of one
+        // restarts the accumulation, so this is the only path on which a moving
+        // camera is ever filtered at all.
+        for p in &self.post_processors {
+            if full || (self.config.preview && p.preview()) {
+                // A processor's own encoding does not fail on anything but a
+                // programming error, which is worth a panic in the loop.
+                p.post_process(&mut ctx)
+                    .expect("post-processor failed to encode");
+            }
+        }
+        #[cfg(test)]
+        if full {
+            self.chain_runs += 1;
+        }
+    }
+
+    fn progress(&self, completed: u32, ms_per_sample: f64) -> RenderProgress {
+        let samples_per_pixel = self.config.samples_per_pixel;
+        RenderProgress {
+            progress: (completed as f64 / samples_per_pixel.max(1) as f64).min(1.),
+            fps: Some(1000. / ms_per_sample.max(MIN_SLOPE)),
+            estimated_time_left: calculate_estimated_time_left(
+                ms_per_sample,
+                samples_per_pixel.saturating_sub(completed),
+            ),
+            output_buffer: self
+                .post_buffer
+                .as_ref()
+                .unwrap_or(&self.output_buffer)
+                .clone(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// Runs the whole chain on the accumulator as it stands and publishes the
+    /// result: what a finished render owes a caller whose change left it with
+    /// nothing more to trace.
+    fn republish(
+        &mut self,
+        output: &Sender<RenderProgress>,
+        completed: u32,
+        cost: &DispatchCost,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        self.encode_chain(&mut encoder, completed, true);
+        if let Some(timer) = &self.timer {
+            timer.resolve(&mut encoder);
+        }
+        self.queue.submit([encoder.finish()]);
+        if let Some(timer) = &mut self.timer {
+            timer.take(self.device);
+        }
+        output.send(self.progress(completed, cost.ms_per_sample().unwrap_or(MIN_SLOPE)))?;
+        Ok(())
+    }
+
     /// Executes the rendering of the image on the GPU
+    ///
+    /// Takes [`SceneUpdate`]s from `updates` while it runs; see there for what
+    /// each part costs. With `idle_after_rendering` a finished render waits for
+    /// the next update rather than returning, and returns when `updates` is
+    /// dropped.
     pub fn render(
         &mut self,
         output: &Sender<RenderProgress>,
-        camera_config: &Receiver<CameraConfig>,
+        updates: &Receiver<SceneUpdate>,
         abort: &Receiver<bool>,
         idle_after_rendering: bool,
     ) -> Result<(), Box<dyn Error>> {
-        let samples_per_pixel = self.samples_per_pixel;
-        let workgroup_count_x = self.width.div_ceil(8);
-        let workgroup_count_y = self.height.div_ceil(8);
-
         // Number of samples already accumulated into the output buffer.
         let mut completed = 0;
         // Seeded from the configured batch size, then continuously re-tuned to
         // keep the work in a single dispatch inside TARGET_DISPATCH.
-        let mut batch_size = self.samples_per_batch.max(1);
+        let mut batch_size = self.config.samples_per_batch.max(1);
         // What a dispatch costs. Dominated by the scene rather than by the
         // view, so it deliberately survives camera changes and only has to
-        // re-converge when the view changes character.
+        // re-converge when the scene changes character.
         let mut cost = DispatchCost::new();
         // The first dispatch of a run pays for shader and allocation warm-up
         // that no later one does, and is left out of the cost model rather
         // than left to age out of it.
         let mut first_dispatch = true;
-        // A camera config picked up while idling, handled at the top of the
-        // next iteration together with any that arrived after it.
-        let mut idle_camera_config = None;
+        // An update picked up while idling, handled at the top of the next
+        // iteration together with any that arrived after it.
+        let mut idle_update: Option<SceneUpdate> = None;
 
         loop {
             if abort.try_recv().is_ok() {
                 return Ok(());
             }
 
-            let mut latest_camera_config = idle_camera_config.take();
-            while let Ok(config) = camera_config.try_recv() {
-                latest_camera_config = Some(config);
+            let mut update = idle_update.take();
+            while let Ok(later) = updates.try_recv() {
+                match &mut update {
+                    Some(u) => u.merge(later),
+                    None => update = Some(later),
+                }
             }
 
-            if let Some(config) = latest_camera_config {
-                self.update_camera(&config);
-                // Restart the accumulation. The output buffer is deliberately
-                // not cleared: the shader overwrites every pixel it covers when
-                // sample_count is zero, so clearing only costs a dispatch and
-                // leaves a window where a caller sees black.
-                completed = 0;
-                // Sample indices restart at zero too, so without a fresh
-                // restart_index the RNG would hand every frame of a camera
-                // drag the identical sample sequence.
-                self.render_config.restart_index = self.render_config.restart_index.wrapping_add(1);
-                // Get an image of the new view out as fast as possible, then
-                // grow back into the budget. Carrying a large batch across the
-                // restart would spend a whole dispatch before showing anything
-                // of where the camera now points.
-                batch_size = 1;
+            if let Some(update) = update {
+                let outcome = self.apply(update, completed);
+                if outcome.restart {
+                    // Restart the accumulation. The output buffer is
+                    // deliberately not cleared: the shader overwrites every
+                    // pixel it covers when sample_count is zero, so clearing
+                    // only costs a dispatch and leaves a window where a caller
+                    // sees black.
+                    completed = 0;
+                    // Get an image of the new view out as fast as possible,
+                    // then grow back into the budget. Carrying a large batch
+                    // across the restart would spend a whole dispatch before
+                    // showing anything of where the camera now points.
+                    batch_size = 1;
+                }
+                if outcome.reset_cost {
+                    cost = DispatchCost::new();
+                    first_dispatch = true;
+                }
+                if outcome.republish && completed > 0 && completed >= self.config.samples_per_pixel
+                {
+                    self.republish(output, completed, &cost)?;
+                }
             }
 
+            let samples_per_pixel = self.config.samples_per_pixel;
             if completed >= samples_per_pixel {
                 if !idle_after_rendering {
                     break;
                 }
                 // Block on the channel rather than polling it, so a converged
-                // image costs nothing and reacts the moment a camera update
-                // arrives.
-                match camera_config.recv_timeout(POLL_SLICE) {
-                    Ok(config) => idle_camera_config = Some(config),
+                // image costs nothing and reacts the moment an update arrives.
+                match updates.recv_timeout(POLL_SLICE) {
+                    Ok(update) => idle_update = Some(update),
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 }
@@ -1071,49 +1320,14 @@ impl<'a> Renderer<'a> {
                 &mut encoder,
                 &self.pipeline,
                 &self.bind_group,
-                workgroup_count_x,
-                workgroup_count_y,
+                self.width.div_ceil(8),
+                self.height.div_ceil(8),
                 self.timer.as_mut(),
                 "trace",
             );
 
             let last_batch = completed + batch >= samples_per_pixel;
-
-            // Refreshed every batch, not just the one the whole chain runs on:
-            // the post buffer is what RenderProgress publishes, so a caller
-            // watching an unfinished render has to see the accumulated image
-            // there. 0.05 ms of a 10 ms dispatch at 800x600; see `post_copy`.
-            if let Some(post_buffer) = &self.post_buffer {
-                let size = (self.width * self.height) as u64 * crate::post::PIXEL_SIZE;
-                let src = &self.output_buffer;
-                let copy = |encoder: &mut wgpu::CommandEncoder| {
-                    encoder.copy_buffer_to_buffer(src, 0, post_buffer, 0, size);
-                };
-                match self.timer.as_mut() {
-                    Some(timer) => timer.encoder_scope(&mut encoder, "post_copy", copy),
-                    None => copy(&mut encoder),
-                }
-
-                let mut ctx = crate::post::PostProcessContext {
-                    encoder: &mut encoder,
-                    buffer: post_buffer,
-                    accumulator: &self.output_buffer,
-                    sample_count_buffer: &self.sample_count_buffer,
-                    gbuffer: &self.gbuffer,
-                    samples_completed: completed,
-                    device: self.device,
-                    timer: self.timer.as_mut(),
-                };
-                // On any batch but the last, only the processors that say
-                // they belong in a preview. A drag never reaches a last batch:
-                // every frame of one restarts the accumulation, so this is the
-                // only path on which a moving camera is ever filtered at all.
-                for p in &self.post_processors {
-                    if last_batch || (self.preview && p.preview()) {
-                        p.post_process(&mut ctx)?;
-                    }
-                }
-            }
+            self.encode_chain(&mut encoder, completed, last_batch);
 
             // After the last timed pass and before `finish`, so the resolve
             // sees every timestamp this command buffer wrote.
@@ -1156,25 +1370,106 @@ impl<'a> Renderer<'a> {
                 .ms_per_sample()
                 .unwrap_or_else(|| dispatch_time.as_secs_f64() * 1000. / batch as f64);
 
-            output.send(RenderProgress {
-                progress: completed as f64 / samples_per_pixel as f64,
-                fps: Some(1000. / ms_per_sample.max(MIN_SLOPE)),
-                estimated_time_left: calculate_estimated_time_left(
-                    ms_per_sample,
-                    samples_per_pixel - completed,
-                ),
-                // Stable for the life of the render, so a caller caching a
-                // bind group per buffer handle never rebuilds it.
-                output_buffer: self
-                    .post_buffer
-                    .as_ref()
-                    .unwrap_or(&self.output_buffer)
-                    .clone(),
-            })?;
+            output.send(self.progress(completed, ms_per_sample))?;
         }
 
         Ok(())
     }
+}
+
+/// Drops a world once it is uploaded, on another thread. Freeing a scene graph
+/// is not free -- a 250k-triangle mesh the caller let go of is ~94 MB of
+/// `Triangle` to walk, 9 ms of it -- and the next dispatch has no need to wait
+/// for it.
+fn drop_elsewhere(world: Hittables) {
+    rayon::spawn(move || drop(world));
+}
+
+/// What a pipeline is cached under: its override constants, as bits.
+fn key_of(constants: &[(&'static str, f64)]) -> Vec<(&'static str, u64)> {
+    constants
+        .iter()
+        .map(|&(name, value)| (name, value.to_bits()))
+        .collect()
+}
+
+/// The accumulator, the per-pixel sample count and the guide, for one size.
+fn pixel_buffers(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
+    let pixels = (width * height) as u64;
+    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Output Buffer"),
+        // vec3 is 16 bytes aligned (as vec4 effectively)
+        size: pixels * 16,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Actual accumulated sample count per pixel, used by adaptive sampling
+    // to skip converged pixels. Its initial contents are never read as-is:
+    // the shader always resets a pixel's count when `sample_count == 0`.
+    let sample_count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Sample Count Buffer"),
+        size: pixels * 4,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    // Primary-hit albedo, normal and camera distance, packed 16 bytes per
+    // pixel. Written by the tracer on the first dispatch of an accumulation
+    // run and read only by a denoising post-processor. COPY_SRC so tests can
+    // read it back.
+    let gbuffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Guide Buffer"),
+        size: pixels * 16,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    (output_buffer, sample_count_buffer, gbuffer)
+}
+
+fn post_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Post Process Buffer"),
+        size: (width * height) as u64 * crate::post::PIXEL_SIZE,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// The tracer's bindings, in the order `bind_group_layout` declares them.
+fn bindings<'b>(
+    world: &'b GpuWorld,
+    sampler: &'b wgpu::Sampler,
+    output_buffer: &'b wgpu::Buffer,
+    sample_count_buffer: &'b wgpu::Buffer,
+    gbuffer: &'b wgpu::Buffer,
+    camera_buffer: &'b wgpu::Buffer,
+    config_buffer: &'b wgpu::Buffer,
+) -> [wgpu::BindingResource<'b>; 17] {
+    let buffer = |b: &'b wgpu::Buffer| wgpu::BindingResource::Buffer(b.as_entire_buffer_binding());
+    [
+        buffer(output_buffer),
+        buffer(&world.nodes.buffer),
+        buffer(&world.spheres.buffer),
+        buffer(&world.triangle_pos.buffer),
+        buffer(&world.quad_pos.buffer),
+        buffer(&world.materials.buffer),
+        buffer(camera_buffer),
+        buffer(config_buffer),
+        wgpu::BindingResource::TextureView(&world.atlas_view),
+        wgpu::BindingResource::Sampler(sampler),
+        buffer(&world.lights.buffer),
+        buffer(&world.prim_refs.buffer),
+        buffer(&world.triangle_attr.buffer),
+        buffer(&world.quad_attr.buffer),
+        buffer(sample_count_buffer),
+        buffer(gbuffer),
+        buffer(&world.dielectric_energy.buffer),
+    ]
 }
 
 /// Time left, from the measured cost of a sample rather than from the elapsed
@@ -1456,6 +1751,7 @@ mod test {
             },
             background_color: Vec3::new(0., 0., 0.),
             render_config,
+            post_processors: vec![],
         };
 
         let mut renderer = Renderer::new(scene, device, queue).unwrap();
@@ -1548,10 +1844,6 @@ mod test {
             width: SIZE as usize,
             height: SIZE as usize,
             samples_per_pixel: 1,
-            // The tracer only fills the G-buffer when something in the chain
-            // reads it, so a test that reads it has to ask for it the way a
-            // caller would rather than through a back door.
-            post_processors: vec![guide_reader(device)],
             ..Default::default()
         };
 
@@ -1588,14 +1880,18 @@ mod test {
             },
             background_color: Vec3::new(0.2, 0.3, 0.5),
             render_config,
+            // The tracer only fills the G-buffer when something in the chain
+            // reads it, so a test that reads it has to ask for it the way a
+            // caller would rather than through a back door.
+            post_processors: vec![guide_reader(device)],
         };
 
         let mut renderer = Renderer::new(scene, device, queue).unwrap();
         let (output_sender, output_receiver) = channel();
-        let (_camera_sender, camera_receiver) = channel();
+        let (_update_sender, update_receiver) = channel();
         let (_abort_sender, abort_receiver) = channel();
         renderer
-            .render(&output_sender, &camera_receiver, &abort_receiver, false)
+            .render(&output_sender, &update_receiver, &abort_receiver, false)
             .unwrap();
         drop(output_sender);
         for _ in output_receiver {}
@@ -1713,17 +2009,17 @@ mod test {
                     width: SIZE as usize,
                     height: SIZE as usize,
                     samples_per_pixel: 1,
-                    post_processors,
                     ..Default::default()
                 },
+                post_processors,
             };
 
             let mut renderer = Renderer::new(scene, device, queue).unwrap();
             let (output_sender, output_receiver) = channel();
-            let (_camera_sender, camera_receiver) = channel();
+            let (_update_sender, update_receiver) = channel();
             let (_abort_sender, abort_receiver) = channel();
             renderer
-                .render(&output_sender, &camera_receiver, &abort_receiver, false)
+                .render(&output_sender, &update_receiver, &abort_receiver, false)
                 .unwrap();
             drop(output_sender);
             for _ in output_receiver {}
@@ -1790,7 +2086,6 @@ mod test {
             width: SIZE as usize,
             height: SIZE as usize,
             samples_per_pixel: 1,
-            post_processors: vec![guide_reader(device)],
             ..Default::default()
         };
 
@@ -1837,14 +2132,15 @@ mod test {
             },
             background_color: Vec3::new(0.2, 0.3, 0.5),
             render_config,
+            post_processors: vec![guide_reader(device)],
         };
 
         let mut renderer = Renderer::new(scene, device, queue).unwrap();
         let (output_sender, output_receiver) = channel();
-        let (_camera_sender, camera_receiver) = channel();
+        let (_update_sender, update_receiver) = channel();
         let (_abort_sender, abort_receiver) = channel();
         renderer
-            .render(&output_sender, &camera_receiver, &abort_receiver, false)
+            .render(&output_sender, &update_receiver, &abort_receiver, false)
             .unwrap();
         drop(output_sender);
         for _ in output_receiver {}

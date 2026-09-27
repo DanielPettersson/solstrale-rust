@@ -189,9 +189,9 @@ struct Camera {
     v: vec3<f32>,
 }
 
-// Only what a dispatch varies. The image size and the light count are fixed
-// for the life of a pipeline, so they are overrides below rather than fields
-// here.
+// Only what a dispatch varies, and what a scene update can change without a
+// recompile. The image size is fixed for the life of a pipeline, so it is an
+// override below rather than a field here.
 struct RenderConfig {
     // Samples already accumulated before this dispatch.
     sample_count: u32,
@@ -207,6 +207,10 @@ struct RenderConfig {
     // replays an identical sample sequence every frame, which reads as grain
     // pinned to the screen rather than as noise.
     restart_index: u32,
+    // Emitters in `lights`. A field rather than an override, so a light added
+    // to a lit scene compiles nothing; `has_lights` still strips next-event
+    // estimation from a scene with none.
+    light_count: u32,
 }
 
 // An emitter, plus its share of the scene's emitted power. `sample_light` and
@@ -329,9 +333,10 @@ var<storage, read> dielectric_energy: array<f32>;
 override width: u32 = 1u;
 override height: u32 = 1u;
 
-// Emitters in the scene, so the alias table's scale is a constant multiply and
-// find_light's binary search has a constant bound.
-override light_count: u32 = 0u;
+// Whether the scene has any emitter for next-event estimation to sample. Leads
+// the condition of every arm that samples one, since naga only folds an
+// override written there; see the note in bsdf_is_specular.
+override has_lights: bool = true;
 
 // Which primitive types the scene contains. Each `false` strips one arm from
 // hit_leaf, leaf_occluded, resolve_hit, sample_light and light_prim_pdf.
@@ -810,7 +815,7 @@ fn light_prim_pdf(
     return (distance * distance) / (abs(dot(direction, normal)) * area);
 }
 
-// Which entry of `lights` a primitive is, or `light_count` if it is not an
+// Which entry of `lights` a primitive is, or `config.light_count` if it is not an
 // emitter sample_light draws from. The index rather than a yes/no, because the
 // caller needs the entry's `select_pdf`.
 //
@@ -822,7 +827,7 @@ fn light_prim_pdf(
 fn find_light(prim_type: u32, prim_index: u32) -> u32 {
     let key = (prim_type << PRIM_TYPE_SHIFT) | prim_index;
     var lo = 0u;
-    var hi = light_count;
+    var hi = config.light_count;
     while (lo < hi) {
         let mid = (lo + hi) >> 1u;
         if (lights[mid].prim < key) {
@@ -831,7 +836,7 @@ fn find_light(prim_type: u32, prim_index: u32) -> u32 {
             hi = mid;
         }
     }
-    if (lo >= light_count || lights[lo].prim != key) { return light_count; }
+    if (lo >= config.light_count || lights[lo].prim != key) { return config.light_count; }
     return lo;
 }
 
@@ -853,9 +858,9 @@ fn light_hit_pdf(
     distance: f32,
     normal: vec3<f32>,
 ) -> f32 {
-    if (light_count == 0u) { return 0.0; }
+    if (config.light_count == 0u) { return 0.0; }
     let idx = find_light(prim_type, prim_index);
-    if (idx >= light_count) { return 0.0; }
+    if (idx >= config.light_count) { return 0.0; }
     return light_prim_pdf(prim_type, prim_index, origin, direction, distance, normal)
         * lights[idx].select_pdf;
 }
@@ -892,12 +897,12 @@ fn sample_light(origin: vec3<f32>, pick: f32, u: vec2<f32>) -> LightSample {
     ls.attenuation_factor = 0.0;
     ls.valid = false;
 
-    if (light_count == 0u) { return ls; }
+    if (config.light_count == 0u) { return ls; }
 
     // Integer part picks the slot, fractional part is the alias coin. The two
     // are independent for a uniform `pick`, which is what makes one draw enough.
-    let scaled = pick * f32(light_count);
-    let slot = min(u32(scaled), light_count - 1u);
+    let scaled = pick * f32(config.light_count);
+    let slot = min(u32(scaled), config.light_count - 1u);
     var light = lights[slot];
     if (scaled - f32(slot) >= light.alias_prob) {
         light = lights[light.alias_index];
@@ -2310,7 +2315,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
                 // Weight against the direct-lighting strategy that could also
                 // have produced this direction, if there is one.
                 var weight = 1.0;
-                if (nee_enabled && !prev_specular) {
+                if (nee_enabled && has_lights && !prev_specular) {
                     // Geometric normal: the density being weighed against is
                     // an area measure on the facet.
                     let pdf_light = light_hit_pdf(
@@ -2336,7 +2341,7 @@ fn trace_sample(pixel: vec2<u32>, sample_index: u32) -> vec3<f32> {
         //
         // Gated on the lobe, not the material: anything with a density a light
         // sample can land on gets a shadow ray.
-        if (nee_enabled && !bsdf_is_specular(b)) {
+        if (nee_enabled && has_lights && !bsdf_is_specular(b)) {
             let ls = sample_light(
                 rec.p,
                 sampler_1d(smp, dim_x(scalars)),

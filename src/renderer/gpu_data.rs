@@ -291,8 +291,7 @@ pub struct LightRef {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 /// Render configuration matching WGSL layout.
 ///
-/// Only what a dispatch varies. The image size and the light count are fixed
-/// for the life of a `Renderer`, so they reach the shader as override constants
+/// Only what a dispatch varies. The image size is an override constant
 /// instead -- see `Specialisation` in `renderer`.
 pub struct GpuRenderConfig {
     /// Number of samples already accumulated into the output buffer before
@@ -311,9 +310,13 @@ pub struct GpuRenderConfig {
     /// Distinguishes successive accumulation restarts, mixed into every
     /// pixel's sampler seed, and seeded from `RenderConfig::seed`.
     pub restart_index: u32,
+    /// Emitters in `lights`. A uniform rather than an override, so a light
+    /// added to a lit scene compiles nothing; `has_lights` is the override
+    /// that still strips next-event estimation from a scene with none.
+    pub light_count: u32,
     /// WGSL rounds a struct containing a `vec3<f32>` up to its 16-byte
-    /// alignment, so the uniform is 48 bytes whether these three words are
+    /// alignment, so the uniform is 48 bytes whether these two words are
     /// spelled out or not. Spelled out, `size_of` agrees with the binding size
     /// the layout asks for.
-    pub _padding: [u32; 3],
+    pub _padding: [u32; 2],
 }

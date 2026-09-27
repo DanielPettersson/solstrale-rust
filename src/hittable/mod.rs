@@ -7,11 +7,14 @@ mod sphere;
 mod triangle;
 
 use crate::geo::Aabb;
-pub use crate::hittable::bvh::Bvh;
-pub(crate) use crate::hittable::bvh::LEAF_FLAG;
+use crate::geo::transformation::Transformer;
+pub use crate::hittable::bvh::{Bvh, MAX_PRIMITIVES, MAX_TRAVERSAL_DEPTH, SUBTREE_MIN_PRIMS};
+pub(crate) use crate::hittable::bvh::{BvhData, BvhNode, Child, LEAF_FLAG, LeafPrims, child_of};
 pub use crate::hittable::quad::Quad;
 pub use crate::hittable::sphere::Sphere;
+pub(crate) use crate::hittable::triangle::Geometry;
 pub use crate::hittable::triangle::Triangle;
+use crate::material::Materials;
 use enum_dispatch::enum_dispatch;
 
 /// The common trait for all objects in the ray tracing scene
@@ -41,4 +44,28 @@ pub enum Hittables {
     Triangle,
     /// [`Hittable`] of the type [`Bvh`]
     Bvh,
+}
+
+impl Hittables {
+    /// The material of a primitive; `None` for a [`Bvh`].
+    pub(crate) fn material(&self) -> Option<&Materials> {
+        match self {
+            Hittables::Sphere(s) => Some(&s.mat),
+            Hittables::Quad(q) => Some(&q.mat),
+            Hittables::Triangle(t) => Some(&t.mat),
+            Hittables::Bvh(_) => None,
+        }
+    }
+
+    /// This primitive baked again under `transformation`, as if it had been
+    /// constructed with it on top of the one it was constructed with. A tree
+    /// has [`Bvh::transformed`] instead.
+    pub(crate) fn transformed(&self, transformation: &dyn Transformer) -> Hittables {
+        match self {
+            Hittables::Sphere(s) => s.transformed(transformation).into(),
+            Hittables::Quad(q) => q.transformed(transformation).into(),
+            Hittables::Triangle(t) => t.transformed(transformation).into(),
+            Hittables::Bvh(_) => unreachable!("a Bvh's primitives hold no Bvh"),
+        }
+    }
 }

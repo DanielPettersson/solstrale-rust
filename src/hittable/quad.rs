@@ -55,6 +55,12 @@ impl Quad {
         }
     }
 
+    /// This quad under `transformation`, applied on top of the one it was
+    /// built with.
+    pub(crate) fn transformed(&self, transformation: &dyn Transformer) -> Quad {
+        Quad::new(self.q, self.u, self.v, self.mat.clone(), transformation)
+    }
+
     /// creates a new box shaped hittable object
     pub fn new_box(
         a: Vec3,

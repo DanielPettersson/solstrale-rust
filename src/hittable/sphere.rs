@@ -50,6 +50,14 @@ impl Sphere {
     }
 }
 
+impl Sphere {
+    /// This sphere under `transformation`, applied on top of the one it was
+    /// built with.
+    pub(crate) fn transformed(&self, transformation: &dyn Transformer) -> Sphere {
+        Sphere::new(self.center, self.radius, self.mat.clone(), transformation)
+    }
+}
+
 impl Hittable for Sphere {
     fn bounding_box(&self) -> &Aabb {
         &self.b_box

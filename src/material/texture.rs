@@ -42,6 +42,17 @@ pub enum Textures {
     ImageMap,
 }
 
+impl Textures {
+    /// The same colour, or the same image by identity.
+    pub(crate) fn same_as(&self, other: &Textures) -> bool {
+        match (self, other) {
+            (Textures::SolidColor(a), Textures::SolidColor(b)) => a.0 == b.0,
+            (Textures::ImageMap(a), Textures::ImageMap(b)) => Arc::ptr_eq(&a.image, &b.image),
+            _ => false,
+        }
+    }
+}
+
 /// The variants of bump maps supported.
 pub enum BumpMap {
     /// Each pixel in the image describes the normal vector directly
@@ -165,6 +176,10 @@ impl ImageMap {
     /// Returns the underlying image
     pub fn get_image(&self) -> Arc<RgbImage> {
         self.image.clone()
+    }
+
+    pub(crate) fn image(&self) -> &Arc<RgbImage> {
+        &self.image
     }
 }
 
