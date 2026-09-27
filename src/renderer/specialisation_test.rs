@@ -119,6 +119,7 @@ fn every_feature_scene() -> Scene {
         },
         background_color: Vec3::new(0.1, 0.15, 0.25),
         render_config: test_render_config(),
+        post_processors: vec![],
     }
 }
 
@@ -164,6 +165,7 @@ fn triangles_only_scene() -> Scene {
         },
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config: test_render_config(),
+        post_processors: vec![],
     }
 }
 
@@ -173,7 +175,7 @@ fn a_scene_using_everything_strips_nothing() {
 
     assert_eq!(1, data.lights.len());
     assert_eq!(
-        Specialisation::unspecialised(1),
+        Specialisation::unspecialised(),
         Specialisation::from_scene_data(&data)
     );
 }
@@ -192,7 +194,7 @@ fn an_all_triangle_scene_strips_the_other_primitives() {
     assert!(!specialisation.has_rough_dielectrics);
     assert!(!specialisation.has_textures);
     assert!(!specialisation.has_normal_maps);
-    assert_eq!(1, specialisation.light_count);
+    assert!(specialisation.has_lights);
 }
 
 /// On a scene that uses everything, the derived constants *are* the
@@ -221,12 +223,11 @@ fn stripping_branches_leaves_the_image_alone() {
 /// with every branch left in -- and insists the two agree bit for bit.
 fn assert_renders_match(scene: fn() -> Scene) {
     let (device, queue) = get_wgpu_device_and_queue();
-    let light_count = flatten_scene(&scene()).lights.len() as u32;
 
     let specialised = render_pixels(scene(), None, device, queue);
     let everything_on = render_pixels(
         scene(),
-        Some(Specialisation::unspecialised(light_count)),
+        Some(Specialisation::unspecialised()),
         device,
         queue,
     );
@@ -257,12 +258,12 @@ fn render_pixels(
     let height = scene.render_config.height as u32;
 
     let (progress_sender, progress_receiver) = channel();
-    let (_camera_sender, camera_receiver) = channel();
+    let (_update_sender, update_receiver) = channel();
     let (_abort_sender, abort_receiver) = channel();
 
     let mut renderer = Renderer::with_specialisation(scene, device, queue, specialisation).unwrap();
     renderer
-        .render(&progress_sender, &camera_receiver, &abort_receiver, false)
+        .render(&progress_sender, &update_receiver, &abort_receiver, false)
         .unwrap();
     // The channel is unbounded, so the render above ran to completion without
     // anyone draining it; dropping the sender is what ends the iteration below.

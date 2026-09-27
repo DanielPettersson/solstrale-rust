@@ -4,6 +4,7 @@ use crate::geo::vec3::{Vec3, ZERO_VECTOR};
 use crate::util::degrees_to_radians;
 
 /// Contains all needed parameters for constructing a camera
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraConfig {
     /// Vertical field of view in degrees
     pub vertical_fov_degrees: f64,

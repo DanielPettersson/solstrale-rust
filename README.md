@@ -43,6 +43,10 @@ A WGPU-based GPU Monte Carlo path tracing library, with features like:
   three axes and front-to-back ordered GPU traversal
 * The tracer is compiled against the scene it is tracing, so a branch the scene
   could never have taken is not in the shader at all
+* A running render takes scene updates and applies each for what it costs: a new
+  sample count continues the render, a new camera or colour restarts it, and a
+  moved mesh is re-baked and re-uploaded on its own, with nothing else rebuilt.
+  See [Updating a running render](#updating-a-running-render)
 
 ### Post-Processing
 Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
@@ -114,14 +118,15 @@ fn main() {
         camera: CameraConfig::default(),
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config: RenderConfig::default(),
+        post_processors: vec![],
     };
 
     let (output_sender, output_receiver) = channel();
-    let (_, camera_config_receiver) = channel();
+    let (_, update_receiver) = channel();
     let (_, abort_receiver) = channel();
 
     thread::spawn(move || {
-        ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, &device, &queue, false).unwrap();
+        ray_trace(scene, &output_sender, &update_receiver, &abort_receiver, &device, &queue, false).unwrap();
     });
 
     for render_output in output_receiver {
@@ -144,11 +149,12 @@ fn main() {
 | `variance_threshold` | 0.01 | Relative standard error below which a pixel is retired |
 | `low_discrepancy` | `true` | Draw samples from an Owen-scrambled Sobol sequence rather than white noise |
 | `seed` | 0 | Distinguishes two otherwise identical renders |
-| `post_processors` | none | Filters applied to the final image |
 | `preview` | `false` | Run the preview post-processors on every batch, not just the last |
 
-Order matters in `post_processors`: put the denoiser first. Denoising a bloomed
-image blurs the bloom, while bloom applied to a denoised image is what you want.
+The filters applied to the final image are `Scene::post_processors`, beside the
+render configuration rather than in it. Order matters there: put the denoiser
+first. Denoising a bloomed image blurs the bloom, while bloom applied to a
+denoised image is what you want.
 
 `samples_per_batch` trades reporting granularity for throughput: larger batches
 amortise dispatch overhead and collapse the per-sample read-modify-write of the
@@ -172,6 +178,42 @@ converged reference it is compared with will agree more closely than they should
 -- with `low_discrepancy` on, the short render is literally a subset of the long
 one. Give the reference a different seed.
 
+## Updating a running render
+`ray_trace` takes a channel of `SceneUpdate`s, which a running render applies at
+its next batch. Each part costs what changing it has to cost, not a rebuild:
+
+| outcome | parts |
+|---|---|
+| nothing | `samples_per_batch`, `preview` |
+| the accumulation continues | `samples_per_pixel` raised, `min_samples_per_pixel`, `variance_threshold` |
+| the finished image goes through the full post chain again | `samples_per_pixel` lowered to what is done, `post_processors` |
+| the accumulation restarts | camera, background, `max_depth`, `low_discrepancy`, `seed`, size, world |
+
+A camera update is one `.into()` away: `sender.send(camera.into())`.
+
+A new world is uploaded for what changed in it. A nested `Bvh` of at least
+`SUBTREE_MIN_PRIMS` (8192) primitives is kept apart as a subtree rather than
+dissolved into the world's tree, and the renderer keeps each subtree it has
+uploaded: sending a world that holds the same `Bvh` again costs nothing for it,
+and `Bvh::transformed` moves one without reloading or rebuilding it, written
+over its old segment in place. `Bvh` clones are reference counts, so a model
+cache can hand the same one out as often as it likes.
+
+```rust
+let mesh = Obj::new("models/", "dragon.obj").load(&NopTransformer(), None)?;
+// Absolute, from the mesh as loaded, however often it has moved since.
+let moved = mesh.transformed(Translation::new(Vec3::new(1., 0., 0.)));
+
+let mut update = SceneUpdate::default();
+update.world = Some(Bvh::new(vec![moved.into(), floor.clone()]).into());
+update_sender.send(update)?;
+```
+
+A moved mesh keeps its tree, refitted, and a rotation loosens it: up to 23%
+slower to render at 45 degrees. `Bvh::rebuilt` builds it again for where it is,
+on whatever thread can afford it once a drag ends, and a world update swaps it
+in.
+
 ## Known limitations
 
 [`LIMITATIONS.md`](LIMITATIONS.md) records what is true of the renderer on
@@ -183,6 +225,62 @@ work are recorded there as having been measured and found to lie.
 Outstanding work is tracked in
 [GitHub issues](https://github.com/DanielPettersson/solstrale-rust/issues),
 prioritised `P1`/`P2`/`P3`.
+
+## Upgrading to 0.6
+**The camera channel is now an update channel.** `ray_trace` and
+`Renderer::render` take a `&Receiver<SceneUpdate>` where they took a
+`&Receiver<CameraConfig>`. A camera converts into an update, so a caller that
+only ever sends cameras changes one call:
+
+```rust
+// 0.5
+camera_sender.send(camera)?;
+// 0.6
+update_sender.send(camera.into())?;
+```
+
+Anything else about the scene can now be sent the same way instead of aborting
+the render and building a new one; see
+[Updating a running render](#updating-a-running-render).
+
+**Post-processors moved from `RenderConfig` to `Scene`.** A processor's
+parameters are baked into its pipelines when it is built, so a chain can only be
+replaced, never compared, and it no longer rides along with every change to the
+sample count:
+
+```rust
+// 0.5
+Scene { world, camera, background_color, render_config: RenderConfig { post_processors, ..Default::default() } }
+// 0.6
+Scene { world, camera, background_color, render_config: RenderConfig::default(), post_processors }
+```
+
+`RenderConfig` is now `PartialEq`, and `CameraConfig` is `Clone`, `Copy`,
+`Debug` and `PartialEq`.
+
+**`RenderProgress` gained `width` and `height`.** Take a blit's or a saved
+image's stride from them rather than from the size that was asked for: a render
+updated to a new size publishes a new buffer, and so does one whose chain
+becomes empty or stops being so.
+
+**A large nested `Bvh` stays a tree of its own.** One of `SUBTREE_MIN_PRIMS`
+(8192) primitives or more is kept apart as a subtree instead of being dissolved
+into the tree it is nested in, which is what lets an update move it without
+touching the rest. `Bvh::clone` is now a reference count rather than a copy,
+`Bvh::primitive_count` counts through subtrees, and `Bvh::transformed` and
+`Bvh::rebuilt` are new.
+
+**`Transformer` requires `Send + Sync`**, so a mesh can be re-baked in
+parallel. Every transformer in the crate already is, and `Box` and `Arc` of one
+are transformers too.
+
+**`SceneData` is laid out as an arena.** `flatten_scene` still returns one, but
+the triangle arrays are indexed like `prim_refs` -- a sphere or a quad leaves a
+hole in them -- and an empty world gets a root node over two empty leaves.
+`GpuRenderConfig` carries the light count, which is no longer an override.
+
+**A world update never ends the render.** `Renderer::new` still refuses a scene
+with no light and a black background; an update to one renders it black.
 
 ## Upgrading to 0.5
 `Metal` is now a GGX microfacet conductor. `albedo` means f0, the reflectance at

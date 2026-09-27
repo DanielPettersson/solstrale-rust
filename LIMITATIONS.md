@@ -385,8 +385,68 @@ Correct but imperfect; documented so they read as choices rather than bugs.
   normal incidence, rather than a flat multiplier -- so every metal now has a
   Fresnel rim going white at a grazing angle.
 
+- **A moved mesh keeps its topology, and a rotation loosens it.**
+  `Bvh::transformed` refits the node boxes over the same tree rather than
+  building a new one, which is what lets the renderer write the moved mesh
+  over its old segment in place. A translation or a uniform scale costs
+  nothing for it -- the SAH cannot see either, and a refit agrees with a
+  rebuild's cost to nine digits -- but a rotation off an axis does, measured by
+  `refit_against_rebuild` as the SAH cost of the refit over a rebuild's:
+
+  ```text
+                 15 deg          30 deg          45 deg
+  about           x      y        x      y        x      y
+  sponza       +8.9  +11.6     +2.9  +17.0     +0.0  +17.9   %
+  dragon       +4.9   +7.4    +11.0  +14.1    +11.7  +18.1   %
+  spider       +5.8   +6.2    +11.8   +7.6    +10.3   +9.0   %
+  ```
+
+  Rendered, at 64 spp and 800x600, that is 12 to 23% slower at 30 to 45
+  degrees about Y on both meshes -- and nothing about X, where sponza at 30
+  degrees rendered 18% *faster* refitted, which says what the SAH is worth as a
+  predictor. A drag can live with either. A long render of a rotated mesh
+  should not, and `Bvh::rebuilt` builds the tree again for where the mesh is,
+  for a caller to swap in once the drag ends.
+
+- **The arena keeps its holes until it has to lay everything out again.**
+  `WorldLayout` (`renderer/scene_flattener.rs`) places each subtree at a stable
+  offset and frees its ranges when a world no longer holds it, first-fit, so a
+  mesh replaced by one of the same size lands where the old one was. The
+  world's own tree sits at node 0 with room for a quarter again (at most 16384,
+  plus 64) and cannot move, so outgrowing that room lays the whole arena out
+  again -- O(scene), once, with fresh room. So does an arena whose holes push
+  it past `MAX_PRIMITIVES`.
+
+  Triangles take the slot of their own `prim_refs` entry, which is what keeps
+  `identity_prim_refs` true in a triangle-only scene whatever its segments do,
+  and costs a 128-byte hole in the triangle arrays for every sphere and quad a
+  region with triangles also holds.
+
+- **A subtree is recognised by identity, not by content.** The renderer keeps a
+  segment for the same `Bvh` (the same `Arc`, held as a `Weak`) or for one
+  `Bvh::transformed` baked from the same source; anything else is a new
+  subtree and is uploaded whole. The same mesh loaded twice is two meshes, so
+  a caller wanting cheap edits has to hand out the one it loaded -- which is
+  what a model cache keyed on path and material does, and what one keyed on
+  the transform does not.
+
+- **A new texture repacks the whole atlas.** One scale divisor applies to every
+  texture, so adding one can shrink them all. A world whose textures are a
+  subset of the atlas keeps it, unless the atlas had to shrink them, in which
+  case a packing of fewer might not have. A texture is an identity too: the
+  same image decoded twice is two textures, and repacks.
+
+- **A deep subtree can be taken back into the tree above it.** The traversal
+  stack bounds the composed tree the GPU walks, so a subtree counts at the
+  depth it hangs from. When that passes `MAX_TRAVERSAL_DEPTH`, `Bvh::new`
+  dissolves the deepest subtree back in and builds again rather than panic;
+  that mesh's edits then cost a rebuild of the tree it went into. Sponza, at
+  27, leaves five levels above it.
 - **16.7M primitive cap.** The BVH leaf encoding uses a 24-bit offset
-  (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time.
+  (`hittable/bvh.rs`, `MAX_PRIMITIVES`), asserted at build time over a tree and
+  every subtree in it. The renderer lays every segment out in one primitive
+  array, so the bound is on the arena, holes included; an arena whose holes
+  would pass it is laid out again.
 - **Golden images are lenient.** They downscale to 100x50 and compare RMS
   similarity at 0.9–0.95, which tolerates large quality changes. Any future
   integrator change needs a convergence check (render at 50/200/2000 spp and
@@ -609,6 +669,34 @@ Recorded so they aren't reconsidered without new information.
   Revisit only if the ratio on some scene comes back near 80%, and even then
   the first thing to try is a wider `TARGET_DISPATCH` for non-interactive
   callers, not giving up the back-pressure.
+
+- **Reusing a pipeline compiled for a superset of the scene.** When a world
+  update changes what the tracer is specialised on, the renderer takes a
+  pipeline compiled for exactly the new set, from its own cache when it has
+  seen that set before, rather than keeping one whose flags already cover the
+  new scene. It would be sound for the `has_*` flags, but a stale superset is
+  expensive -- the rough-dielectric arm alone takes `test_scene` from 128 to 168
+  VGPRs -- and the bit-identity evidence covers only two flag sets, not the
+  mixed ones reuse would rely on. Revisit if a cold compile turns out to be what
+  an edit waits on. It is not: `scene_update/compile_cold` is 8.2 ms against
+  5.9 ms warm, on a one-sphere scene whose tracer is stripped of most of its
+  arms, so a full scene's is larger but not by an order of magnitude.
+
+- **Compacting the material table.** A material's index is baked into every
+  primitive that uses it, so a record cannot move while one does. The table is
+  reference-counted instead, per region, and a record nothing uses is handed out
+  again: fifty frames of dragging a colour slider leave it at three records
+  (`materials_nothing_uses_are_reused`). The energy tables are counted the same
+  way. Neither ever needs the full re-upload a compaction would.
+
+- **Instances with a transform at the TLAS leaf (#64).** They would make a move
+  O(1), and charge every ray in every scene that has one: the saved world ray,
+  the instance id and the stack boundary add about nine live values across
+  `world_hit`, against a tracer that sits at exactly 128 VGPRs, and
+  `LightRef.prim` has no bits left for an instance. A mesh kept apart as a
+  subtree and re-baked when it moves needs no shader change at all. One
+  measurement would reopen it: nine dummy values kept live across `world_hit`,
+  under `./shader-stats.sh`.
 
 ---
 
@@ -1100,3 +1188,137 @@ declares one stack, used by `world_hit` and `occluded` in turn), so the
 remaining lever is a *shorter* stack: short-stack or stackless traversal, which
 trades re-traversal work for occupancy. And moving the stack to LDS or scratch
 buys nothing that is not already true -- it is not in memory now.
+
+### Scene updates
+
+**What an edit cost before `SceneUpdate`.** Every edit but a camera move aborted
+the render and built it again, and an editor's model cache hands out a clone.
+`scene_update` on `main`, stage by stage, with the mesh as one object of a
+world:
+
+```text
+                    sponza (262k, textured)   dragon (250k)
+Obj::load                  673.4 ms             134.6 ms
+clone (cache hit)           55.1 ms              45.3 ms
+Bvh::new over the world    104.5 ms             121.8 ms
+flatten_scene               41.8 ms              24.3 ms
+atlas blit, RGBA, upload   264.7 ms                -
+Renderer::new, all of it   451.8 ms             120.6 ms (70 to 193)
+```
+
+So a cache hit cost the editor clone + tree + renderer: about 610 ms on sponza
+and 290 ms on the dragon. The compile is not where it went:
+`scene_update/compile_cold`, `Renderer::new` on a one-sphere scene at a width
+no pipeline had before, is 8.2 ms against 5.9 ms warm.
+
+**What it costs now.** `interactive_edit_frame_cost`, one edit per frame to a
+live 800x600 render of `create_test_scene` with a mesh in it, median frame from
+building the edit to its image arriving:
+
+```text
+                    10k mesh    dragon (250k)    sponza (262k)
+camera (the floor)   4.38 ms      8.81 ms          5.20 ms
+background           2.99 ms      4.23 ms          2.99 ms
+albedo               3.42 ms      4.39 ms          3.19 ms
+translate            4.95 ms     29.08 ms         31.63 ms
+rebuild              16.08 ms    54.68 ms        335.87 ms
+```
+
+And `scene_update` on the new code, the same stages and the update arms:
+
+```text
+                    sponza          dragon
+clone               1.9 ns          4.5 ns       a reference count
+Bvh::new            10.9 us         9.2 us       the mesh is one subtree
+flatten_scene       34.4 ms         13.8 ms      triangles in parallel
+Renderer::new       311.8 ms        35.6 ms
+transformed         6.9 ms          4.9 ms
+update_background   2.78 ms         5.54 ms      against update_camera
+update_albedo       2.88 ms         5.59 ms        2.80 and 5.54 ms
+update_translate    26.9 ms         51.7 ms
+```
+
+An edit that leaves the mesh alone costs what a camera move does, because the
+mesh is a subtree the renderer already holds: the world update re-lays only the
+test scene's own ~150 primitives. `rebuild` is the same translate edit made the
+old way on the new code -- a renderer per frame -- and it is already far below
+`main`'s, since `Bvh::new` no longer dissolves the mesh and `Bvh::clone` no
+longer copies it.
+
+The bench's dragon translate, 51.7 ms, is well above the diagnostic's 29 ms,
+where sponza's two agree. The bench keeps the dragon at its own scale under its
+own camera, and nothing else about the two paths differs; not explained.
+
+**A move is memory-bound, which the issue's estimate did not count.** #100 put the
+re-bake of 250k triangles at 2-4 ms. Built as the issue describes it -- every
+primitive baked again into a new `Triangle`, in parallel -- it measured 12 ms,
+and a parallel *clone* of the same triangles, with no transform at all, measured
+the same: writing 94 MB of fresh `Hittables` (376 bytes each, page-faulted in
+4 KiB at a time, since transparent huge pages are `madvise` here) is the cost,
+and the arithmetic is noise under it. Freeing them again on the render thread
+was another 9 ms.
+
+So a baked tree no longer makes its primitives. `Bvh::transformed` keeps the
+transformation, refits the node boxes from the source's vertices, and the
+flattener writes the GPU records straight from the source under it; the
+primitives are made only if something asks for them, which a subtree never
+does. `transformed` went from 14.5 to about 4 ms on the dragon. What an edit of
+it costs the render thread, per stage:
+
+```text
+Bvh::transformed          ~4 ms    refit from the source, nodes only
+layout                   ~5.5 ms   GPU records for 250k triangles, in parallel
+queue.write_buffer       ~7.5 ms   34 MB into wgpu's staging memory
+GPU copy                  ~1 ms
+```
+
+The upload is the largest term left, and it is a copy: the records are built in
+`Vec`s and copied into staging. wgpu's `write_buffer_with` hands out the staging
+memory as a `WriteOnly` view that can be split across threads, so the layout
+could write into it directly and save both the copy and the page faults of the
+`Vec`s. That needs the layout to allocate first and emit second, against a sink
+rather than into `Vec`s; not done.
+
+**Translation-invariant, up to rounding.** #100 claimed a translation refits to
+exactly the tree a rebuild gives, since binned SAH is invariant under it. In
+f32 it is not quite: binning takes `(c - c_min) * scale`, and a centroid that
+rounds the other way lands in the next bucket. On the spider two of 455 leaves
+differ at an offset of (4, -8, 2) and none at three other offsets, and the SAH
+cost agrees to nine digits either way. `a_translation_or_scale_refits_to_the_tree_a_rebuild_gives`
+pins it at 99% of leaves and 1e-6 of cost.
+
+**What keeping a subtree apart costs a ray.** `bvh_traversal`, alternating A/B
+rounds against `main`:
+
+```text
+                      main              scene updates
+10 nested           8.04 / 8.06 ms     8.13 / 8.13 ms
+10000 nested        9.82 / 9.77 ms     9.60 / 9.59 ms    now a subtree
+10000 flat          9.78 / 9.79 ms     9.60 / 9.61 ms
+triangles_only     35.36 / 35.50 ms   35.22 / 35.37 ms
+room_kept_apart           -          114.8 / 114.8 ms
+room_one_tree             -          126.3 / 123.9 ms
+```
+
+So on the strip a subtree costs nothing, and in the furnished room -- five
+meshes inside a room mesh whose box holds all of theirs, the case the strip
+stood in for badly -- keeping them apart is 7 to 9% *faster* than one tree over
+every triangle. Why was not measured; `tree_stats` on the two would be where
+to start.
+
+**The light count as a uniform.** It left the override constants so a light
+added to a lit scene compiles nothing, and `has_lights` stays an override so a
+scene without one still has no NEE in its shader. `./shader-stats.sh` on
+`test_scene`: 128 VGPRs, 8 subgroups per SIMD and 4 spilled SGPRs before and
+after, and 4626 -> 4650 instructions.
+`render/test_scene_800x600_64spp` 128.4 / 128.6 -> 129.2 / 129.0 ms (+0.5%),
+`rough_glass` 86.9 / 86.8 -> 87.0 / 87.1 ms, `many_lights` 259.8 / 260.0 ->
+260.2 / 260.3 ms. `renderer_setup` is 6.70 -> 6.96 ms, not broken down.
+
+**A renderer that never renders still holds its uploads.** wgpu stages every
+`write_buffer` and `write_texture` until the next `queue.submit`, and keeps the
+staging memory and the resources it targets until then; `device.poll` submits
+nothing. `Renderer::new` on sponza, dropped without rendering, held ~270 MB of
+VRAM and ~200 MB of staging each time, and a bench loop of them ran the card
+out of memory -- which on a desktop is the compositor's memory too, and logged
+the session out. `Renderer::new` now ends with an empty submit.

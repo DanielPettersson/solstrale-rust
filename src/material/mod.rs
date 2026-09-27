@@ -1,6 +1,9 @@
 //! Materials to be applied to hittable objects
 
+use std::sync::Arc;
+
 use enum_dispatch::enum_dispatch;
+use image::RgbImage;
 
 use crate::geo::vec3::Vec3;
 use crate::material::texture::SolidColor;
@@ -57,6 +60,78 @@ pub enum Materials {
     DiffuseLight,
     /// [`Material`] of type [`Blend`]
     Blend,
+}
+
+impl Materials {
+    /// Calls `f` for every image this material samples through the texture
+    /// atlas: albedo and normal maps, inside a blend too.
+    ///
+    /// Not a light's: its texture is averaged into one radiance and never
+    /// sampled on the device, so packing it into the atlas would only spend
+    /// atlas area.
+    /// Whether the two would flatten to the same GPU material: the same kind,
+    /// the same numbers, and the same images by identity. What lets the
+    /// flattener intern a mesh's material once rather than once per triangle.
+    pub(crate) fn same_as(&self, other: &Materials) -> bool {
+        match (self, other) {
+            (Materials::Lambertian(a), Materials::Lambertian(b)) => {
+                a.albedo.same_as(&b.albedo) && same_normal(&a.normal, &b.normal)
+            }
+            (Materials::Metal(a), Materials::Metal(b)) => {
+                a.fuzz == b.fuzz && a.albedo.same_as(&b.albedo) && same_normal(&a.normal, &b.normal)
+            }
+            (Materials::Dielectric(a), Materials::Dielectric(b)) => {
+                a.index_of_refraction == b.index_of_refraction
+                    && a.roughness == b.roughness
+                    && a.albedo.same_as(&b.albedo)
+                    && same_normal(&a.normal, &b.normal)
+            }
+            (Materials::DiffuseLight(a), Materials::DiffuseLight(b)) => {
+                a.attenuation_factor == b.attenuation_factor && a.tex.same_as(&b.tex)
+            }
+            (Materials::Blend(a), Materials::Blend(b)) => {
+                a.blend_factor == b.blend_factor
+                    && a.material_1.same_as(&b.material_1)
+                    && a.material_2.same_as(&b.material_2)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn for_each_atlas_texture(&self, f: &mut impl FnMut(&Arc<RgbImage>)) {
+        let mut texture = |t: &Textures| {
+            if let Textures::ImageMap(im) = t {
+                f(im.image());
+            }
+        };
+        match self {
+            Materials::Lambertian(m) => {
+                texture(&m.albedo);
+                m.normal.iter().for_each(texture);
+            }
+            Materials::Metal(m) => {
+                texture(&m.albedo);
+                m.normal.iter().for_each(texture);
+            }
+            Materials::Dielectric(m) => {
+                texture(&m.albedo);
+                m.normal.iter().for_each(texture);
+            }
+            Materials::DiffuseLight(_) => {}
+            Materials::Blend(b) => {
+                b.material_1.for_each_atlas_texture(f);
+                b.material_2.for_each_atlas_texture(f);
+            }
+        }
+    }
+}
+
+fn same_normal(a: &Option<Textures>, b: &Option<Textures>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.same_as(b),
+        _ => false,
+    }
 }
 
 /// A typical matte material

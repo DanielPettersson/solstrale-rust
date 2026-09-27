@@ -5,9 +5,25 @@ use crate::util::degrees_to_radians;
 use derive_more::Constructor;
 
 /// A trait used for different transformations on [`Vec3`]
-pub trait Transformer {
+///
+/// `Send + Sync` so a transformation can be applied from several threads at
+/// once, which is how [`Bvh::transformed`](crate::hittable::Bvh::transformed)
+/// re-bakes a mesh.
+pub trait Transformer: Send + Sync {
     /// Applies transformation
     fn transform(&self, _vec: Vec3, _skip_translation: bool) -> Vec3;
+}
+
+impl<T: Transformer + ?Sized> Transformer for Box<T> {
+    fn transform(&self, vec: Vec3, skip_translation: bool) -> Vec3 {
+        (**self).transform(vec, skip_translation)
+    }
+}
+
+impl<T: Transformer + ?Sized> Transformer for std::sync::Arc<T> {
+    fn transform(&self, vec: Vec3, skip_translation: bool) -> Vec3 {
+        (**self).transform(vec, skip_translation)
+    }
 }
 
 /// A transformer that does nothing

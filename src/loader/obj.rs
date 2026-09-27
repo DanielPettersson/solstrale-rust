@@ -519,7 +519,7 @@ mod tests {
             }
         };
 
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             let t = match prim {
                 Hittables::Triangle(t) => t,
                 other => panic!("expected only triangles, got {:?}", other),
@@ -553,7 +553,7 @@ mod tests {
             }
         };
 
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             let t = match prim {
                 Hittables::Triangle(t) => t,
                 other => panic!("expected only triangles, got {:?}", other),
@@ -575,7 +575,7 @@ mod tests {
     /// collapsing or splitting those Arcs is observable downstream.
     fn distinct_albedo_images(bvh: &Bvh) -> usize {
         let mut ptrs: Vec<usize> = bvh
-            .prims
+            .prims()
             .iter()
             .filter_map(|p| match p {
                 Hittables::Triangle(t) => Some(&t.mat),
@@ -600,7 +600,7 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
 
-        assert_eq!(1368, bvh.prims.len());
+        assert_eq!(1368, bvh.prims().len());
         assert_eq!(4, distinct_albedo_images(&bvh));
         assert_eq!(0x7c5a_647c_6fcc_9999, geometry_checksum(&bvh));
     }
@@ -615,7 +615,7 @@ mod tests {
             .load(&transformation, None)
             .unwrap();
 
-        assert_eq!(1368, bvh.prims.len());
+        assert_eq!(1368, bvh.prims().len());
         assert_eq!(0x2f0c_b703_7f6c_30a2, geometry_checksum(&bvh));
         assert_eq!(0x0063_80cc_a792_03f9, shading_checksum(&bvh));
     }
@@ -626,7 +626,7 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
 
-        assert_eq!(12, bvh.prims.len());
+        assert_eq!(12, bvh.prims().len());
         assert_eq!(0x0cf6_1486_0adc_e665, geometry_checksum(&bvh));
     }
 
@@ -641,7 +641,7 @@ mod tests {
         // handed the geometric normal three times. spider.obj ships 747 `vn`
         // records.
         let smooth = bvh
-            .prims
+            .prims()
             .iter()
             .filter_map(|p| match p {
                 Hittables::Triangle(t) => Some(t),
@@ -656,7 +656,7 @@ mod tests {
             smooth > 1000,
             "expected almost every spider triangle to be smooth-shaded, got {} of {}",
             smooth,
-            bvh.prims.len()
+            bvh.prims().len()
         );
 
         // Every normal is a unit vector, which the octahedral packing in the
@@ -664,7 +664,7 @@ mod tests {
         // ships, whose geometric normal is the NaN `unit()` gives for a zero
         // cross product. Those are rejected by Moeller-Trumbore's determinant
         // test and never reach `resolve_hit`, so the assertion excludes them.
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             if let Hittables::Triangle(t) = prim {
                 if t.normal.x.is_nan() {
                     continue;
@@ -687,7 +687,7 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
 
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             let t = match prim {
                 Hittables::Triangle(t) => t,
                 other => panic!("expected only triangles, got {:?}", other),
@@ -714,7 +714,7 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
 
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             let t = match prim {
                 Hittables::Triangle(t) => t,
                 other => panic!("expected only triangles, got {:?}", other),
@@ -735,7 +735,7 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
         let smooth = smoothed
-            .prims
+            .prims()
             .iter()
             .filter_map(|p| match p {
                 Hittables::Triangle(t) => Some(t),
@@ -749,7 +749,7 @@ mod tests {
             .with_generated_normals(45.)
             .load(&NopTransformer(), None)
             .unwrap();
-        for prim in &creased.prims {
+        for prim in creased.prims() {
             if let Hittables::Triangle(t) = prim {
                 assert!(t.n0.dot(t.normal) > 0.9999999);
             }
@@ -767,10 +767,10 @@ mod tests {
         let bvh = Obj::new("resources/obj/", "sphere.obj")
             .load(&NopTransformer(), None)
             .unwrap();
-        assert_eq!(100, bvh.prims.len());
+        assert_eq!(100, bvh.prims().len());
 
         let smooth = bvh
-            .prims
+            .prims()
             .iter()
             .filter_map(|p| match p {
                 Hittables::Triangle(t) => Some(t),
@@ -783,7 +783,7 @@ mod tests {
         // Area weighting should land near the sphere's analytic normal. A
         // sanity bound rather than a precision claim: the bands are not
         // equal-area, and the worst corner measures 6.18 degrees.
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             if let Hittables::Triangle(t) = prim {
                 for (n, v) in [(t.n0, t.v0), (t.n1, t.v0 + t.v0v1), (t.n2, t.v0 + t.v0v2)] {
                     let degrees = n.dot(v.unit()).clamp(-1., 1.).acos().to_degrees();
@@ -800,7 +800,7 @@ mod tests {
             .load(&NopTransformer(), None)
             .unwrap();
 
-        for prim in &bvh.prims {
+        for prim in bvh.prims() {
             let t = match prim {
                 Hittables::Triangle(t) => t,
                 other => panic!("expected only triangles, got {:?}", other),
@@ -816,7 +816,7 @@ mod tests {
     /// Keyed on position because `Bvh::new` reorders, so `prims` order says
     /// nothing about which `usemtl` group a triangle came from.
     fn material_at(bvh: &Bvh, group: usize) -> Materials {
-        bvh.prims
+        bvh.prims()
             .iter()
             .find_map(|p| match p {
                 Hittables::Triangle(t) if t.v0.x == (group * 2) as f64 => Some(t.mat.clone()),
@@ -996,7 +996,7 @@ mod tests {
             ("resources/obj/", "triWithHeightMap.obj"),
         ] {
             let bvh = Obj::new(path, file).load(&NopTransformer(), None).unwrap();
-            for prim in &bvh.prims {
+            for prim in bvh.prims() {
                 if let Hittables::Triangle(t) = prim {
                     assert!(
                         matches!(t.mat, Materials::Lambertian(_)),

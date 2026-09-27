@@ -64,7 +64,7 @@ pub enum DenoiseGuide {
 /// samples per pixel. The cost is per pixel and independent of sample count, so
 /// it matters less the longer the render.
 ///
-/// Place this first in [`crate::renderer::RenderConfig::post_processors`].
+/// Place this first in [`crate::renderer::Scene::post_processors`].
 /// Denoising a bloomed image blurs the bloom; bloom applied to a denoised image
 /// is what you want.
 ///

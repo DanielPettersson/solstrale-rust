@@ -27,6 +27,10 @@
 //!   all three axes and front-to-back ordered GPU traversal
 //! * The tracer is compiled against the scene it is tracing, so a branch the
 //!   scene could never have taken is not in the shader at all
+//! * A running render takes [`renderer::SceneUpdate`]s and applies each for
+//!   what it costs: a new sample count continues the render, a new camera
+//!   restarts it, and a moved mesh is re-baked and re-uploaded alone, with
+//!   nothing else in the scene rebuilt
 //!
 //! ### Post-Processing
 //! Custom GPU-accelerated filters implemented as compute shaders via [WGPU](https://wgpu.rs/):
@@ -77,16 +81,17 @@
 //!     camera,
 //!     background_color: Vec3::new(0.2, 0.3, 0.5),
 //!     render_config: RenderConfig::default(),
+//!     post_processors: vec![],
 //! };
 //!
 //! let (device, queue) = get_wgpu_device_and_queue();
 //!
 //! let (output_sender, output_receiver) = channel();
-//! let (_, camera_config_receiver) = channel();
+//! let (_, update_receiver) = channel();
 //! let (_, abort_receiver) = channel();
 //!
 //! thread::spawn(move || {
-//!     ray_trace(scene, &output_sender, &camera_config_receiver, &abort_receiver, &device, &queue, false).unwrap();
+//!     ray_trace(scene, &output_sender, &update_receiver, &abort_receiver, &device, &queue, false).unwrap();
 //! });
 //!
 //! for render_output in output_receiver {
@@ -103,7 +108,7 @@
 //! ## Credits
 //! The ray tracing is inspired by the excellent [Ray Tracing in One Weekend Book Series](https://github.com/RayTracing/raytracing.github.io) by Peter Shirley
 
-use crate::renderer::{RenderProgress, Scene};
+use crate::renderer::{RenderProgress, Scene, SceneUpdate};
 use renderer::Renderer;
 use std::error::Error;
 use std::sync::mpsc::{Receiver, Sender};
@@ -123,17 +128,18 @@ pub mod util;
 /// # Arguments
 /// * `scene` - A scene describing how, and what should be rendered
 /// * `output` - Channel where render progress will be sent
-/// * `camera_config` - Channel to send updated camera configurations
+/// * `updates` - Channel to send changes to the scene on while it renders; see
+///   [`SceneUpdate`] for what each costs. A camera is one `.into()` away.
 /// * `abort` - Channel to send abort signals to the renderer
-/// * `idle` - If true, the renderer will keep listening for camera updates after finishing the initial samples
+/// * `idle` - If true, the renderer will keep listening for updates after finishing the initial samples
 pub fn ray_trace<'a>(
     scene: Scene,
     output: &'a Sender<RenderProgress>,
-    camera_config: &'a Receiver<crate::camera::CameraConfig>,
+    updates: &'a Receiver<SceneUpdate>,
     abort: &'a Receiver<bool>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     idle: bool,
 ) -> Result<(), Box<dyn Error>> {
-    Renderer::new(scene, device, queue)?.render(output, camera_config, abort, idle)
+    Renderer::new(scene, device, queue)?.render(output, updates, abort, idle)
 }

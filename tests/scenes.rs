@@ -89,6 +89,7 @@ pub fn create_specular_scene(render_config: RenderConfig) -> Scene {
         camera,
         background_color: Vec3::new(0.1, 0.15, 0.25),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -217,6 +218,7 @@ pub fn create_test_scene(render_config: RenderConfig) -> Scene {
         camera,
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -269,6 +271,7 @@ pub fn new_bvh_test_scene(render_config: RenderConfig, nested: bool, num_triangl
         camera,
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -303,6 +306,7 @@ pub fn create_simple_test_scene(render_config: RenderConfig, add_light: bool) ->
         camera,
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -351,6 +355,7 @@ pub fn create_uv_scene(render_config: RenderConfig) -> Scene {
         camera,
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -408,6 +413,7 @@ pub fn create_normal_mapping_scene(
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -440,6 +446,7 @@ pub fn create_normal_mapping_sphere_scene(render_config: RenderConfig, light_pos
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -548,6 +555,7 @@ pub fn create_smooth_vs_flat_scene(render_config: RenderConfig) -> Scene {
         camera,
         background_color: Vec3::new(0.05, 0.06, 0.08),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -596,6 +604,7 @@ pub fn create_obj_scene(render_config: RenderConfig) -> Scene {
         camera,
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -634,6 +643,7 @@ pub fn create_obj_with_box(render_config: RenderConfig, path: &str, filename: &s
         camera,
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -671,6 +681,7 @@ pub fn create_obj_with_triangle(render_config: RenderConfig, path: &str, filenam
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -748,6 +759,7 @@ pub fn create_light_attenuation_scene(
         camera,
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -782,6 +794,7 @@ pub fn create_quad_rotation_scene(
         },
         background_color: Default::default(),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -824,6 +837,7 @@ pub fn create_blend_material_scene(render_config: RenderConfig, blend_factor: f6
         },
         background_color: Default::default(),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -861,6 +875,7 @@ pub fn create_texture_mapping_scene(render_config: RenderConfig) -> Scene {
         },
         background_color: Default::default(),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1000,6 +1015,7 @@ fn cornell_scene(render_config: RenderConfig, world: Vec<Hittables>) -> Scene {
         // other scenes here producing fireflies at all.
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1136,6 +1152,7 @@ pub fn create_many_lights_scene(render_config: RenderConfig) -> Scene {
         // No ambient light: every photon in the image came from one of the 120.
         background_color: ZERO_VECTOR,
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1208,6 +1225,7 @@ pub fn create_srgb_decode_scene(
         },
         background_color: Vec3::new(0., 0., 0.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1286,6 +1304,7 @@ pub fn create_rough_metal_scene(render_config: RenderConfig) -> Scene {
         // environment would flood the lobe and hide the thing being measured.
         background_color: Vec3::new(0.02, 0.03, 0.05),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1409,6 +1428,7 @@ fn rough_glass_scene(
         // environment would flood the lobe and hide the thing being measured.
         background_color: Vec3::new(0.02, 0.03, 0.05) / dim,
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1453,6 +1473,7 @@ pub fn create_furnace_scene(render_config: RenderConfig, material: Materials) ->
         },
         background_color: Vec3::new(1., 1., 1.),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1516,6 +1537,7 @@ pub fn create_wide_light_scene(render_config: RenderConfig) -> Scene {
         },
         background_color: ZERO_VECTOR,
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -1580,5 +1602,131 @@ pub fn create_glass_slab_scene(
         },
         background_color: ZERO_VECTOR,
         render_config,
+        post_processors: vec![],
+    }
+}
+
+/// Triangles tiling the parallelogram from `origin` along `u` and `v`, `n` by
+/// `n` cells of two triangles.
+fn tiled(origin: Vec3, u: Vec3, v: Vec3, n: usize, mat: &Materials) -> Vec<Hittables> {
+    let mut tris = Vec::with_capacity(2 * n * n);
+    let at = |i: usize, j: usize| origin + u * (i as f64 / n as f64) + v * (j as f64 / n as f64);
+    for i in 0..n {
+        for j in 0..n {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            tris.push(Triangle::new(a, b, c, mat.clone(), &NopTransformer()).into());
+            tris.push(Triangle::new(a, c, d, mat.clone(), &NopTransformer()).into());
+        }
+    }
+    tris
+}
+
+/// A sphere of `2 * rings * rings` triangles.
+#[allow(dead_code)]
+pub fn tessellated_sphere(
+    centre: Vec3,
+    radius: f64,
+    rings: usize,
+    mat: &Materials,
+) -> Vec<Hittables> {
+    let point = |i: usize, j: usize| {
+        let theta = std::f64::consts::PI * i as f64 / rings as f64;
+        let phi = 2. * std::f64::consts::PI * j as f64 / rings as f64;
+        centre
+            + Vec3::new(
+                theta.sin() * phi.cos(),
+                theta.cos(),
+                theta.sin() * phi.sin(),
+            ) * radius
+    };
+    let mut tris = Vec::with_capacity(2 * rings * rings);
+    for i in 0..rings {
+        for j in 0..rings {
+            let (a, b, c, d) = (
+                point(i, j),
+                point(i + 1, j),
+                point(i + 1, j + 1),
+                point(i, j + 1),
+            );
+            tris.push(Triangle::new(a, b, c, mat.clone(), &NopTransformer()).into());
+            tris.push(Triangle::new(a, c, d, mat.clone(), &NopTransformer()).into());
+        }
+    }
+    tris
+}
+
+/// Furniture inside a room, every piece a mesh of its own: the case keeping
+/// large meshes apart as subtrees is for, and the one where it costs the most,
+/// since the room's box holds every other box and a ray has to enter several
+/// subtrees that overlap.
+///
+/// `kept_apart` leaves each mesh a subtree; otherwise every triangle goes into
+/// one tree, which is what every world got before subtrees were kept apart.
+#[allow(dead_code)]
+pub fn create_furnished_room_scene(render_config: RenderConfig, kept_apart: bool) -> Scene {
+    let wall: Materials = Lambertian::new(SolidColor::new(0.75, 0.72, 0.68).into(), None).into();
+    let cloth: Materials = Lambertian::new(SolidColor::new(0.6, 0.2, 0.2).into(), None).into();
+    let brass: Materials = Metal::new(SolidColor::new(0.9, 0.7, 0.4).into(), None, 0.3).into();
+
+    let s = 10.;
+    let (x, y, z) = (
+        Vec3::new(s, 0., 0.),
+        Vec3::new(0., s, 0.),
+        Vec3::new(0., 0., s),
+    );
+    let o = Vec3::new(-s / 2., 0., -s / 2.);
+    let mut room = Vec::new();
+    room.extend(tiled(o, x, z, 30, &wall));
+    room.extend(tiled(o + y, z, x, 30, &wall));
+    room.extend(tiled(o, y, x, 30, &wall));
+    room.extend(tiled(o, z, y, 30, &wall));
+    room.extend(tiled(o + x, y, z, 30, &wall));
+    room.extend(tiled(o + z, x, y, 30, &wall));
+
+    let table_top = tiled(
+        Vec3::new(-2., 1.5, -1.5),
+        Vec3::new(4., 0., 0.),
+        Vec3::new(0., 0., 3.),
+        70,
+        &cloth,
+    );
+    let meshes: Vec<Vec<Hittables>> = vec![
+        room,
+        table_top,
+        tessellated_sphere(Vec3::new(-1., 2.3, 0.), 0.8, 72, &brass),
+        tessellated_sphere(Vec3::new(1.2, 2.1, 0.4), 0.6, 72, &cloth),
+        tessellated_sphere(Vec3::new(3., 1., -3.), 1., 72, &brass),
+    ];
+
+    let mut world: Vec<Hittables> = vec![
+        Quad::new(
+            Vec3::new(-1.5, s - 0.01, -1.5),
+            Vec3::new(3., 0., 0.),
+            Vec3::new(0., 0., 3.),
+            DiffuseLight::new(6., 6., 6., None).into(),
+            &NopTransformer(),
+        )
+        .into(),
+    ];
+    for mesh in meshes {
+        if kept_apart {
+            world.push(Bvh::new(mesh).into());
+        } else {
+            world.extend(mesh);
+        }
+    }
+
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 60.,
+            aperture_size: 0.,
+            look_from: Vec3::new(0., 4., 4.8),
+            look_at: Vec3::new(0., 1.8, 0.),
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: Vec3::new(0., 0., 0.),
+        render_config,
+        post_processors: vec![],
     }
 }

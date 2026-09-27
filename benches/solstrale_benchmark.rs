@@ -6,17 +6,17 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use derive_more::{Constructor, Display};
 
 use crate::scenes::{
-    create_many_lights_scene, create_rough_glass_scene, create_rough_metal_scene,
-    create_test_scene, new_bvh_test_scene,
+    create_furnished_room_scene, create_many_lights_scene, create_rough_glass_scene,
+    create_rough_metal_scene, create_test_scene, new_bvh_test_scene,
 };
 use solstrale::camera::CameraConfig;
-use solstrale::geo::transformation::NopTransformer;
+use solstrale::geo::transformation::{NopTransformer, RotationY, Translation};
 use solstrale::geo::vec3::Vec3;
-use solstrale::hittable::{Bvh, Hittables, Triangle};
+use solstrale::hittable::{Bvh, Hittable, Hittables, Quad, Sphere, Triangle};
 use solstrale::loader::Loader;
 use solstrale::loader::obj::Obj;
 use solstrale::material::texture::SolidColor;
@@ -26,7 +26,7 @@ use solstrale::post::{
 };
 use solstrale::ray_trace;
 use solstrale::renderer::scene_flattener::flatten_scene;
-use solstrale::renderer::{RenderConfig, Renderer, Scene};
+use solstrale::renderer::{RenderConfig, Renderer, Scene, SceneUpdate};
 use solstrale::util::tone_map::ToneMapper;
 use solstrale::util::wgpu_util::{buffer_to_image, get_wgpu_device_and_queue};
 
@@ -100,6 +100,7 @@ fn triangle_cloud_scene(render_config: RenderConfig, n: u32) -> Scene {
         },
         background_color: Vec3::new(0.2, 0.3, 0.5),
         render_config,
+        post_processors: vec![],
     }
 }
 
@@ -258,6 +259,376 @@ pub fn obj_load_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+/// The meshes `SOLSTRALE_BENCH_OBJ` names, as `(name, path)`. Several can be
+/// given, separated the way `PATH` is.
+fn bench_objs() -> Vec<(String, PathBuf)> {
+    let Some(paths) = std::env::var_os("SOLSTRALE_BENCH_OBJ") else {
+        return Vec::new();
+    };
+    std::env::split_paths(&paths)
+        .map(|path| {
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("external")
+                .to_string();
+            (name, path)
+        })
+        .collect()
+}
+
+/// A mesh the way an editor holds one: one object of several in a world `Bvh`,
+/// with a floor and a light beside it.
+fn world_around(mesh: Hittables) -> Vec<Hittables> {
+    let b = mesh.bounding_box().clone();
+    let (min, max) = (
+        Vec3::new(b.x.min, b.y.min, b.z.min),
+        Vec3::new(b.x.max, b.y.max, b.z.max),
+    );
+    let size = (max - min).length();
+    vec![
+        mesh,
+        Quad::new(
+            Vec3::new(min.x - size, min.y, min.z - size),
+            Vec3::new(3. * size, 0., 0.),
+            Vec3::new(0., 0., 3. * size),
+            Lambertian::new(SolidColor::new(0.8, 0.8, 0.8).into(), None).into(),
+            &NopTransformer(),
+        )
+        .into(),
+        Sphere::new(
+            (min + max) * 0.5 + Vec3::new(0., size, 0.),
+            size * 0.2,
+            DiffuseLight::new(10., 10., 10., None).into(),
+            &NopTransformer(),
+        )
+        .into(),
+    ]
+}
+
+fn scene_of(world: Vec<Hittables>, render_config: RenderConfig) -> Scene {
+    let b = world[0].bounding_box().clone();
+    let centre = Vec3::new(
+        (b.x.min + b.x.max) / 2.,
+        (b.y.min + b.y.max) / 2.,
+        (b.z.min + b.z.max) / 2.,
+    );
+    let size = Vec3::new(b.x.max - b.x.min, b.y.max - b.y.min, b.z.max - b.z.min).length();
+    Scene {
+        world: Bvh::new(world).into(),
+        camera: CameraConfig {
+            vertical_fov_degrees: 40.,
+            aperture_size: 0.,
+            look_from: centre + Vec3::new(0., size * 0.3, size * 1.2),
+            look_at: centre,
+            up: Vec3::new(0., 1., 0.),
+        },
+        background_color: Vec3::new(0.2, 0.3, 0.5),
+        render_config,
+        post_processors: vec![],
+    }
+}
+
+/// What an edit costs an editor, on the meshes `SOLSTRALE_BENCH_OBJ` names, and
+/// on the 250k grid when it names none.
+///
+/// A full rebuild, which is what every edit but a camera move cost before
+/// `SceneUpdate`, stage by stage:
+///
+/// * `load` -- `Obj::load`, which the editor pays when its model cache misses.
+/// * `clone` -- a cache hit: the editor's cache hands out a clone.
+/// * `world_bvh` -- `Bvh::new` over the world the mesh is one object of.
+/// * `flatten` -- `flatten_scene`, texture packing included.
+/// * `atlas` -- blitting the packed atlas, converting it to RGBA and uploading it.
+/// * `renderer_new` -- all of `Renderer::new`: flatten, atlas, upload and the
+///   tracer's compile.
+///
+/// And the same edits as updates to a running 800x600 render, each timed from
+/// building the update to the first image of the result, so the dispatch that
+/// shows it is in the number:
+///
+/// * `transformed` -- `Bvh::transformed` alone, the re-bake and refit.
+/// * `update_camera` -- the floor: a uniform write and a restart.
+/// * `update_background`, `update_albedo` -- an edit that does not touch the
+///   mesh. The albedo edit is a new world, whose mesh is the same subtree.
+/// * `update_translate` -- the mesh moved: `transformed`, a new world around it,
+///   and the upload of the one segment it rewrites.
+///
+/// And the tracer's compile on its own, as `Renderer::new` on a scene with
+/// nothing in it to flatten:
+///
+/// * `compile_warm` -- the same override set every time, so the driver's shader
+///   cache answers.
+/// * `compile_cold` -- a width no earlier pipeline had, so it cannot. What a
+///   resize, or a world that changes what the tracer is specialised on, costs
+///   the first time.
+pub fn scene_update_benchmark(c: &mut Criterion) {
+    let (device, queue) = get_wgpu_device_and_queue();
+    let mut inputs = bench_objs();
+    if inputs.is_empty() {
+        inputs.push(("grid_250000".to_string(), grid_obj(250_000).clone()));
+    }
+    let render_config = || RenderConfig {
+        width: 800,
+        height: 600,
+        samples_per_pixel: 1,
+        ..RenderConfig::default()
+    };
+
+    let mut group = c.benchmark_group("scene_update");
+    group.sample_size(10);
+
+    let tiny = |width: usize| {
+        scene_of(
+            vec![
+                Sphere::new(
+                    Vec3::new(0., 0., 0.),
+                    1.,
+                    DiffuseLight::new(1., 1., 1., None).into(),
+                    &NopTransformer(),
+                )
+                .into(),
+            ],
+            RenderConfig {
+                width,
+                height: 64,
+                samples_per_pixel: 1,
+                ..RenderConfig::default()
+            },
+        )
+    };
+    group.bench_function("compile_warm", |b| {
+        b.iter_batched(
+            || tiny(64),
+            |scene| Renderer::new(scene, device, queue).unwrap(),
+            BatchSize::PerIteration,
+        )
+    });
+    // Seeded from the clock, so a second run of the bench is cold too.
+    let mut width = 256
+        + (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            % 4096) as usize;
+    group.bench_function("compile_cold", |b| {
+        b.iter_batched(
+            || {
+                width += 1;
+                tiny(width)
+            },
+            |scene| Renderer::new(scene, device, queue).unwrap(),
+            BatchSize::PerIteration,
+        )
+    });
+
+    for (name, path) in &inputs {
+        let (dir, file) = split_obj_path(path);
+        let load = || Obj::new(&dir, &file).load(&NopTransformer(), None).unwrap();
+        let mesh = load();
+
+        group.bench_function(BenchmarkId::new("load", name), |b| {
+            b.iter_with_large_drop(load)
+        });
+        group.bench_function(BenchmarkId::new("clone", name), |b| {
+            b.iter_with_large_drop(|| mesh.clone())
+        });
+        group.bench_function(BenchmarkId::new("world_bvh", name), |b| {
+            b.iter_batched(
+                || world_around(mesh.clone().into()),
+                Bvh::new,
+                BatchSize::LargeInput,
+            )
+        });
+        group.bench_function(BenchmarkId::new("flatten", name), |b| {
+            b.iter_batched(
+                || scene_of(world_around(mesh.clone().into()), render_config()),
+                |scene| flatten_scene(&scene),
+                BatchSize::LargeInput,
+            )
+        });
+
+        let data = flatten_scene(&scene_of(
+            world_around(mesh.clone().into()),
+            render_config(),
+        ));
+        if let Some(layout) = data.atlas_layout.as_ref() {
+            group.bench_function(BenchmarkId::new("atlas", name), |b| {
+                b.iter(|| {
+                    let mut atlas = image::RgbImage::new(layout.width, layout.height);
+                    for placement in layout.placements.iter() {
+                        image::imageops::replace(
+                            &mut atlas,
+                            data.textures[placement.original_index].as_ref(),
+                            placement.x as i64,
+                            placement.y as i64,
+                        );
+                    }
+                    let rgba = image::DynamicImage::ImageRgb8(atlas).to_rgba8();
+                    let extent = wgpu::Extent3d {
+                        width: rgba.width(),
+                        height: rgba.height(),
+                        depth_or_array_layers: 1,
+                    };
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: None,
+                        size: extent,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &rgba,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * rgba.width()),
+                            rows_per_image: Some(rgba.height()),
+                        },
+                        extent,
+                    );
+                    // A write is staged until a submit, and holds its staging
+                    // memory and the texture until then; without this every
+                    // iteration's 256 MiB stays resident.
+                    queue.submit([]);
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    texture
+                })
+            });
+        }
+        drop(data);
+
+        group.bench_function(BenchmarkId::new("renderer_new", name), |b| {
+            b.iter_batched(
+                || scene_of(world_around(mesh.clone().into()), render_config()),
+                |scene| {
+                    let renderer = Renderer::new(scene, device, queue).unwrap();
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    renderer
+                },
+                BatchSize::LargeInput,
+            )
+        });
+
+        let mut angle = 0.;
+        let mut turn = || {
+            angle += 1.;
+            RotationY::new(angle)
+        };
+        group.bench_function(BenchmarkId::new("transformed", name), |b| {
+            b.iter_with_large_drop(|| mesh.transformed(turn()))
+        });
+
+        let scene = scene_of(world_around(mesh.clone().into()), render_config());
+        let camera = scene.camera;
+        let live = LiveRender::start(scene);
+        let world = |albedo: f64, mesh: Bvh| -> Hittables {
+            let mut w = world_around(mesh.into());
+            w.push(
+                Sphere::new(
+                    Vec3::new(0., 0., 0.),
+                    0.1,
+                    Lambertian::new(SolidColor::new(albedo, 0.5, 0.5).into(), None).into(),
+                    &NopTransformer(),
+                )
+                .into(),
+            );
+            Bvh::new(w).into()
+        };
+        let mut i = 0u32;
+        let mut next = || {
+            i += 1;
+            i as f64 / 1000.
+        };
+        group.bench_function(BenchmarkId::new("update_camera", name), |b| {
+            b.iter(|| {
+                let mut c = camera;
+                c.look_from += Vec3::new(next(), 0., 0.);
+                live.frame(c.into())
+            })
+        });
+        group.bench_function(BenchmarkId::new("update_background", name), |b| {
+            b.iter(|| {
+                let mut u = SceneUpdate::default();
+                u.background_color = Some(Vec3::new(0.2, 0.3, next()));
+                live.frame(u)
+            })
+        });
+        group.bench_function(BenchmarkId::new("update_albedo", name), |b| {
+            b.iter(|| {
+                let mut u = SceneUpdate::default();
+                u.world = Some(world(next(), mesh.clone()));
+                live.frame(u)
+            })
+        });
+        group.bench_function(BenchmarkId::new("update_translate", name), |b| {
+            b.iter(|| {
+                let moved = mesh.transformed(Translation::new(Vec3::new(next(), 0., 0.)));
+                let mut u = SceneUpdate::default();
+                u.world = Some(world(0.5, moved));
+                live.frame(u)
+            })
+        });
+        live.stop();
+    }
+    group.finish();
+}
+
+/// A render running on its own thread, idling between updates, the way an
+/// editor's viewport runs one.
+struct LiveRender {
+    updates: std::sync::mpsc::Sender<SceneUpdate>,
+    progress: std::sync::mpsc::Receiver<solstrale::renderer::RenderProgress>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl LiveRender {
+    fn start(scene: Scene) -> LiveRender {
+        let (device, queue) = get_wgpu_device_and_queue();
+        let (updates, update_receiver) = channel();
+        let (output, progress) = channel();
+        let handle = thread::spawn(move || {
+            let (_abort, abort_receiver) = channel();
+            ray_trace(
+                scene,
+                &output,
+                &update_receiver,
+                &abort_receiver,
+                device,
+                queue,
+                true,
+            )
+            .unwrap();
+        });
+        // The first image, so the build is not in any measurement.
+        progress.recv().unwrap();
+        LiveRender {
+            updates,
+            progress,
+            handle,
+        }
+    }
+
+    /// Sends one update and waits for the image it produces.
+    fn frame(&self, update: SceneUpdate) {
+        self.updates.send(update).unwrap();
+        black_box(self.progress.recv().unwrap().progress);
+    }
+
+    fn stop(self) {
+        drop(self.updates);
+        self.handle.join().unwrap();
+    }
+}
+
 /// Times the scene-graph -> flat GPU buffer conversion in isolation.
 pub fn flatten_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("scene_flatten");
@@ -271,6 +642,7 @@ pub fn flatten_benchmark(c: &mut Criterion) {
                     camera: create_test_scene(RenderConfig::default()).camera,
                     background_color: Vec3::new(0.2, 0.3, 0.5),
                     render_config: RenderConfig::default(),
+                    post_processors: vec![],
                 },
                 |scene| black_box(flatten_scene(&scene)),
             );
@@ -532,12 +904,12 @@ pub fn denoise_benchmark(c: &mut Criterion) {
             &(denoiser, *preview),
             |b, (denoiser, preview)| {
                 b.iter_with_setup(
-                    || {
-                        create_test_scene(RenderConfig {
+                    || Scene {
+                        post_processors: (*denoiser).clone().into_iter().collect(),
+                        ..create_test_scene(RenderConfig {
                             samples_per_pixel: 16,
                             width: 800,
                             height: 600,
-                            post_processors: (*denoiser).clone().into_iter().collect(),
                             preview: *preview,
                             ..RenderConfig::default()
                         })
@@ -554,7 +926,12 @@ pub fn denoise_benchmark(c: &mut Criterion) {
 ///
 /// The arms are `nested` and `flat`, not "BVH" and "no BVH": the world is
 /// always wrapped in a top-level [`Bvh`], so the flag only decides whether the
-/// triangles get a sub-BVH of their own. See [`new_bvh_test_scene`].
+/// triangles get a sub-BVH of their own. See [`new_bvh_test_scene`]. At 10000
+/// triangles a nested one is past `SUBTREE_MIN_PRIMS` and kept apart, so
+/// `10000 nested` against `10000 flat` is what a subtree costs on a strip.
+///
+/// `room_kept_apart` against `room_one_tree` is what it costs where it
+/// matters: five meshes inside a room mesh whose box holds all of theirs.
 pub fn bvh_traversal_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("bvh_traversal");
     group.sample_size(10);
@@ -601,6 +978,15 @@ pub fn bvh_traversal_benchmark(c: &mut Criterion) {
     group.bench_function("triangles_only", |b| {
         b.iter_with_setup(|| triangle_cloud_scene(render_config(), n), render_and_sync);
     });
+
+    for (name, kept_apart) in [("room_kept_apart", true), ("room_one_tree", false)] {
+        group.bench_function(name, |b| {
+            b.iter_with_setup(
+                || create_furnished_room_scene(render_config(), kept_apart),
+                render_and_sync,
+            );
+        });
+    }
 
     group.finish();
 }
@@ -661,14 +1047,14 @@ pub fn post_benchmark(c: &mut Criterion) {
             processor,
             |b, processor| {
                 b.iter_with_setup(
-                    || {
-                        // Same size and sample count as `denoise_benchmark`, so
-                        // the two groups' `none` arms are the same measurement.
-                        create_test_scene(RenderConfig {
+                    // Same size and sample count as `denoise_benchmark`, so the
+                    // two groups' `none` arms are the same measurement.
+                    || Scene {
+                        post_processors: processor.clone().into_iter().collect(),
+                        ..create_test_scene(RenderConfig {
                             samples_per_pixel: 16,
                             width: 800,
                             height: 600,
-                            post_processors: processor.clone().into_iter().collect(),
                             ..RenderConfig::default()
                         })
                     },
@@ -728,6 +1114,7 @@ pub fn readback_benchmark(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    scene_update_benchmark,
     obj_load_benchmark,
     bvh_build_benchmark,
     flatten_benchmark,
